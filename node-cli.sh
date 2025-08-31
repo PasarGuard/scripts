@@ -34,7 +34,7 @@ NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 
 if [[ "$1" == "install" || "$1" == "install-script" ]] && [ -z "$APP_NAME" ]; then
-    APP_NAME="gozargah-node"
+    APP_NAME="node-cli"
 fi
 # Set script name if APP_NAME is not set
 if [ -z "$APP_NAME" ]; then
@@ -46,8 +46,8 @@ INSTALL_DIR="/opt"
 
 if [ -d "$INSTALL_DIR/$APP_NAME" ]; then
     APP_DIR="$INSTALL_DIR/$APP_NAME"
-elif [ -d "$INSTALL_DIR/gozargah-node" ]; then
-    APP_DIR="$INSTALL_DIR/gozargah-node"
+elif [ -d "$INSTALL_DIR/node" ]; then
+    APP_DIR="$INSTALL_DIR/node"
 else
     APP_DIR="$INSTALL_DIR/$APP_NAME"
 fi
@@ -58,8 +58,8 @@ ENV_FILE="$APP_DIR/.env"
 SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
 SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
-FETCH_REPO="ImMohammad20000/Marzban-scripts"
-SCRIPT_URL="https://github.com/$FETCH_REPO/raw/master/gozargah-node.sh"
+FETCH_REPO="PasarGuard/scripts"
+SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/node-cli.sh"
 
 colorized_echo() {
     local color=$1
@@ -181,15 +181,15 @@ install_docker() {
     colorized_echo green "Docker installed successfully"
 }
 
-install_gozargah_node_script() {
-    colorized_echo blue "Installing gozargah-node script"
+install_node_script() {
+    colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
     curl -sSL $SCRIPT_URL -o $TARGET_PATH
 
     sed -i "s/^APP_NAME=.*/APP_NAME=\"$APP_NAME\"/" $TARGET_PATH
 
     chmod 755 $TARGET_PATH
-    colorized_echo green "gozargah-node script installed successfully at $TARGET_PATH"
+    colorized_echo green "node script installed successfully at $TARGET_PATH"
 }
 
 # Get a list of occupied ports
@@ -283,11 +283,11 @@ read_and_save_file() {
     done
 }
 
-install_gozargah_node() {
-    local gozargah_node_version=$1
+install_node() {
+    local node_version=$1
 
-    FILES_URL_PREFIX="https://raw.githubusercontent.com/M03ED/gozargah-node/master"
-    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/ImMohammad20000/Marzban-scripts/master"
+    FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/node/main"
+    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/scripts/main"
 
     mkdir -p "$DATA_DIR"
     mkdir -p "$DATA_DIR/certs"
@@ -364,7 +364,7 @@ install_gozargah_node() {
 
     colorized_echo blue "Fetching .env and compose file"
     curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"
-    curl -sL "$COMPOSE_FILES_URL_PREFIX/gozargah-node.yml" -o "$APP_DIR/docker-compose.yml"
+    curl -sL "$COMPOSE_FILES_URL_PREFIX/node.yml" -o "$APP_DIR/docker-compose.yml"
     colorized_echo green "File saved in $APP_DIR/.env"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
 
@@ -381,39 +381,39 @@ install_gozargah_node() {
     colorized_echo green ".env file modified successfully"
 
     # Modifying compose file
-    service_name="gozargah-node"
+    service_name="node"
 
-    if [ "$APP_NAME" != "gozargah-node" ]; then
+    if [ "$APP_NAME" != "node" ]; then
         yq eval ".services[\"$service_name\"].container_name = \"$APP_NAME\"" -i "$APP_DIR/docker-compose.yml"
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:\${(.services[\"$service_name\"].volumes[0] | split(\":\")[1])}\"" -i "$APP_DIR/docker-compose.yml"
     fi
 
-    if [ "$gozargah_node_version" != "latest" ]; then
-        yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${gozargah_node_version}\"))" -i "$APP_DIR/docker-compose.yml"
+    if [ "$node_version" != "latest" ]; then
+        yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml"
     fi
 
     colorized_echo green "compose file modified successfully"
 }
 
-uninstall_gozargah_node_script() {
+uninstall_node_script() {
     if [ -f "/usr/local/bin/$APP_NAME" ]; then
-        colorized_echo yellow "Removing gozargah-node script"
+        colorized_echo yellow "Removing node script"
         rm "/usr/local/bin/$APP_NAME"
     fi
 }
 
-uninstall_gozargah_node() {
+uninstall_node() {
     if [ -d "$APP_DIR" ]; then
         colorized_echo yellow "Removing directory: $APP_DIR"
         rm -r "$APP_DIR"
     fi
 }
 
-uninstall_gozargah_node_docker_images() {
-    images=$(docker images | grep gozargah-node | awk '{print $3}')
+uninstall_node_docker_images() {
+    images=$(docker images | grep node | awk '{print $3}')
 
     if [ -n "$images" ]; then
-        colorized_echo yellow "Removing Docker images of gozargah-node"
+        colorized_echo yellow "Removing Docker images of node"
         for image in $images; do
             if docker rmi "$image" >/dev/null 2>&1; then
                 colorized_echo yellow "Image $image removed"
@@ -422,40 +422,40 @@ uninstall_gozargah_node_docker_images() {
     fi
 }
 
-uninstall_gozargah_node_data_files() {
+uninstall_node_data_files() {
     if [ -d "$DATA_DIR" ]; then
         colorized_echo yellow "Removing directory: $DATA_DIR"
         rm -r "$DATA_DIR"
     fi
 }
 
-up_gozargah_node() {
+up_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" up -d --remove-orphans
 }
 
-down_gozargah_node() {
+down_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" down
 }
 
-show_gozargah_node_logs() {
+show_node_logs() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs
 }
 
-follow_gozargah_node_logs() {
+follow_node_logs() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
 }
 
-update_gozargah_node_script() {
-    colorized_echo blue "Updating gozargah-node script"
+update_node_script() {
+    colorized_echo blue "Updating node script"
     curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/$APP_NAME
-    colorized_echo green "gozargah-node script updated successfully"
+    colorized_echo green "node script updated successfully"
 }
 
-update_gozargah_node() {
+update_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
 }
 
-is_gozargah_node_installed() {
+is_node_installed() {
     if [ -d $APP_DIR ]; then
         return 0
     else
@@ -463,7 +463,7 @@ is_gozargah_node_installed() {
     fi
 }
 
-is_gozargah_node_up() {
+is_node_up() {
     if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
         return 1
     else
@@ -474,29 +474,29 @@ is_gozargah_node_up() {
 install_command() {
     check_running_as_root
     # Default values
-    gozargah_node_version="latest"
-    gozargah_node_version_set="false"
+    node_version="latest"
+    node_version_set="false"
 
     # Parse options
     while [[ $# -gt 0 ]]; do
         key="$1"
         case $key in
         -v | --version)
-            if [[ "$gozargah_node_version_set" == "true" ]]; then
+            if [[ "$node_version_set" == "true" ]]; then
                 colorized_echo red "Error: Cannot use --pre-release and --version options simultaneously."
                 exit 1
             fi
-            gozargah_node_version="$2"
-            gozargah_node_version_set="true"
+            node_version="$2"
+            node_version_set="true"
             shift 2
             ;;
         --pre-release)
-            if [[ "$gozargah_node_version_set" == "true" ]]; then
+            if [[ "$node_version_set" == "true" ]]; then
                 colorized_echo red "Error: Cannot use --pre-release and --version options simultaneously."
                 exit 1
             fi
-            gozargah_node_version="pre-release"
-            gozargah_node_version_set="true"
+            node_version="pre-release"
+            node_version_set="true"
             shift
             ;;
         --name)
@@ -510,9 +510,9 @@ install_command() {
         esac
     done
 
-    # Check if gozargah node is already installed
-    if is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node is already installed at $APP_DIR"
+    # Check if  node is already installed
+    if is_node_installed; then
+        colorized_echo red "node is already installed at $APP_DIR"
         if [ "$AUTO_CONFIRM" = true ]; then
             REPLY=""
         else
@@ -540,12 +540,12 @@ install_command() {
     # Function to check if a version exists in the GitHub releases
     check_version_exists() {
         local version=$1
-        repo_url="https://api.github.com/repos/M03ED/gozargah-node/releases"
+        repo_url="https://api.github.com/repos/M03ED/node/releases"
 
         if [ "$version" == "latest" ]; then
             latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
 
-            # Check if there is any stable release of gozargah node v1
+            # Check if there is any stable release of  node v1
             if [ "$latest_tag" == "null" ]; then
                 return 1
             fi
@@ -559,13 +559,13 @@ install_command() {
             if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
                 return 1 # No releases found at all
             elif [ "$latest_stable_tag" == "null" ]; then
-                gozargah_node_version=$latest_pre_release_tag
+                node_version=$latest_pre_release_tag
             elif [ "$latest_pre_release_tag" == "null" ]; then
-                gozargah_node_version=$latest_stable_tag
+                node_version=$latest_stable_tag
             else
                 # Compare versions using sort -V
                 local chosen_version=$(printf "%s\n" "$latest_stable_tag" "$latest_pre_release_tag" | sort -V | tail -n 1)
-                gozargah_node_version=$chosen_version
+                node_version=$chosen_version
             fi
             return 0
         fi
@@ -578,44 +578,44 @@ install_command() {
         fi
     }
     # Check if the version is valid and exists
-    if [[ "$gozargah_node_version" == "latest" || "$gozargah_node_version" == "pre-release" || "$gozargah_node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        if check_version_exists "$gozargah_node_version"; then
-            install_gozargah_node "$gozargah_node_version"
-            echo "Installing $gozargah_node_version version"
+    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if check_version_exists "$node_version"; then
+            install_node "$node_version"
+            echo "Installing $node_version version"
         else
-            echo "Version $gozargah_node_version does not exist. Please enter a valid version (e.g. v0.5.2)"
+            echo "Version $node_version does not exist. Please enter a valid version (e.g. v0.5.2)"
             exit 1
         fi
     else
         echo "Invalid version format. Please enter a valid version (e.g. v1.0.0)"
         exit 1
     fi
-    install_gozargah_node_script
+    install_node_script
     install_completion
-    up_gozargah_node
-    show_gozargah_node_logs
+    up_node
+    show_node_logs
 
     colorized_echo blue "================================"
-    colorized_echo magenta "Gozargah node is set up with the following IP: $NODE_IP and Port: $SERVICE_PORT."
-    colorized_echo magenta "Please use the following Certificate in Marzban Panel (it's located in ${DATA_DIR}/certs):"
+    colorized_echo magenta " node is set up with the following IP: $NODE_IP and Port: $SERVICE_PORT."
+    colorized_echo magenta "Please use the following Certificate in pasarguard Panel (it's located in ${DATA_DIR}/certs):"
     cat "$SSL_CERT_FILE"
     colorized_echo blue "================================"
-    colorized_echo magenta "Next, use the API Key (UUID v4) in Marzban Panel: "
+    colorized_echo magenta "Next, use the API Key (UUID v4) in pasarguard Panel: "
     colorized_echo red "${API_KEY}"
 }
 
 uninstall_command() {
     check_running_as_root
-    # Check if gozargah node is installed
-    if ! is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node not installed!"
+    # Check if  node is installed
+    if ! is_node_installed; then
+        colorized_echo red "node not installed!"
         exit 1
     fi
 
     if [ "$AUTO_CONFIRM" = true ]; then
         REPLY=""
     else
-        read -p "Do you really want to uninstall gozargah-node? (y/n) "
+        read -p "Do you really want to uninstall node? (y/n) "
     fi
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         colorized_echo red "Aborted"
@@ -623,30 +623,30 @@ uninstall_command() {
     fi
 
     detect_compose
-    if is_gozargah_node_up; then
-        down_gozargah_node
+    if is_node_up; then
+        down_node
     fi
     uninstall_completion
-    uninstall_gozargah_node_script
-    uninstall_gozargah_node
-    uninstall_gozargah_node_docker_images
+    uninstall_node_script
+    uninstall_node
+    uninstall_node_docker_images
 
     if [ "$AUTO_CONFIRM" = true ]; then
         REPLY=""
     else
-        read -p "Do you want to remove gozargah-node data files too ($DATA_DIR)? (y/n) "
+        read -p "Do you want to remove node data files too ($DATA_DIR)? (y/n) "
     fi
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        colorized_echo green "gozargah-node uninstalled successfully"
+        colorized_echo green "node uninstalled successfully"
     else
-        uninstall_gozargah_node_data_files
-        colorized_echo green "gozargah-node uninstalled successfully"
+        uninstall_node_data_files
+        colorized_echo green "node uninstalled successfully"
     fi
 }
 
 up_command() {
     help() {
-        colorized_echo red "Usage: gozargah-node up [options]"
+        colorized_echo red "Usage: node up [options]"
         echo ""
         echo "OPTIONS:"
         echo "  -h, --help        display this help message"
@@ -672,45 +672,45 @@ up_command() {
         shift
     done
 
-    # Check if gozargah-node is installed
-    if ! is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node's not installed!"
+    # Check if node is installed
+    if ! is_node_installed; then
+        colorized_echo red "node's not installed!"
         exit 1
     fi
 
     detect_compose
 
-    if is_gozargah_node_up; then
-        colorized_echo red "gozargah-node's already up"
+    if is_node_up; then
+        colorized_echo red "node's already up"
         exit 1
     fi
 
-    up_gozargah_node
+    up_node
     if [ "$no_logs" = false ]; then
-        follow_gozargah_node_logs
+        follow_node_logs
     fi
 }
 
 down_command() {
-    # Check if gozargah-node is installed
-    if ! is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node not installed!"
+    # Check if node is installed
+    if ! is_node_installed; then
+        colorized_echo red "node not installed!"
         exit 1
     fi
 
     detect_compose
 
-    if ! is_gozargah_node_up; then
-        colorized_echo red "gozargah-node already down"
+    if ! is_node_up; then
+        colorized_echo red "node already down"
         exit 1
     fi
 
-    down_gozargah_node
+    down_node
 }
 
 restart_command() {
     help() {
-        colorized_echo red "Usage: gozargah-node restart [options]"
+        colorized_echo red "Usage: node restart [options]"
         echo
         echo "OPTIONS:"
         echo "  -h, --help        display this help message"
@@ -736,22 +736,22 @@ restart_command() {
         shift
     done
 
-    # Check if gozargah-node is installed
-    if ! is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node not installed!"
+    # Check if node is installed
+    if ! is_node_installed; then
+        colorized_echo red "node not installed!"
         exit 1
     fi
 
     detect_compose
 
-    down_gozargah_node
-    up_gozargah_node
+    down_node
+    up_node
 
 }
 
 status_command() {
-    # Check if gozargah-node is installed
-    if ! is_gozargah_node_installed; then
+    # Check if node is installed
+    if ! is_node_installed; then
         echo -n "Status: "
         colorized_echo red "Not Installed"
         exit 1
@@ -759,7 +759,7 @@ status_command() {
 
     detect_compose
 
-    if ! is_gozargah_node_up; then
+    if ! is_node_up; then
         echo -n "Status: "
         colorized_echo blue "Down"
         exit 1
@@ -786,7 +786,7 @@ status_command() {
 
 logs_command() {
     help() {
-        colorized_echo red "Usage: gozargah-node logs [options]"
+        colorized_echo red "Usage: node logs [options]"
         echo ""
         echo "OPTIONS:"
         echo "  -h, --help        display this help message"
@@ -812,47 +812,47 @@ logs_command() {
         shift
     done
 
-    # Check if gozargah-node is installed
-    if ! is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node's not installed!"
+    # Check if node is installed
+    if ! is_node_installed; then
+        colorized_echo red "node's not installed!"
         exit 1
     fi
 
     detect_compose
 
-    if ! is_gozargah_node_up; then
-        colorized_echo red "gozargah-node is not up."
+    if ! is_node_up; then
+        colorized_echo red "node is not up."
         exit 1
     fi
 
     if [ "$no_follow" = true ]; then
-        show_gozargah_node_logs
+        show_node_logs
     else
-        follow_gozargah_node_logs
+        follow_node_logs
     fi
 }
 
 update_command() {
     check_running_as_root
-    # Check if gozargah-node is installed
-    if ! is_gozargah_node_installed; then
-        colorized_echo red "gozargah-node not installed!"
+    # Check if node is installed
+    if ! is_node_installed; then
+        colorized_echo red "node not installed!"
         exit 1
     fi
 
     detect_compose
 
-    update_gozargah_node_script
+    update_node_script
     uninstall_completion
     install_completion
     colorized_echo blue "Pulling latest version"
-    update_gozargah_node
+    update_node
 
-    colorized_echo blue "Restarting gozargah-node services"
-    down_gozargah_node
-    up_gozargah_node
+    colorized_echo blue "Restarting node services"
+    down_node
+    up_node
 
-    colorized_echo blue "gozargah-node updated successfully"
+    colorized_echo blue "node updated successfully"
 }
 
 identify_the_operating_system_and_architecture() {
@@ -1118,8 +1118,8 @@ update_core_command() {
     sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${DATA_DIR}/xray-core/xray|" "$APP_DIR/.env"
     grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${DATA_DIR}/xray-core/xray" >>"$APP_DIR/.env"
 
-    # Restart gozargah-node
-    colorized_echo red "Restarting gozargah-node..."
+    # Restart node
+    colorized_echo red "Restarting node..."
     $APP_NAME restart -n
     colorized_echo blue "Installation of XRAY-CORE version $selected_version completed."
 }
@@ -1162,7 +1162,7 @@ edit_env_command() {
 
 generate_completion() {
     cat <<'EOF'
-_gozargah_node_completions()
+_node_completions()
 {
     local cur cmds
     COMPREPLY=()
@@ -1172,8 +1172,8 @@ _gozargah_node_completions()
     return 0
 }
 EOF
-    echo "complete -F _gozargah_node_completions gozargah-node.sh"
-    echo "complete -F _gozargah_node_completions $APP_NAME"
+    echo "complete -F _node_completions node.sh"
+    echo "complete -F _node_completions $APP_NAME"
 }
 
 install_completion() {
@@ -1210,11 +1210,11 @@ usage() {
     colorized_echo yellow "  restart         $(tput sgr0)– Restart services"
     colorized_echo yellow "  status          $(tput sgr0)– Show status"
     colorized_echo yellow "  logs            $(tput sgr0)– Show logs"
-    colorized_echo yellow "  install         $(tput sgr0)– Install/reinstall gozargah-node"
+    colorized_echo yellow "  install         $(tput sgr0)– Install/reinstall node"
     colorized_echo yellow "  update          $(tput sgr0)– Update to latest version"
-    colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall gozargah-node"
-    colorized_echo yellow "  install-script  $(tput sgr0)– Install gozargah-node script"
-    colorized_echo yellow "  uninstall-script  $(tput sgr0)– Uninstall gozargah-node script"
+    colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall node"
+    colorized_echo yellow "  install-script  $(tput sgr0)– Install node script"
+    colorized_echo yellow "  uninstall-script  $(tput sgr0)– Uninstall node script"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit .env file (via nano or vi)"
     colorized_echo yellow "  core-update     $(tput sgr0)– Update/Change Xray core"
@@ -1273,10 +1273,10 @@ core-update)
     update_core_command
     ;;
 install-script)
-    install_gozargah_node_script
+    install_node_script
     ;;
 uninstall-script)
-    uninstall_gozargah_node_script
+    uninstall_node_script
     ;;
 edit)
     edit_command

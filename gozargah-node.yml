@@ -1,9 +1,0 @@
-services:
-  gozargah-node:
-    container_name: gozargah-node
-    image: m03ed/gozargah-node:latest
-    restart: always
-    network_mode: host
-    env_file: .env
-    volumes:
-      - /var/lib/gozargah-node:/var/lib/gozargah-node
