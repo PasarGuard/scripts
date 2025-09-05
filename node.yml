@@ -1,9 +1,9 @@
 services:
     node:
-        container_name: node
-        image: PasarGuard/node:latest
+        container_name: pasarguard-node
+        image: pasarguard/node:latest
         restart: always
         network_mode: host
         env_file: .env
         volumes:
-            - /var/lib/node:/var/lib/node
+            - /var/lib/pasarguard:/var/lib/pasarguard
