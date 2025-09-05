@@ -34,7 +34,7 @@ NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 
 if [[ "$1" == "install" || "$1" == "install-script" ]] && [ -z "$APP_NAME" ]; then
-    APP_NAME="node-cli"
+    APP_NAME="pg-node"
 fi
 # Set script name if APP_NAME is not set
 if [ -z "$APP_NAME" ]; then
@@ -59,7 +59,7 @@ SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
 SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
 FETCH_REPO="PasarGuard/scripts"
-SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/node-cli.sh"
+SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node.sh"
 
 colorized_echo() {
     local color=$1
