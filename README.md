@@ -58,34 +58,34 @@
 
 -   **Install Node**
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/node-cli.sh)" @ install
+    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
     ```
 -   **Install Node Manual version:**
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/node-cli.sh)" @ install --version 0.1.0
+    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --version 0.1.0
     ```
 -   **Install Node pre-release version:**
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/node-cli.sh)" @ install --pre-release
+    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --pre-release
     ```
 
 -   **Install Node with custom name:**
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/node-cli.sh)" @ install --name Node2
+    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --name Node2
     ```
 
     > 📌 **Tip:**  
     > The `--name` flag lets you install and manage multiple Node instances using this script.  
-    > For example, running with `--name node-cli2` will create and manage a separate instance named `node-cli2`.  
+    > For example, running with `--name pg-node2` will create and manage a separate instance named `pg-node2`.  
     > You can then control each node individually using its assigned name.
 
 -   **Update or Change Xray-core Version**:
 
     ```bash
-    sudo node-cli core-update
+    sudo pg-node core-update
     ```
 
 Use `help` to view all commands:
-`node-cli help`
+`pg-node help`
