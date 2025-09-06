@@ -383,7 +383,7 @@ install_node() {
     # Modifying compose file
     service_name="node"
 
-    if [ "$APP_NAME" != "node" ]; then
+    if [ "$APP_NAME" != "pg-node" ]; then
         yq eval ".services[\"$service_name\"].container_name = \"$APP_NAME\"" -i "$APP_DIR/docker-compose.yml"
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:\${(.services[\"$service_name\"].volumes[0] | split(\":\")[1])}\"" -i "$APP_DIR/docker-compose.yml"
     fi

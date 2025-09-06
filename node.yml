@@ -1,6 +1,6 @@
 services:
     node:
-        container_name: pasarguard-node
+        container_name: node
         image: pasarguard/node:latest
         restart: always
         network_mode: host
