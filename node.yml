@@ -6,4 +6,4 @@ services:
         network_mode: host
         env_file: .env
         volumes:
-            - /var/lib/pasarguard:/var/lib/pasarguard
+            - /var/lib/pg-node:/var/lib/pg-node
