@@ -1167,7 +1167,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update edit edit-env completion"
+    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles edit edit-env completion"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1218,6 +1218,7 @@ usage() {
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit .env file (via nano or vi)"
     colorized_echo yellow "  core-update     $(tput sgr0)– Update/Change Xray core"
+    colorized_echo yellow "  geofiles        $(tput sgr0)– Download geoip and geosite files for specific regions"
 
     echo
     colorized_echo cyan "Node Information:"
@@ -1238,6 +1239,65 @@ usage() {
     echo
     colorized_echo blue "================================="
     echo
+}
+
+geofiles_command() {
+    check_running_as_root
+    mkdir -p "$DATA_DIR/assets"
+    local restart_needed=false
+    local args_provided=false
+
+    if [[ $# -eq 0 ]]; then
+        colorized_echo blue "No region specified, defaulting to Iran geofiles..."
+        set -- "--iran"
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --iran)
+            colorized_echo blue "Downloading Iran geofiles..."
+            curl -sL "https://github.com/Chocolate4U/Iran-v2ray-rules/releases/latest/download/geoip.dat" -o "$DATA_DIR/assets/geoip.dat"
+            curl -sL "https://github.com/Chocolate4U/Iran-v2ray-rules/releases/latest/download/geosite.dat" -o "$DATA_DIR/assets/geosite.dat"
+            colorized_echo green "Iran geofiles downloaded to $DATA_DIR/assets"
+            restart_needed=true
+            args_provided=true
+            shift
+            ;;
+        --russia)
+            colorized_echo blue "Downloading Russia geofiles..."
+            curl -sL "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$DATA_DIR/assets/geoip.dat"
+            curl -sL "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$DATA_DIR/assets/geosite.dat"
+            colorized_echo green "Russia geofiles downloaded to $DATA_DIR/assets"
+            restart_needed=true
+            args_provided=true
+            shift
+            ;;
+        --china)
+            colorized_echo blue "Downloading China geofiles..."
+            curl -sL "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o "$DATA_DIR/assets/geoip.dat"
+            curl -sL "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o "$DATA_DIR/assets/geosite.dat"
+            colorized_echo green "China geofiles downloaded to $DATA_DIR/assets"
+            restart_needed=true
+            args_provided=true
+            shift
+            ;;
+        *)
+            colorized_echo red "Unknown option: $1"
+            exit 1
+            ;;
+        esac
+    done
+
+    if [ "$restart_needed" = true ]; then
+        sed -i "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $DATA_DIR/assets|" "$ENV_FILE"
+        grep -q '^XRAY_ASSETS_PATH =' "$ENV_FILE" || echo "XRAY_ASSETS_PATH = $DATA_DIR/assets" >> "$ENV_FILE"
+        colorized_echo blue "XRAY_ASSETS_PATH updated in $ENV_FILE"
+        colorized_echo blue "Restarting node services..."
+        restart_command -n
+        colorized_echo green "Geofiles updated and node restarted."
+    else
+        colorized_echo yellow "No geofiles specified for download."
+    fi
 }
 
 case "$1" in
@@ -1271,6 +1331,10 @@ logs)
     ;;
 core-update)
     update_core_command
+    ;;
+geofiles)
+    shift
+    geofiles_command "$@"
     ;;
 install-script)
     install_node_script
