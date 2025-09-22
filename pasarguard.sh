@@ -1105,6 +1105,11 @@ pasarguard_cli() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e CLI_PROG_NAME="pasarguard cli" pasarguard pasarguard-cli "$@"
 }
 
+pasarguard_tui() {
+    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e TUI_PROG_NAME="pasarguard tui" pasarguard pasarguard-tui "$@"
+}
+
+
 is_pasarguard_up() {
     if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
         return 1
@@ -1305,6 +1310,23 @@ cli_command() {
     pasarguard_cli "$@"
 }
 
+tui_command() {
+    # Check if pasarguard is installed
+    if ! is_pasarguard_installed; then
+        colorized_echo red "pasarguard's not installed!"
+        exit 1
+    fi
+
+    detect_compose
+
+    if ! is_pasarguard_up; then
+        colorized_echo red "pasarguard is not up."
+        exit 1
+    fi
+
+    pasarguard_tui "$@"
+}
+
 up_command() {
     help() {
         colorized_echo red "Usage: pasarguard up [options]"
@@ -1430,7 +1452,7 @@ _pasarguard_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs cli install update uninstall install-script backup backup-service core-update edit edit-env help completion"
+    cmds="up down restart status logs cli tui install update uninstall install-script backup backup-service core-update edit edit-env help completion"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1472,6 +1494,7 @@ usage() {
     colorized_echo yellow "  status          $(tput sgr0)– Show status"
     colorized_echo yellow "  logs            $(tput sgr0)– Show logs"
     colorized_echo yellow "  cli             $(tput sgr0)– pasarguard CLI"
+    colorized_echo yellow "  tui             $(tput sgr0)– pasarguard TUI"
     colorized_echo yellow "  install         $(tput sgr0)– Install pasarguard"
     colorized_echo yellow "  update          $(tput sgr0)– Update to latest version"
     colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall pasarguard"
@@ -1515,6 +1538,10 @@ logs)
 cli)
     shift
     cli_command "$@"
+    ;;
+tui)
+    shift
+    tui_command "$@"
     ;;
 backup)
     shift
