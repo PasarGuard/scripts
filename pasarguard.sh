@@ -784,16 +784,6 @@ install_pasarguard() {
 
     fi
 
-    if [ "$major_version" -eq 0 ]; then
-        # Fetch xray config file and set it's path in .env file.
-        colorized_echo blue "Fetching xray config file"
-        curl -sL "$FILES_URL_PREFIX/main/xray_config.json" -o "$DATA_DIR/xray_config.json"
-        colorized_echo green "File saved in $DATA_DIR/xray_config.json"
-
-        sed -i 's/^# \(XRAY_JSON = .*\)$/\1/' "$APP_DIR/.env"
-        sed -i 's~\(XRAY_JSON = \).*~\1"/var/lib/pasarguard/xray_config.json"~' "$APP_DIR/.env"
-    fi
-
     # Install requested version
     if [ "$pasarguard_version" == "latest" ]; then
         yq -i '.services.pasarguard.image = "pasarguard/panel:latest"' "$COMPOSE_FILE"
