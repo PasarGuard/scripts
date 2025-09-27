@@ -786,9 +786,9 @@ install_pasarguard() {
 
     # Install requested version
     if [ "$pasarguard_version" == "latest" ]; then
-        yq -i '.services.PasarGuard.image = "pasarguard/panel:latest"' "$COMPOSE_FILE"
+        yq -i '.services.pasarguard.image = "pasarguard/panel:latest"' "$COMPOSE_FILE"
     else
-        yq -i ".services.PasarGuard.image = \"pasarguard/panel:${pasarguard_version}\"" "$COMPOSE_FILE"
+        yq -i ".services.pasarguard.image = \"pasarguard/panel:${pasarguard_version}\"" "$COMPOSE_FILE"
     fi
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
 
