@@ -530,6 +530,14 @@ backup_command() {
         db_type="mysql"
         container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mysql || echo "mysql")
 
+    elif grep -q "image: postgres" "$COMPOSE_FILE"; then
+        db_type="postgresql"
+        container_name=$(docker compose -f "$COMPOSE_FILE" ps -q postgres || echo "postgres")
+
+    elif grep -q "image: timescale/timescaledb" "$COMPOSE_FILE"; then
+        db_type="timescaledb"
+        container_name=$(docker compose -f "$COMPOSE_FILE" ps -q timescaledb || echo "timescaledb")
+
     elif grep -q "SQLALCHEMY_DATABASE_URL = .*sqlite" "$ENV_FILE"; then
         db_type="sqlite"
         sqlite_file=$(grep -Po '(?<=SQLALCHEMY_DATABASE_URL = "sqlite:////).*"' "$ENV_FILE" | tr -d '"')
@@ -550,6 +558,16 @@ backup_command() {
         mysql)
             if ! docker exec "$container_name" mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                 error_messages+=("MySQL dump failed.")
+            fi
+            ;;
+        postgresql)
+            if ! docker exec "$container_name" pg_dumpall -U "$DB_USER" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                error_messages+=("PostgreSQL dump failed.")
+            fi
+            ;;
+        timescaledb)
+            if ! docker exec "$container_name" pg_dumpall -U "$DB_USER" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                error_messages+=("TimescaleDB dump failed.")
             fi
             ;;
         sqlite)
