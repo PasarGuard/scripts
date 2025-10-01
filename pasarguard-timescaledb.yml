@@ -39,7 +39,7 @@ services:
     volumes:
       - pgadmin:/var/lib/pgadmin
     depends_on:
-      postgresql:
+      timescaledb:
         condition: service_healthy
 
 volumes:
