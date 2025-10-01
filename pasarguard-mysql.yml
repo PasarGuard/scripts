@@ -54,3 +54,16 @@ services:
             interval: 5s
             timeout: 5s
             retries: 55
+
+    phpmyadmin:
+        container_name: phpmyadmin
+        image: phpmyadmin:latest
+        restart: always
+        env_file: .env
+        network_mode: host
+        environment:
+            PMA_HOST: 127.0.0.1
+            APACHE_PORT: 8010
+            UPLOAD_LIMIT: 1024M
+        depends_on:
+            - mysql
