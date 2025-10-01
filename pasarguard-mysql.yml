@@ -66,4 +66,5 @@ services:
       APACHE_PORT: 8010
       UPLOAD_LIMIT: 1024M
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy

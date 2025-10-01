@@ -55,4 +55,5 @@ services:
       APACHE_PORT: 8010
       UPLOAD_LIMIT: 1024M
     depends_on:
-      - mariadb
+      mariadb:
+        condition: service_healthy
