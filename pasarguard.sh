@@ -530,7 +530,7 @@ backup_command() {
         db_type="mysql"
         container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mysql || echo "mysql")
 
-    elif grep -q "image: postgresql" "$COMPOSE_FILE"; then
+    elif grep -q "image: postgres" "$COMPOSE_FILE"; then
         db_type="postgresql"
         container_name=$(docker compose -f "$COMPOSE_FILE" ps -q postgresql || echo "postgresql")
 
