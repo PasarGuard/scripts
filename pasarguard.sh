@@ -556,7 +556,10 @@ backup_command() {
             fi
             ;;
         mysql)
-            if ! docker exec "$container_name" mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+            databases=$(docker exec "$container_name" mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
+            if [ -z "$databases" ]; then
+                echo "No user databases found to backup" >>"$log_file"
+            elif ! docker exec "$container_name" mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                 error_messages+=("MySQL dump failed.")
             fi
             ;;
