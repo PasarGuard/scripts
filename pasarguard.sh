@@ -227,7 +227,7 @@ send_backup_to_telegram() {
         return
     fi
 
-    local server_ip=$(curl -s ifconfig.me || echo "Unknown IP")
+    local server_ip=$(curl -4 -s ifconfig.me || echo "Unknown IP")
     local latest_backup=$(ls -t "$APP_DIR/backup" | head -n 1)
     local backup_path="$APP_DIR/backup/$latest_backup"
 
