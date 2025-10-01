@@ -1,28 +1,46 @@
 services:
-    pasarguard:
-        image: pasarguard/panel:latest
-        restart: always
-        env_file: .env
-        network_mode: host
-        volumes:
-            - /var/lib/pasarguard:/var/lib/pasarguard
-        depends_on:
-            timescaledb:
-                condition: service_healthy
+  pasarguard:
+    image: pasarguard/panel:latest
+    restart: always
+    env_file: .env
+    network_mode: host
+    volumes:
+      - /var/lib/pasarguard:/var/lib/pasarguard
+    depends_on:
+      timescaledb:
+        condition: service_healthy
 
-    timescaledb:
-        image: timescale/timescaledb:latest-pg17
-        restart: always
-        environment:
-            POSTGRES_DB: ${DB_NAME}
-            POSTGRES_USER: ${DB_USER}
-            POSTGRES_PASSWORD: ${DB_PASSWORD}
-        ports:
-            - "127.0.0.1:5432:5432"
-        volumes:
-            - /var/lib/postgresql/pasarguard:/var/lib/postgresql/
-        healthcheck:
-            test: ["CMD-SHELL", "pg_isready -q -d ${DB_NAME} -U ${DB_USER}"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
+  timescaledb:
+    image: timescale/timescaledb:latest-pg17
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - /var/lib/postgresql/pasarguard:/var/lib/postgresql/
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -q -d ${DB_NAME} -U ${DB_USER}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 8010
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
+volumes:
+  pgadmin:

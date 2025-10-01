@@ -757,21 +757,24 @@ install_pasarguard() {
         DB_USER="pasarguard"
         prompt_for_db_password
 
-        if [[ "$database_type" == "postgresql" || "$database_type" == "timescaledb" ]]; then
-            DB_PORT="5432"
-        else
-            DB_PORT="3306"
-        fi
-
         echo "" >>"$ENV_FILE"
         echo "# Database configuration" >>"$ENV_FILE"
-        echo "DB_NAME= ${DB_NAME}" >>"$ENV_FILE"
-        echo "DB_USER= ${DB_USER}" >>"$ENV_FILE"
-        echo "DB_PASSWORD= ${DB_PASSWORD}" >>"$ENV_FILE"
+        echo "DB_NAME=${DB_NAME}" >>"$ENV_FILE"
+        echo "DB_USER=${DB_USER}" >>"$ENV_FILE"
+        echo "DB_PASSWORD=${DB_PASSWORD}" >>"$ENV_FILE"
 
-        if [[ "$database_type" == "mysql" || "$database_type" == "mariadb" ]]; then
+        if [[ "$database_type" == "postgresql" || "$database_type" == "timescaledb" ]]; then
+            DB_PORT="5432"
+            prompt_for_pgadmin_password
+            echo "" >>"$ENV_FILE"
+            echo "# PGAdmin configuration" >>"$ENV_FILE"
+            echo "PGADMIN_EMAIL=pg@github.io" >>"$ENV_FILE"
+            echo "PGADMIN_PASSWORD=${PGADMIN_PASSWORD}" >>"$ENV_FILE"
+        else
+            colorized_echo green "phpMyAdmin address: 0.0.0.0:8010"
+            DB_PORT="3306"
             MYSQL_ROOT_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
-            echo "MYSQL_ROOT_PASSWORD= $MYSQL_ROOT_PASSWORD" >>"$ENV_FILE"
+            echo "MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD" >>"$ENV_FILE"
         fi
 
         if [ "$major_version" -eq 1 ]; then
@@ -784,7 +787,7 @@ install_pasarguard() {
 
         echo "" >>"$ENV_FILE"
         echo "# SQLAlchemy Database URL" >>"$ENV_FILE"
-        echo "SQLALCHEMY_DATABASE_URL= \"$SQLALCHEMY_DATABASE_URL\"" >>"$ENV_FILE"
+        echo "SQLALCHEMY_DATABASE_URL=\"$SQLALCHEMY_DATABASE_URL\"" >>"$ENV_FILE"
 
     else
         echo "----------------------------"
@@ -872,6 +875,22 @@ prompt_for_db_password() {
         DB_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
         colorized_echo green "A secure password has been generated automatically."
     fi
+    colorized_echo green "This password will be recorded in the .env file for future use."
+
+}
+
+prompt_for_pgadmin_password() {
+    # Prompt for password input
+    read -p "Enter the password for PGAdmin panel (or press Enter to generate a secure default password): " PGADMIN_PASSWORD
+
+    # Generate a 20-character password if the user leaves the input empty
+    if [ -z "$PGADMIN_PASSWORD" ]; then
+        PGADMIN_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+        colorized_echo green "A secure password has been generated automatically."
+    fi
+    colorized_echo green "pgAdmin address: 0.0.0.0:8010"
+    colorized_echo green "pgAdmin default email: pg@github.io"
+    colorized_echo green "pgAdmin Password: $PGADMIN_PASSWORD"
     colorized_echo green "This password will be recorded in the .env file for future use."
 
 }
