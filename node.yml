@@ -1,9 +1,9 @@
 services:
-    node:
-        container_name: node
-        image: pasarguard/node:latest
-        restart: always
-        network_mode: host
-        env_file: .env
-        volumes:
-            - /var/lib/pg-node:/var/lib/pg-node
+  node:
+    container_name: node
+    image: pasarguard/node:latest
+    restart: always
+    network_mode: host
+    env_file: .env
+    volumes:
+      - /var/lib/pg-node:/var/lib/pg-node
