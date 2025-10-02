@@ -604,121 +604,6 @@ backup_command() {
     send_backup_to_telegram "$backup_file"
 }
 
-get_xray_core() {
-    identify_the_operating_system_and_architecture
-    clear
-
-    validate_version() {
-        local version="$1"
-
-        local response=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases/tags/$version")
-        if echo "$response" | grep -q '"message": "Not Found"'; then
-            echo "invalid"
-        else
-            echo "valid"
-        fi
-    }
-
-    print_menu() {
-        clear
-        echo -e "\033[1;32m==============================\033[0m"
-        echo -e "\033[1;32m      Xray-core Installer     \033[0m"
-        echo -e "\033[1;32m==============================\033[0m"
-        echo -e "\033[1;33mAvailable Xray-core versions:\033[0m"
-        for ((i = 0; i < ${#versions[@]}; i++)); do
-            echo -e "\033[1;34m$((i + 1)):\033[0m ${versions[i]}"
-        done
-        echo -e "\033[1;32m==============================\033[0m"
-        echo -e "\033[1;35mM:\033[0m Enter a version manually"
-        echo -e "\033[1;31mQ:\033[0m Quit"
-        echo -e "\033[1;32m==============================\033[0m"
-    }
-
-    latest_releases=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=$LAST_XRAY_CORES")
-
-    versions=($(echo "$latest_releases" | grep -oP '"tag_name": "\K(.*?)(?=")'))
-
-    while true; do
-        print_menu
-        read -p "Choose a version to install (1-${#versions[@]}), or press M to enter manually, Q to quit: " choice
-
-        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#versions[@]}" ]; then
-            choice=$((choice - 1))
-            selected_version=${versions[choice]}
-            break
-        elif [ "$choice" == "M" ] || [ "$choice" == "m" ]; then
-            while true; do
-                read -p "Enter the version manually (e.g., v1.2.3): " custom_version
-                if [ "$(validate_version "$custom_version")" == "valid" ]; then
-                    selected_version="$custom_version"
-                    break 2
-                else
-                    echo -e "\033[1;31mInvalid version or version does not exist. Please try again.\033[0m"
-                fi
-            done
-        elif [ "$choice" == "Q" ] || [ "$choice" == "q" ]; then
-            echo -e "\033[1;31mExiting.\033[0m"
-            exit 0
-        else
-            echo -e "\033[1;31mInvalid choice. Please try again.\033[0m"
-            sleep 2
-        fi
-    done
-
-    echo -e "\033[1;32mSelected version $selected_version for installation.\033[0m"
-
-    # Check if the required packages are installed
-    if ! command -v unzip >/dev/null 2>&1; then
-        echo -e "\033[1;33mInstalling required packages...\033[0m"
-        detect_os
-        install_package unzip
-    fi
-    if ! command -v wget >/dev/null 2>&1; then
-        echo -e "\033[1;33mInstalling required packages...\033[0m"
-        detect_os
-        install_package wget
-    fi
-
-    mkdir -p $DATA_DIR/xray-core
-    cd $DATA_DIR/xray-core
-
-    xray_filename="Xray-linux-$ARCH.zip"
-    xray_download_url="https://github.com/XTLS/Xray-core/releases/download/${selected_version}/${xray_filename}"
-
-    echo -e "\033[1;33mDownloading Xray-core version ${selected_version}...\033[0m"
-    wget -q -O "${xray_filename}" "${xray_download_url}"
-
-    echo -e "\033[1;33mExtracting Xray-core...\033[0m"
-    unzip -o "${xray_filename}" >/dev/null 2>&1
-    rm "${xray_filename}"
-}
-
-# Function to update the pasarguard Main core
-update_core_command() {
-    check_running_as_root
-    get_xray_core
-    # Change the pasarguard core
-    xray_executable_path="XRAY_EXECUTABLE_PATH=\"/var/lib/pasarguard/xray-core/xray\""
-    echo "Changing the pasarguard core..."
-    # Check if the XRAY_EXECUTABLE_PATH string already exists in the .env file
-    if ! grep -q "^XRAY_EXECUTABLE_PATH=" "$ENV_FILE"; then
-        # If the string does not exist, add it
-        echo "${xray_executable_path}" >>"$ENV_FILE"
-    else
-        # Update the existing XRAY_EXECUTABLE_PATH line
-        sed -i "s~^XRAY_EXECUTABLE_PATH=.*~${xray_executable_path}~" "$ENV_FILE"
-    fi
-
-    # Restart pasarguard
-    colorized_echo red "Restarting pasarguard..."
-    if restart_command -n >/dev/null 2>&1; then
-        colorized_echo green "pasarguard successfully restarted!"
-    else
-        colorized_echo red "pasarguard restart failed!"
-    fi
-    colorized_echo blue "Installation of Xray-core version $selected_version completed."
-}
-
 install_pasarguard() {
     local pasarguard_version=$1
     local major_version=$2
@@ -1531,7 +1416,6 @@ usage() {
     colorized_echo yellow "  install-script  $(tput sgr0)– Install pasarguard script"
     colorized_echo yellow "  backup          $(tput sgr0)– Manual backup launch"
     colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backupservice to backup to TG, and a new job in crontab"
-    colorized_echo yellow "  core-update     $(tput sgr0)– Update/Change Xray core"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit environment file (via nano or vi editor)"
     colorized_echo yellow "  help            $(tput sgr0)– Show this help message"
@@ -1596,10 +1480,6 @@ uninstall)
 install-script)
     shift
     install_pasarguard_script "$@"
-    ;;
-core-update)
-    shift
-    update_core_command "$@"
     ;;
 edit)
     shift
