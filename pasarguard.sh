@@ -1415,7 +1415,7 @@ usage() {
     colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall pasarguard"
     colorized_echo yellow "  install-script  $(tput sgr0)– Install pasarguard script"
     colorized_echo yellow "  backup          $(tput sgr0)– Manual backup launch"
-    colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backupservice to backup to TG, and a new job in crontab"
+    colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backup service to backup to TG, and a new job in crontab"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit environment file (via nano or vi editor)"
     colorized_echo yellow "  help            $(tput sgr0)– Show this help message"
