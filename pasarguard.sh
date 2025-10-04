@@ -540,7 +540,7 @@ backup_command() {
 
     elif grep -q "SQLALCHEMY_DATABASE_URL = .*sqlite" "$ENV_FILE"; then
         db_type="sqlite"
-        sqlite_file=$(grep -Po '(?<=SQLALCHEMY_DATABASE_URL = "sqlite:////).*"' "$ENV_FILE" | tr -d '"')
+        sqlite_file=$(grep -oP 'SQLALCHEMY_DATABASE_URL = "sqlite\+aiosqlite:///\K[^"]+' "$ENV_FILE")
         if [[ ! "$sqlite_file" =~ ^/ ]]; then
             sqlite_file="/$sqlite_file"
         fi
