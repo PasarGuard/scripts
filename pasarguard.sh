@@ -57,7 +57,7 @@ detect_os() {
     elif [ -f /etc/redhat-release ]; then
         OS=$(cat /etc/redhat-release | awk '{print $1}')
     elif [ -f /etc/arch-release ]; then
-        OS="Arch"
+        OS="Arch Linux"
     else
         colorized_echo red "Unsupported operating system"
         exit 1
