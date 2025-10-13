@@ -20,7 +20,7 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - /var/lib/postgresql/pasarguard:/var/lib/postgresql/
+      - /var/lib/postgresql/pasarguard:/var/lib/postgresql/data
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -q -d ${DB_NAME} -U ${DB_USER}" ]
       interval: 10s
