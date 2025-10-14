@@ -318,7 +318,33 @@ install_node() {
     fi
     if [[ -z "$API_KEY" ]]; then
         # Generate a valid UUIDv4
-        API_KEY=$(uuidgen)
+        if command -v uuidgen >/dev/null 2>&1; then
+            API_KEY=$(uuidgen)
+        elif command -v python3 >/dev/null 2>&1; then
+            API_KEY=$(python3 -c "import uuid; print(uuid.uuid4())")
+        elif command -v python >/dev/null 2>&1; then
+            API_KEY=$(python -c "import uuid; print(uuid.uuid4())")
+        else
+            # Try to install uuid-runtime package
+            colorized_echo yellow "uuidgen not found, attempting to install..."
+            if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
+                install_package uuid-runtime
+            elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]] || [[ "$OS" == "Fedora"* ]]; then
+                install_package util-linux
+            elif [[ "$OS" == "Arch"* ]]; then
+                install_package util-linux
+            elif [[ "$OS" == "openSUSE"* ]]; then
+                install_package util-linux
+            fi
+            
+            # Try uuidgen again after installation
+            if command -v uuidgen >/dev/null 2>&1; then
+                API_KEY=$(uuidgen)
+            else
+                # Fallback to manual UUID generation
+                API_KEY=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(od -x /dev/urandom | head -1 | awk '{OFS="-"; print $2$3,$4,$5,$6,$7$8$9}')")
+            fi
+        fi
         colorized_echo green "No API Key provided. A random UUID version 4 has been generated"
     fi
 
