@@ -318,7 +318,7 @@ install_node() {
     fi
     if [[ -z "$API_KEY" ]]; then
         # Generate a valid UUIDv4
-        API_KEY=$(uuidgen)
+        API_KEY=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python -c "import uuid; print(uuid.uuid4())")
         colorized_echo green "No API Key provided. A random UUID version 4 has been generated"
     fi
 
