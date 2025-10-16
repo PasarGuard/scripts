@@ -924,6 +924,22 @@ install_command() {
     fi
     install_completion
     up_pasarguard
+
+    echo
+    colorized_echo blue "=============================="
+    colorized_echo yellow "PasarGuard doesn't have any core by default."
+    colorized_echo yellow "You need at least one node for proxy connection."
+    echo
+    colorized_echo cyan "Want to install node on same server?"
+    colorized_echo red "(Not recommended for commercial use)"
+    echo
+    read -p "Do you want to install PasarGuard node? (y/n) " install_node_choice
+    if [[ $install_node_choice =~ ^[Yy]$ ]]; then
+        install_node_command
+    else
+        colorized_echo yellow "Skipping node installation."
+    fi
+
     follow_pasarguard_logs
 }
 
@@ -1360,6 +1376,28 @@ edit_env_command() {
     fi
 }
 
+install_node_command() {
+    colorized_echo blue "=============================="
+    colorized_echo magenta "   Install PasarGuard Node   "
+    colorized_echo blue "=============================="
+    echo
+
+    if [ "$(id -u)" = "0" ]; then
+        colorized_echo blue "Running node installation with sudo..."
+        sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
+    else
+        colorized_echo blue "Running node installation without sudo..."
+        bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
+    fi
+
+    if [ $? -eq 0 ]; then
+        colorized_echo green "Node installation completed successfully!"
+    else
+        colorized_echo red "Node installation failed."
+        exit 1
+    fi
+}
+
 generate_completion() {
     cat <<'EOF'
 _pasarguard_completions()
@@ -1367,7 +1405,7 @@ _pasarguard_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs cli tui install update uninstall install-script backup backup-service core-update edit edit-env help completion"
+    cmds="up down restart status logs cli tui install update uninstall install-script install-node backup backup-service core-update edit edit-env help completion"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1414,6 +1452,7 @@ usage() {
     colorized_echo yellow "  update          $(tput sgr0)– Update to latest version"
     colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall pasarguard"
     colorized_echo yellow "  install-script  $(tput sgr0)– Install pasarguard script"
+    colorized_echo yellow "  install-node    $(tput sgr0)– Install PasarGuard node"
     colorized_echo yellow "  backup          $(tput sgr0)– Manual backup launch"
     colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backup service to backup to TG, and a new job in crontab"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
@@ -1480,6 +1519,10 @@ uninstall)
 install-script)
     shift
     install_pasarguard_script "$@"
+    ;;
+install-node)
+    shift
+    install_node_command "$@"
     ;;
 edit)
     shift
