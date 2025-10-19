@@ -220,6 +220,21 @@ is_port_occupied() {
     fi
 }
 
+validate_san_entry() {
+    local entry="$1"
+    # Remove leading/trailing whitespace
+    entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    # Check if entry is in format DNS:value or IP:value
+    if [[ "$entry" =~ ^DNS:.+ ]]; then
+        return 0
+    elif [[ "$entry" =~ ^IP:.+ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 gen_self_signed_cert() {
     local san_entries=("DNS:localhost" "IP:127.0.0.1")
 
@@ -237,23 +252,70 @@ gen_self_signed_cert() {
     if [ "$AUTO_CONFIRM" = true ]; then
         extra_san=""
     else
-        read -rp "Enter additional SAN entries (comma separated), or leave empty to keep current: " extra_san
+        # Temporarily disable exit on error for user input
+        set +e
+        read -rp "Enter additional SAN entries (comma separated, format: DNS:example.com or IP:1.2.3.4), or leave empty to keep current: " extra_san
+        local read_status=$?
+        set -e
+
+        # Check if read was interrupted (Ctrl+C)
+        if [ $read_status -ne 0 ]; then
+            colorized_echo yellow "Input cancelled, using default SAN entries only"
+            extra_san=""
+        fi
     fi
 
     if [[ -n "$extra_san" ]]; then
+        # Split input by comma and validate each entry
         IFS=',' read -ra user_entries <<<"$extra_san"
-        san_entries+=("${user_entries[@]}")
+        local valid_entries=()
+        local invalid_entries=()
+
+        for entry in "${user_entries[@]}"; do
+            # Trim whitespace
+            entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+            if [ -n "$entry" ]; then
+                if validate_san_entry "$entry"; then
+                    valid_entries+=("$entry")
+                else
+                    invalid_entries+=("$entry")
+                fi
+            fi
+        done
+
+        # Show validation results
+        if [ ${#invalid_entries[@]} -gt 0 ]; then
+            colorized_echo yellow "Warning: Invalid SAN entries ignored: ${invalid_entries[*]}"
+            colorized_echo yellow "Valid format examples: DNS:example.com, IP:192.168.1.1, IP:2001:db8::1"
+        fi
+
+        if [ ${#valid_entries[@]} -gt 0 ]; then
+            san_entries+=("${valid_entries[@]}")
+            colorized_echo green "Added ${#valid_entries[@]} valid SAN entry/entries"
+        fi
     fi
 
     # Join SAN entries into a comma-separated string and remove duplicates
     local san_string
-    san_string=$(printf '%s\n' "${san_entries[@]}" | sort -u | paste -sd, -)
+    san_string=$(printf '%s\n' "${san_entries[@]}" | sort -u | paste -sd, - 2>/dev/null)
 
-    openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY_FILE" \
+    # Check if san_string was created successfully
+    if [ -z "$san_string" ]; then
+        colorized_echo red "Error: Failed to process SAN entries"
+        exit 1
+    fi
+
+    # Generate certificate
+    if openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY_FILE" \
         -out "$SSL_CERT_FILE" -days 36500 -nodes \
         -subj "/CN=$NODE_IP" \
-        -addext "subjectAltName = $san_string" >/dev/null 2>&1
-
+        -addext "subjectAltName = $san_string" >/dev/null 2>&1; then
+        colorized_echo green "Certificate generated successfully with SAN: $san_string"
+    else
+        colorized_echo red "Error: Failed to generate certificate"
+        exit 1
+    fi
 }
 
 read_and_save_file() {
