@@ -35,6 +35,7 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_ADDRESS: 127.0.0.1
       PGADMIN_LISTEN_PORT: 8010
     volumes:
       - pgadmin:/var/lib/pgadmin
