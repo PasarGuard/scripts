@@ -447,7 +447,16 @@ install_node() {
 
     if [ "$APP_NAME" != "pg-node" ]; then
         yq eval ".services[\"$service_name\"].container_name = \"$APP_NAME\"" -i "$APP_DIR/docker-compose.yml"
-        yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:\${(.services[\"$service_name\"].volumes[0] | split(\":\")[1])}\"" -i "$APP_DIR/docker-compose.yml"
+    fi
+
+    # Keep the container mount path but point the host path at DATA_DIR
+    existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
+    if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
+        container_path="${existing_volume#*:}"
+        if [ "$container_path" = "$existing_volume" ]; then
+            container_path="$existing_volume"
+        fi
+        yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
     fi
 
     if [ "$node_version" != "latest" ]; then
