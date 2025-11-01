@@ -341,8 +341,9 @@ backup_service() {
         echo "Choose an option:"
         echo "1. Reconfigure Backup Service"
         echo "2. Remove Backup Service"
-        echo "3. Exit"
-        read -p "Enter your choice (1-3): " user_choice
+        echo "3. Request Instant Backup"
+        echo "4. Exit"
+        read -p "Enter your choice (1-4): " user_choice
 
         case $user_choice in
         1)
@@ -355,6 +356,12 @@ backup_service() {
             return
             ;;
         3)
+            colorized_echo yellow "Starting instant backup..."
+            backup_command
+            colorized_echo green "Instant backup completed."
+            return
+            ;;
+        4)
             colorized_echo yellow "Exiting..."
             return
             ;;
