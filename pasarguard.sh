@@ -447,10 +447,25 @@ backup_service() {
 
     colorized_echo green "Backup service configuration saved in $ENV_FILE."
 
-    local backup_command="$(which bash) -c '$APP_NAME backup'"
+    # Use full path to the script for cron job
+    local script_path="/usr/local/bin/$APP_NAME"
+    if [ ! -f "$script_path" ]; then
+        script_path=$(which "$APP_NAME" 2>/dev/null || echo "/usr/local/bin/$APP_NAME")
+    fi
+    # Set PATH for cron to ensure docker and other tools are found
+    local backup_command="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash $script_path backup"
     add_cron_job "$cron_schedule" "$backup_command"
 
     colorized_echo green "Backup service successfully configured."
+    
+    # Run initial backup
+    colorized_echo blue "Running initial backup..."
+    backup_command
+    if [ $? -eq 0 ]; then
+        colorized_echo green "Initial backup completed successfully."
+    else
+        colorized_echo yellow "Initial backup completed with warnings. Check logs if needed."
+    fi
     if [[ "$interval_hours" -eq 24 ]]; then
         colorized_echo cyan "Backups will be sent to Telegram daily (every 24 hours at midnight)."
     else
@@ -589,7 +604,13 @@ edit_backup_service() {
 
             sed -i "s|^BACKUP_CRON_SCHEDULE=.*|BACKUP_CRON_SCHEDULE=\"$new_cron_schedule\"|" "$ENV_FILE"
             
-            local backup_command="$(which bash) -c '$APP_NAME backup'"
+            # Use full path to the script for cron job
+            local script_path="/usr/local/bin/$APP_NAME"
+            if [ ! -f "$script_path" ]; then
+                script_path=$(which "$APP_NAME" 2>/dev/null || echo "/usr/local/bin/$APP_NAME")
+            fi
+            # Set PATH for cron to ensure docker and other tools are found
+            local backup_command="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash $script_path backup"
             local temp_cron=$(mktemp)
             crontab -l 2>/dev/null >"$temp_cron" || true
             grep -v "# pasarguard-backup-service" "$temp_cron" >"${temp_cron}.tmp" && mv "${temp_cron}.tmp" "$temp_cron"
@@ -658,8 +679,11 @@ backup_command() {
         install_package rsync
     fi
 
-    rm -rf "$backup_dir"
+    # Ensure backup directory exists (don't delete it, just create if needed)
     mkdir -p "$backup_dir"
+    
+    # Clean up temp directory completely before starting
+    rm -rf "$temp_dir"
     mkdir -p "$temp_dir"
 
     if [ -f "$ENV_FILE" ]; then
@@ -1139,13 +1163,25 @@ backup_command() {
     fi
     
     colorized_echo blue "Copying data directory..."
-    if ! rsync -av --exclude 'xray-core' --exclude 'mysql' "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
-        error_messages+=("Failed to copy data directory.")
-        echo "Failed to copy data directory" >>"$log_file"
+    # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
+    if [ -d "$DATA_DIR" ]; then
+        if ! rsync -av --exclude 'xray-core' --exclude 'mysql' "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
+            error_messages+=("Failed to copy data directory.")
+            echo "Failed to copy data directory" >>"$log_file"
+        fi
+    else
+        colorized_echo yellow "Data directory $DATA_DIR does not exist. Skipping data directory backup."
+        echo "Data directory $DATA_DIR does not exist. Skipping." >>"$log_file"
+        # Create empty directory structure so tar doesn't fail
+        mkdir -p "$temp_dir/pasarguard_data"
     fi
 
     colorized_echo blue "Creating backup archive..."
-    if ! tar -czf "$backup_file" -C "$temp_dir" . 2>>"$log_file"; then
+    # Verify temp_dir exists and has content before creating archive
+    if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
+        error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
+        echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
+    elif ! tar -czf "$backup_file" -C "$temp_dir" . 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
@@ -1153,6 +1189,7 @@ backup_command() {
         colorized_echo green "Backup archive created: $backup_file (Size: $backup_size)"
     fi
 
+    # Clean up temp directory after archive is created
     rm -rf "$temp_dir"
 
     if [ ${#error_messages[@]} -gt 0 ]; then
