@@ -602,7 +602,8 @@ edit_backup_service() {
             fi
             rm -f "$temp_cron"
             break
-            ;;
+        done
+        ;;
     4)
         colorized_echo yellow "Edit cancelled."
         return
