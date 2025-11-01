@@ -707,7 +707,7 @@ backup_command() {
         
         # Extract database type from scheme
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
-            db_type="sqlite"
+        db_type="sqlite"
             # Extract SQLite file path
             # SQLite URLs: sqlite:///relative/path or sqlite:////absolute/path
             local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
@@ -831,27 +831,60 @@ backup_command() {
         colorized_echo blue "Database detected: $db_type"
         case $db_type in
         mariadb)
-            # Use root password from env if available, otherwise use parsed password
-            local backup_user="${db_user:-root}"
-            local backup_password="${MYSQL_ROOT_PASSWORD:-$db_password}"
-            
             if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
                 # Local Docker container
-                if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                    error_messages+=("MariaDB dump failed.")
+                # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
+                if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                    colorized_echo blue "Backing up all MariaDB databases from container: $container_name (using root user)"
+                    if docker exec "$container_name" mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "MariaDB backup completed successfully (all databases)"
+                    else
+                        # Fallback to SQL URL credentials for specific database
+                        colorized_echo yellow "Root backup failed, falling back to app user for specific database"
+                        local backup_user="${db_user:-${DB_USER:-}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                        
+                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("MariaDB backup failed - root backup failed and fallback credentials incomplete.")
+                        else
+                            colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
+                            if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                colorized_echo red "MariaDB dump failed. Check log file for details."
+                                error_messages+=("MariaDB dump failed.")
+                            else
+                                colorized_echo green "MariaDB backup completed successfully"
+                            fi
+                        fi
+                    fi
+                else
+                    # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
+                    local backup_user="${db_user:-${DB_USER:-}}"
+                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                    
+                    if [ -z "$backup_password" ]; then
+                        colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                        error_messages+=("MariaDB password not found.")
+                    elif [ -z "$db_name" ]; then
+                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                        error_messages+=("MariaDB database name not found.")
+                    else
+                        colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
+                        if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo red "MariaDB dump failed. Check log file for details."
+                            error_messages+=("MariaDB dump failed.")
+                        else
+                            colorized_echo green "MariaDB backup completed successfully"
+                        fi
+                    fi
                 fi
             else
                 # Remote database - would need mariadb-client installed
+                colorized_echo red "Remote MariaDB backup not yet supported. Please use local database or install mariadb-client."
                 error_messages+=("Remote MariaDB backup not yet supported. Please use local database or install mariadb-client.")
             fi
             ;;
         mysql)
-            # Use root password from env if available, otherwise use parsed password
-            local backup_user="${db_user:-root}"
-            local backup_password="${MYSQL_ROOT_PASSWORD:-$db_password}"
-            
-            echo "MySQL backup - host: $db_host, container: $container_name, user: $backup_user" >>"$log_file"
-            
             if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
                 if [ -z "$container_name" ]; then
                     colorized_echo red "Error: MySQL container not found. Is the container running?"
@@ -859,16 +892,69 @@ backup_command() {
                     error_messages+=("MySQL container not found or not running.")
                 else
                     # Local Docker container
-                    colorized_echo blue "Backing up MySQL database from container: $container_name"
-                    databases=$(docker exec "$container_name" mysql -u "$backup_user" -p"$backup_password" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
-                    if [ -z "$databases" ]; then
-                        colorized_echo yellow "No user databases found to backup"
-                        echo "No user databases found to backup" >>"$log_file"
-                    elif ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                        colorized_echo red "MySQL dump failed. Check log file for details."
-                        error_messages+=("MySQL dump failed.")
+                    # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
+                    if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                        colorized_echo blue "Backing up all MySQL databases from container: $container_name (using root user)"
+                        databases=$(docker exec "$container_name" mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
+                        if [ -z "$databases" ]; then
+                            colorized_echo yellow "No user databases found, falling back to specific database backup"
+                            # Fallback to SQL URL credentials
+                            local backup_user="${db_user:-${DB_USER:-}}"
+                            local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                            
+                            if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                                colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                                error_messages+=("MySQL backup failed - no databases found and fallback credentials incomplete.")
+                            else
+                                colorized_echo blue "Backing up MySQL database '$db_name' from container: $container_name (using app user)"
+                                if ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                    colorized_echo red "MySQL dump failed. Check log file for details."
+                                    error_messages+=("MySQL dump failed.")
+                                else
+                                    colorized_echo green "MySQL backup completed successfully"
+                                fi
+                            fi
+                        elif ! docker exec "$container_name" mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            # Root backup failed, fallback to SQL URL credentials
+                            colorized_echo yellow "Root backup failed, falling back to app user for specific database"
+                            local backup_user="${db_user:-${DB_USER:-}}"
+                            local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                            
+                            if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                                colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                                error_messages+=("MySQL backup failed - root backup failed and fallback credentials incomplete.")
+                            else
+                                colorized_echo blue "Backing up MySQL database '$db_name' from container: $container_name (using app user)"
+                                if ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                    colorized_echo red "MySQL dump failed. Check log file for details."
+                                    error_messages+=("MySQL dump failed.")
+                                else
+                                    colorized_echo green "MySQL backup completed successfully"
+                                fi
+                            fi
+                        else
+                            colorized_echo green "MySQL backup completed successfully (all databases)"
+                        fi
                     else
-                        colorized_echo green "MySQL backup completed successfully"
+                        # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
+                        local backup_user="${db_user:-${DB_USER:-}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                        
+                        if [ -z "$backup_password" ]; then
+                            colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                            error_messages+=("MySQL password not found.")
+                        elif [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("MySQL database name not found.")
+                        else
+                            colorized_echo blue "Backing up MySQL database '$db_name' from container: $container_name (using app user)"
+                            if ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                colorized_echo red "MySQL dump failed. Check log file for details."
+                                error_messages+=("MySQL dump failed.")
+                            else
+                                colorized_echo green "MySQL backup completed successfully"
+                            fi
+                        fi
                     fi
                 fi
             else
@@ -878,40 +964,124 @@ backup_command() {
             fi
             ;;
         postgresql)
-            # Use parsed credentials with fallback to env
-            local backup_user="${db_user:-${DB_USER:-postgres}}"
-            local backup_password="${db_password:-${DB_PASSWORD:-}}"
-            
             if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
                 # Local Docker container
-                if [ -n "$backup_password" ]; then
-                    export PGPASSWORD="$backup_password"
+                # Try postgres superuser with DB_PASSWORD first for pg_dumpall (all databases)
+                if [ -n "${DB_PASSWORD:-}" ]; then
+                    colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using postgres superuser)"
+                    export PGPASSWORD="$DB_PASSWORD"
+                    if docker exec "$container_name" pg_dumpall -U postgres >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "PostgreSQL backup completed successfully (all databases)"
+                        unset PGPASSWORD
+                    else
+                        # Fallback to pg_dump with SQL URL credentials
+                        unset PGPASSWORD
+                        colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
+                        local backup_user="${db_user:-${DB_USER:-postgres}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                        
+                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("PostgreSQL backup failed - pg_dumpall failed and fallback credentials incomplete.")
+                        else
+                            colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
+                            export PGPASSWORD="$backup_password"
+                            if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                colorized_echo red "PostgreSQL dump failed. Check log file for details."
+                                error_messages+=("PostgreSQL dump failed.")
+                            else
+                                colorized_echo green "PostgreSQL backup completed successfully"
+                            fi
+                            unset PGPASSWORD
+                        fi
+                    fi
+                else
+                    # No DB_PASSWORD, use SQL URL credentials for pg_dump
+                    local backup_user="${db_user:-${DB_USER:-postgres}}"
+                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                    
+                    if [ -z "$backup_password" ]; then
+                        colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                        error_messages+=("PostgreSQL password not found.")
+                    elif [ -z "$db_name" ]; then
+                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                        error_messages+=("PostgreSQL database name not found.")
+                    else
+                        colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
+                        export PGPASSWORD="$backup_password"
+                        if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo red "PostgreSQL dump failed. Check log file for details."
+                            error_messages+=("PostgreSQL dump failed.")
+                        else
+                            colorized_echo green "PostgreSQL backup completed successfully"
+                        fi
+                        unset PGPASSWORD
+                    fi
                 fi
-                if ! docker exec "$container_name" pg_dumpall -U "$backup_user" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                    error_messages+=("PostgreSQL dump failed.")
-                fi
-                unset PGPASSWORD
             else
                 # Remote database - would need postgresql-client installed
+                colorized_echo red "Remote PostgreSQL backup not yet supported. Please use local database or install postgresql-client."
                 error_messages+=("Remote PostgreSQL backup not yet supported. Please use local database or install postgresql-client.")
             fi
             ;;
         timescaledb)
-            # Use parsed credentials with fallback to env
-            local backup_user="${db_user:-${DB_USER:-postgres}}"
-            local backup_password="${db_password:-${DB_PASSWORD:-}}"
-            
             if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
                 # Local Docker container
-                if [ -n "$backup_password" ]; then
-                    export PGPASSWORD="$backup_password"
+                # Try postgres superuser with DB_PASSWORD first for pg_dumpall (all databases)
+                if [ -n "${DB_PASSWORD:-}" ]; then
+                    colorized_echo blue "Backing up all TimescaleDB databases from container: $container_name (using postgres superuser)"
+                    export PGPASSWORD="$DB_PASSWORD"
+                    if docker exec "$container_name" pg_dumpall -U postgres >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "TimescaleDB backup completed successfully (all databases)"
+                        unset PGPASSWORD
+                    else
+                        # Fallback to pg_dump with SQL URL credentials
+                        unset PGPASSWORD
+                        colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
+                        local backup_user="${db_user:-${DB_USER:-postgres}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                        
+                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("TimescaleDB backup failed - pg_dumpall failed and fallback credentials incomplete.")
+                        else
+                            colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using app user)"
+                            export PGPASSWORD="$backup_password"
+                            if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                colorized_echo red "TimescaleDB dump failed. Check log file for details."
+                                error_messages+=("TimescaleDB dump failed.")
+                            else
+                                colorized_echo green "TimescaleDB backup completed successfully"
+                            fi
+                            unset PGPASSWORD
+                        fi
+                    fi
+                else
+                    # No DB_PASSWORD, use SQL URL credentials for pg_dump
+                    local backup_user="${db_user:-${DB_USER:-postgres}}"
+                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                    
+                    if [ -z "$backup_password" ]; then
+                        colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                        error_messages+=("TimescaleDB password not found.")
+                    elif [ -z "$db_name" ]; then
+                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                        error_messages+=("TimescaleDB database name not found.")
+                    else
+                        colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using app user)"
+                        export PGPASSWORD="$backup_password"
+                        if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo red "TimescaleDB dump failed. Check log file for details."
+                            error_messages+=("TimescaleDB dump failed.")
+                        else
+                            colorized_echo green "TimescaleDB backup completed successfully"
+                        fi
+                        unset PGPASSWORD
+                    fi
                 fi
-                if ! docker exec "$container_name" pg_dumpall -U "$backup_user" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                    error_messages+=("TimescaleDB dump failed.")
-                fi
-                unset PGPASSWORD
             else
                 # Remote database - would need postgresql-client installed
+                colorized_echo red "Remote TimescaleDB backup not yet supported. Please use local database or install postgresql-client."
                 error_messages+=("Remote TimescaleDB backup not yet supported. Please use local database or install postgresql-client.")
             fi
             ;;
