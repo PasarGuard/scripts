@@ -227,7 +227,18 @@ send_backup_to_telegram() {
         return
     fi
 
-    local server_ip=$(curl -4 -s ifconfig.me || echo "Unknown IP")
+    # Validate Telegram configuration
+    if [ -z "$BACKUP_TELEGRAM_BOT_KEY" ]; then
+        colorized_echo red "Error: BACKUP_TELEGRAM_BOT_KEY is not set in .env file"
+        return 1
+    fi
+
+    if [ -z "$BACKUP_TELEGRAM_CHAT_ID" ]; then
+        colorized_echo red "Error: BACKUP_TELEGRAM_CHAT_ID is not set in .env file"
+        return 1
+    fi
+
+    local server_ip=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || hostname -I 2>/dev/null | awk '{print $1}' || echo "Unknown IP")
     local latest_backup=$(ls -t "$APP_DIR/backup" | head -n 1)
     local backup_path="$APP_DIR/backup/$latest_backup"
 
@@ -255,14 +266,40 @@ send_backup_to_telegram() {
     for part in "$split_dir"/*; do
         local part_name=$(basename "$part")
         local custom_filename="backup_${part_name}.tar.gz"
-        local caption="📦 *Backup Information*\n🌐 *Server IP*: \`${server_ip}\`\n📁 *Backup File*: \`${custom_filename}\`\n⏰ *Backup Time*: \`${backup_time}\`"
-        curl -s -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
+        # Escape special characters in variables first (only MarkdownV2 specials)
+        local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+        local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+        local escaped_time=$(printf '%s' "$backup_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+
+        local caption="📦 *Backup Information*
+🌐 *Server IP*: \`$escaped_server_ip\`
+📁 *Backup File*: \`$escaped_filename\`
+⏰ *Backup Time*: \`$escaped_time\`"
+
+        local response=$(curl -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
-            -F caption="$(echo -e "$caption" | sed 's/-/\\-/g;s/\./\\./g;s/_/\\_/g')" \
+            -F caption="$(printf '%b' "$caption")" \
             -F parse_mode="MarkdownV2" \
-            "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" >/dev/null 2>&1 &&
-            colorized_echo green "Backup part $custom_filename successfully sent to Telegram." ||
-            colorized_echo red "Failed to send backup part $custom_filename to Telegram."
+            "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
+        
+        local http_code=$(echo "$response" | tail -n1)
+        local response_body=$(echo "$response" | sed '$d')
+        
+        if [ "$http_code" == "200" ]; then
+            # Check if response contains "ok":true
+            if echo "$response_body" | grep -q '"ok":true'; then
+                colorized_echo green "Backup part $custom_filename successfully sent to Telegram."
+            else
+                # Extract error message from Telegram response
+                local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "Unknown error")
+                colorized_echo red "Failed to send backup part $custom_filename to Telegram: $error_msg"
+                echo "Telegram API Response: $response_body" >&2
+            fi
+        else
+            local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "HTTP $http_code")
+            colorized_echo red "Failed to send backup part $custom_filename to Telegram: $error_msg"
+            echo "Telegram API Response: $response_body" >&2
+        fi
     done
 
     rm -rf "$split_dir"
@@ -271,18 +308,25 @@ send_backup_to_telegram() {
 send_backup_error_to_telegram() {
     local error_messages=$1
     local log_file=$2
-    local server_ip=$(curl -s ifconfig.me || echo "Unknown IP")
+    local server_ip=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || hostname -I 2>/dev/null | awk '{print $1}' || echo "Unknown IP")
     local error_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
-    local message="⚠️ *Backup Error Notification*\n"
-    message+="🌐 *Server IP*: \`${server_ip}\`\n"
-    message+="❌ *Errors*:\n\`${error_messages//_/\\_}\`\n"
-    message+="⏰ *Time*: \`${error_time}\`"
+    # Escape special characters in variables first (only MarkdownV2 specials)
+    local escaped_error_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+    local escaped_errors=$(printf '%s' "$error_messages" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+    local escaped_error_time=$(printf '%s' "$error_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
 
-    message=$(echo -e "$message" | sed 's/-/\\-/g;s/\./\\./g;s/_/\\_/g;s/(/\\(/g;s/)/\\)/g')
+    local message="⚠️ *Backup Error Notification*
+🌐 *Server IP*: \`$escaped_error_ip\`
+❌ *Errors*:
+\`$escaped_errors\`
+⏰ *Time*: \`$escaped_error_time\`"
+
+    message=$(printf '%b' "$message")
 
     local max_length=1000
     if [ ${#message} -gt $max_length ]; then
-        message="${message:0:$((max_length - 50))}...\n\`[Message truncated]\`"
+        message="${message:0:$((max_length - 50))}...
+\`[Message truncated]\`"
     fi
 
     curl -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
@@ -293,10 +337,14 @@ send_backup_error_to_telegram() {
         colorized_echo red "Failed to send error notification to Telegram."
 
     if [ -f "$log_file" ]; then
+        # Escape the error_time for the log caption (only MarkdownV2 specials)
+        local escaped_log_time=$(printf '%s' "$error_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+
         response=$(curl -s -w "%{http_code}" -o /tmp/tg_response.json \
             -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$log_file;filename=backup_error.log" \
-            -F caption="📜 *Backup Error Log* - ${error_time}" \
+            -F caption="📜 *Backup Error Log* \\- $escaped_log_time" \
+            -F parse_mode="MarkdownV2" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument")
 
         http_code="${response:(-3)}"
