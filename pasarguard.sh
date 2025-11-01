@@ -322,47 +322,67 @@ backup_service() {
     colorized_echo blue "====================================="
 
     if grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
-        telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
-        telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
-        cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+        while true; do
+            telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+            telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+            cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
 
-        if [[ "$cron_schedule" == "0 0 * * *" ]]; then
-            interval_hours=24
-        else
-            interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
-        fi
+            if [[ "$cron_schedule" == "0 0 * * *" ]]; then
+                interval_hours=24
+            else
+                interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
+            fi
 
-        colorized_echo green "====================================="
-        colorized_echo green "Current Backup Configuration:"
-        colorized_echo cyan "Telegram Bot API Key: $telegram_bot_key"
-        colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
-        colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
-        colorized_echo green "====================================="
-        echo "Choose an option:"
-        echo "1. Reconfigure Backup Service"
-        echo "2. Remove Backup Service"
-        echo "3. Exit"
-        read -p "Enter your choice (1-3): " user_choice
+            colorized_echo green "====================================="
+            colorized_echo green "Current Backup Configuration:"
+            colorized_echo cyan "Telegram Bot API Key: $telegram_bot_key"
+            colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
+            colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
+            colorized_echo green "====================================="
+            echo "Choose an option:"
+            echo "1. Check Backup Service"
+            echo "2. Edit Backup Service"
+            echo "3. Reconfigure Backup Service"
+            echo "4. Remove Backup Service"
+            echo "5. Request Instant Backup"
+            echo "6. Exit"
+            read -p "Enter your choice (1-6): " user_choice
 
-        case $user_choice in
-        1)
-            colorized_echo yellow "Starting reconfiguration..."
-            remove_backup_service
-            ;;
-        2)
-            colorized_echo yellow "Removing Backup Service..."
-            remove_backup_service
-            return
-            ;;
-        3)
-            colorized_echo yellow "Exiting..."
-            return
-            ;;
-        *)
-            colorized_echo red "Invalid choice. Exiting."
-            return
-            ;;
-        esac
+            case $user_choice in
+            1)
+                view_backup_service
+                echo ""
+                ;;
+            2)
+                edit_backup_service
+                echo ""
+                ;;
+            3)
+                colorized_echo yellow "Starting reconfiguration..."
+                remove_backup_service
+                break
+                ;;
+            4)
+                colorized_echo yellow "Removing Backup Service..."
+                remove_backup_service
+                return
+                ;;
+            5)
+                colorized_echo yellow "Starting instant backup..."
+                backup_command
+                colorized_echo green "Instant backup completed."
+                echo ""
+                ;;
+            6)
+                colorized_echo yellow "Exiting..."
+                return
+                ;;
+            *)
+                colorized_echo red "Invalid choice. Please try again."
+                echo ""
+                ;;
+            esac
+        done
     else
         colorized_echo yellow "No backup service is currently configured."
     fi
@@ -454,6 +474,147 @@ add_cron_job() {
         colorized_echo red "Failed to add cron job. Please check manually."
     fi
     rm -f "$temp_cron"
+}
+
+view_backup_service() {
+    if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
+        colorized_echo red "Backup service is not configured."
+        return 1
+    fi
+
+    local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+    local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+    local interval_hours=""
+
+    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
+        interval_hours=24
+    else
+        interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
+    fi
+
+    colorized_echo blue "====================================="
+    colorized_echo blue "      Backup Service Details         "
+    colorized_echo blue "====================================="
+    colorized_echo green "Status: Enabled"
+    colorized_echo cyan "Telegram Bot API Key: $telegram_bot_key"
+    colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
+    colorized_echo cyan "Cron Schedule: $cron_schedule"
+    if [[ "$interval_hours" -eq 24 ]]; then
+        colorized_echo cyan "Backup Interval: Daily at midnight (every 24 hours)"
+    else
+        colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
+    fi
+    colorized_echo blue "====================================="
+    echo ""
+    read -p "Press Enter to continue..."
+}
+
+edit_backup_service() {
+    if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
+        colorized_echo red "Backup service is not configured."
+        return 1
+    fi
+
+    local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+    local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+    local interval_hours=""
+
+    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
+        interval_hours=24
+    else
+        interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
+    fi
+
+    colorized_echo blue "====================================="
+    colorized_echo blue "      Edit Backup Service            "
+    colorized_echo blue "====================================="
+    echo "Current configuration:"
+    colorized_echo cyan "1. Telegram Bot API Key: $telegram_bot_key"
+    colorized_echo cyan "2. Telegram Chat ID: $telegram_chat_id"
+    colorized_echo cyan "3. Backup Interval: Every $interval_hours hour(s)"
+    colorized_echo yellow "4. Cancel"
+    echo ""
+    read -p "Which setting would you like to edit? (1-4): " edit_choice
+
+    case $edit_choice in
+    1)
+        while true; do
+            printf "Enter new Telegram bot API key [current: $telegram_bot_key]: "
+            read new_bot_key
+            if [[ -n "$new_bot_key" ]]; then
+                sed -i "s|^BACKUP_TELEGRAM_BOT_KEY=.*|BACKUP_TELEGRAM_BOT_KEY=$new_bot_key|" "$ENV_FILE"
+                colorized_echo green "Telegram Bot API Key updated successfully."
+                break
+            else
+                colorized_echo red "API key cannot be empty. Please try again."
+            fi
+        done
+        ;;
+    2)
+        while true; do
+            printf "Enter new Telegram chat ID [current: $telegram_chat_id]: "
+            read new_chat_id
+            if [[ -n "$new_chat_id" ]]; then
+                sed -i "s|^BACKUP_TELEGRAM_CHAT_ID=.*|BACKUP_TELEGRAM_CHAT_ID=$new_chat_id|" "$ENV_FILE"
+                colorized_echo green "Telegram Chat ID updated successfully."
+                break
+            else
+                colorized_echo red "Chat ID cannot be empty. Please try again."
+            fi
+        done
+        ;;
+    3)
+        while true; do
+            printf "Set new backup interval in hours (1-24) [current: $interval_hours]:\n"
+            read new_interval_hours
+
+            if ! [[ "$new_interval_hours" =~ ^[0-9]+$ ]]; then
+                colorized_echo red "Invalid input. Please enter a valid number."
+                continue
+            fi
+
+            local new_cron_schedule=""
+            if [[ "$new_interval_hours" -eq 24 ]]; then
+                new_cron_schedule="0 0 * * *"
+                colorized_echo green "Setting backup to run daily at midnight."
+            elif [[ "$new_interval_hours" -ge 1 && "$new_interval_hours" -le 23 ]]; then
+                new_cron_schedule="0 */$new_interval_hours * * *"
+                colorized_echo green "Setting backup to run every $new_interval_hours hour(s)."
+            else
+                colorized_echo red "Invalid input. Please enter a number between 1-24."
+                continue
+            fi
+
+            sed -i "s|^BACKUP_CRON_SCHEDULE=.*|BACKUP_CRON_SCHEDULE=\"$new_cron_schedule\"|" "$ENV_FILE"
+            
+            local backup_command="$(which bash) -c '$APP_NAME backup'"
+            local temp_cron=$(mktemp)
+            crontab -l 2>/dev/null >"$temp_cron" || true
+            grep -v "# pasarguard-backup-service" "$temp_cron" >"${temp_cron}.tmp" && mv "${temp_cron}.tmp" "$temp_cron"
+            echo "$new_cron_schedule $backup_command # pasarguard-backup-service" >>"$temp_cron"
+
+            if crontab "$temp_cron"; then
+                colorized_echo green "Backup interval and cron schedule updated successfully."
+            else
+                colorized_echo red "Failed to update cron job. Please check manually."
+            fi
+            rm -f "$temp_cron"
+            break
+        done
+        ;;
+    4)
+        colorized_echo yellow "Edit cancelled."
+        return
+        ;;
+    *)
+        colorized_echo red "Invalid choice."
+        return
+        ;;
+    esac
+
+    colorized_echo green "Backup service configuration updated successfully."
 }
 
 remove_backup_service() {
