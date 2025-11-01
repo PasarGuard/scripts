@@ -679,7 +679,8 @@ backup_command() {
         install_package rsync
     fi
 
-    # Ensure backup directory exists (don't delete it, just create if needed)
+    # Remove old backups before creating new one (keep only latest)
+    rm -f "$backup_dir"/backup_*.tar.gz
     mkdir -p "$backup_dir"
     
     # Clean up temp directory completely before starting
