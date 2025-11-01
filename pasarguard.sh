@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
+# Handle @ symbol if used in installation (skip it)
+if [ "$1" == "@" ]; then
+    shift
+fi
+
 INSTALL_DIR="/opt"
 if [ -z "$APP_NAME" ]; then
     APP_NAME="pasarguard"
@@ -126,6 +131,118 @@ detect_compose() {
         colorized_echo red "docker compose not found"
         exit 1
     fi
+}
+
+find_container() {
+    local db_type=$1
+    local container_name=""
+    detect_compose
+    
+    case $db_type in
+    mariadb)
+        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mariadb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1 || true)
+        [ -z "$container_name" ] && container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
+        [ -z "$container_name" ] && container_name="mariadb"
+        ;;
+    mysql)
+        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mysql mariadb 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
+        [ -z "$container_name" ] && container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mysql" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
+        [ -z "$container_name" ] && container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
+        [ -z "$container_name" ] && container_name="mysql"
+        ;;
+    postgresql|timescaledb)
+        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
+        [ -z "$container_name" ] && container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json timescaledb postgresql 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
+        [ -z "$container_name" ] && container_name="${APP_NAME}-timescaledb-1"
+        ;;
+    esac
+    echo "$container_name"
+}
+
+check_container() {
+    local container_name=$1
+    local db_type=$2
+    local actual_container=""
+    
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        actual_container="$container_name"
+    else
+        case $db_type in
+        mariadb)
+            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mariadb-1"
+            ;;
+        mysql)
+            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mysql-1"
+            ;;
+        postgresql|timescaledb)
+            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
+            [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-postgresql-1"
+            ;;
+        esac
+    fi
+    
+    [ -z "$actual_container" ] && { echo ""; return 1; }
+    container_name="$actual_container"
+    docker ps --filter "id=${container_name}" --format '{{.ID}}' 2>/dev/null | grep -q . || \
+    docker ps --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null | grep -q . || \
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qE "^${container_name}$|/${container_name}$" || \
+    docker ps --format '{{.ID}}' 2>/dev/null | grep -q "^${container_name}" || { echo ""; return 1; }
+    echo "$container_name"
+    return 0
+}
+
+verify_and_start_container() {
+    local container_name=$1
+    local db_type=$2
+    local actual_container=""
+    
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        actual_container="$container_name"
+    else
+        case $db_type in
+        mariadb)
+            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mariadb-1"
+            ;;
+        mysql)
+            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
+            [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-mysql-1"
+            ;;
+        postgresql|timescaledb)
+            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
+            [ -z "$actual_container" ] && actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
+            [ -z "$actual_container" ] && [ -f "$COMPOSE_FILE" ] && actual_container="${APP_NAME}-postgresql-1"
+            ;;
+        esac
+    fi
+    
+    [ -z "$actual_container" ] && { echo ""; return 1; }
+    container_name="$actual_container"
+    local container_running=false
+    docker ps --filter "id=${container_name}" --format '{{.ID}}' 2>/dev/null | grep -q . && container_running=true || \
+    docker ps --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null | grep -q . && container_running=true || \
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qE "^${container_name}$|/${container_name}$" && container_running=true || \
+    docker ps --format '{{.ID}}' 2>/dev/null | grep -q "^${container_name}" && container_running=true
+    
+    if [ "$container_running" = false ]; then
+        colorized_echo yellow "Database container '$container_name' is not running. Attempting to start it..."
+        docker start "$container_name" >/dev/null 2>&1 || \
+        $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start "${db_type%%|*}" 2>/dev/null || true
+        sleep 2
+        docker ps --filter "id=${container_name}" --format '{{.ID}}' 2>/dev/null | grep -q . && container_running=true || \
+        docker ps --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null | grep -q . && container_running=true
+    fi
+    
+    [ "$container_running" = true ] && { echo "$container_name"; return 0; } || { echo ""; return 1; }
 }
 
 install_pasarguard_script() {
@@ -1011,70 +1128,9 @@ restore_command() {
 
         # Find container name for local databases
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
-            # Temporarily disable exit on error for container detection
             set +e
-            case $db_type in
-            mariadb)
-                container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                if [ -z "$container_name" ]; then
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mariadb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1 || true)
-                    [ -z "$container_name" ] && container_name="mariadb"
-                fi
-                ;;
-            mysql)
-                # Try to get running container ID first (check both mysql and mariadb since MariaDB uses mysql:// URLs)
-                container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-                if [ -z "$container_name" ]; then
-                    # Try mariadb (MariaDB containers often use mysql:// URLs)
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                fi
-                if [ -z "$container_name" ]; then
-                    # Try to get container name from docker compose
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mysql mariadb 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
-                    if [ -z "$container_name" ]; then
-                        # Try docker ps with filters
-                        container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mysql" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                        if [ -z "$container_name" ]; then
-                            container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                        fi
-                        if [ -z "$container_name" ]; then
-                            # Try docker inspect with fallback names
-                            local fallback_name="${APP_NAME}-mysql-1"
-                            if docker inspect "$fallback_name" >/dev/null 2>&1; then
-                                container_name="$fallback_name"
-                            else
-                                fallback_name="${APP_NAME}-mariadb-1"
-                                if docker inspect "$fallback_name" >/dev/null 2>&1; then
-                                    container_name="$fallback_name"
-                                else
-                                    # Try to find any container with mysql/mariadb pattern
-                                    container_name=$(docker ps -a --filter "name=${APP_NAME}" --filter "name=mysql" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                    if [ -z "$container_name" ]; then
-                                        container_name=$(docker ps -a --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                    fi
-                                    if [ -z "$container_name" ]; then
-                                        container_name="mysql"
-                                    fi
-                                fi
-                            fi
-                        fi
-                    fi
-                fi
-                ;;
-            postgresql|timescaledb)
-                container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
-                if [ -z "$container_name" ]; then
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-                fi
-                if [ -z "$container_name" ]; then
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json timescaledb postgresql 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
-                    if [ -z "$container_name" ]; then
-                        container_name="${APP_NAME}-timescaledb-1"
-                    fi
-                fi
-                ;;
-            esac
-            set -e  # Re-enable exit on error
+            container_name=$(find_container "$db_type")
+            set -e
         fi
     fi
 
@@ -1161,64 +1217,13 @@ restore_command() {
                 rm -rf "$temp_restore_dir"
                 exit 1
             else
-                # Check if container exists and is running (handle both ID and name)
-                local container_running=false
-                local actual_container=""
-                
-                # First verify the container exists (by ID or name)
-                if docker inspect "$container_name" >/dev/null 2>&1; then
-                    actual_container="$container_name"
-                else
-                    # Try to find container by service name
-                    actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-                    if [ -z "$actual_container" ]; then
-                        actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                    fi
-                fi
-                
-                if [ -z "$actual_container" ]; then
-                    colorized_echo red "Database container not found. Please ensure MySQL/MariaDB container is running."
+                local verified_container=$(verify_and_start_container "$container_name" "$db_type")
+                if [ -z "$verified_container" ]; then
+                    colorized_echo red "Failed to start database container. Please start it manually."
                     rm -rf "$temp_restore_dir"
                     exit 1
                 fi
-                
-                container_name="$actual_container"
-                
-                # Check if container is running (handle both full and short IDs, and names)
-                if docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q .; then
-                    container_running=true
-                elif docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                    container_running=true
-                elif docker ps --format '{{.Names}}' | grep -qE "^${container_name}$|/${container_name}$"; then
-                    container_running=true
-                elif docker ps --format '{{.ID}}' | grep -q "^${container_name}"; then
-                    container_running=true
-                fi
-                
-                if [ "$container_running" = false ]; then
-                    colorized_echo yellow "Database container '$container_name' is not running. Attempting to start it..."
-                    if docker start "$container_name" >/dev/null 2>&1; then
-                        colorized_echo blue "Waiting for container to be ready..."
-                        sleep 2
-                        container_running=true
-                    else
-                        # Try using docker compose to start the service
-                        $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start mysql 2>/dev/null || \
-                        $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start mariadb 2>/dev/null || true
-                        sleep 2
-                        # Re-check if running now
-                        if docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q . || \
-                           docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                            container_running=true
-                        fi
-                    fi
-                    
-                    if [ "$container_running" = false ]; then
-                        colorized_echo red "Failed to start database container '$container_name'. Please start it manually."
-                        rm -rf "$temp_restore_dir"
-                        exit 1
-                    fi
-                fi
+                container_name="$verified_container"
 
                 # Check if this is actually a MariaDB container
                 local is_mariadb=false
@@ -1232,36 +1237,36 @@ restore_command() {
 
                 colorized_echo blue "Restoring $db_type_name database from container: $container_name"
 
-                # Use root user if MYSQL_ROOT_PASSWORD is available
-                if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
-                    colorized_echo blue "Using root user for restore..."
+            # Use root user if MYSQL_ROOT_PASSWORD is available
+            if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                colorized_echo blue "Using root user for restore..."
                     if docker exec -i "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "$db_type_name database restored successfully."
-                    else
+                else
                         colorized_echo red "Failed to restore $db_type_name database."
                         echo "$db_type_name restore failed with root user" >>"$log_file"
-                        rm -rf "$temp_restore_dir"
-                        exit 1
-                    fi
-                else
-                    # Use app credentials
-                    local restore_user="${db_user:-${DB_USER:-}}"
-                    local restore_password="${db_password:-${DB_PASSWORD:-}}"
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+            else
+                # Use app credentials
+                local restore_user="${db_user:-${DB_USER:-}}"
+                local restore_password="${db_password:-${DB_PASSWORD:-}}"
 
-                    if [ -z "$restore_password" ]; then
-                        colorized_echo red "No database password found for restore."
-                        rm -rf "$temp_restore_dir"
-                        exit 1
-                    fi
+                if [ -z "$restore_password" ]; then
+                    colorized_echo red "No database password found for restore."
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
 
-                    colorized_echo blue "Using app user '$restore_user' for restore..."
+                colorized_echo blue "Using app user '$restore_user' for restore..."
                     if docker exec -i "$container_name" "$mysql_cmd" -u "$restore_user" -p"$restore_password" "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "$db_type_name database restored successfully."
-                    else
+                else
                         colorized_echo red "Failed to restore $db_type_name database."
                         echo "$db_type_name restore failed with app user" >>"$log_file"
-                        rm -rf "$temp_restore_dir"
-                        exit 1
+                    rm -rf "$temp_restore_dir"
+                    exit 1
                     fi
                 fi
             fi
@@ -1278,99 +1283,47 @@ restore_command() {
             rm -rf "$temp_restore_dir"
             exit 1
         fi
-        
+
         # Verify backup file is not empty and is readable
         if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
             colorized_echo red "Database backup file is empty or unreadable."
-            rm -rf "$temp_restore_dir"
-            exit 1
-        fi
-        
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
+
         local backup_size=$(du -h "$temp_restore_dir/db_backup.sql" | cut -f1)
         colorized_echo blue "Backup file size: $backup_size"
 
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
-            # Check if container exists and is running (handle both ID and name)
-            local container_running=false
-            local actual_container=""
-            
-            # First verify the container exists (by ID or name)
-            if docker inspect "$container_name" >/dev/null 2>&1; then
-                actual_container="$container_name"
-            else
-                # Try to find container by service name
-                actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-                if [ -z "$actual_container" ]; then
-                    actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
-                fi
-            fi
-            
-            if [ -z "$actual_container" ]; then
-                colorized_echo red "Database container not found. Please ensure PostgreSQL container is running."
+            local verified_container=$(verify_and_start_container "$container_name" "$db_type")
+            if [ -z "$verified_container" ]; then
+                colorized_echo red "Failed to start database container. Please start it manually."
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
-            
-            container_name="$actual_container"
-            
-            # Check if container is running (handle both full and short IDs, and names)
-            # docker ps --filter "id=..." works with both full and partial container IDs
-            if docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q .; then
-                container_running=true
-            elif docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                container_running=true
-            elif docker ps --format '{{.Names}}' | grep -qE "^${container_name}$|/${container_name}$"; then
-                container_running=true
-            elif docker ps --format '{{.ID}}' | grep -q "^${container_name}"; then
-                container_running=true
-            fi
-            
-            if [ "$container_running" = false ]; then
-                colorized_echo yellow "Database container '$container_name' is not running. Attempting to start it..."
-                if docker start "$container_name" >/dev/null 2>&1; then
-                    colorized_echo blue "Waiting for container to be ready..."
-                    sleep 2
-                    container_running=true
-                else
-                    # Try using docker compose to start the service
-                    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start postgresql 2>/dev/null || \
-                    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start timescaledb 2>/dev/null || true
-                    sleep 2
-                    # Re-check if running now
-                    if docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q . || \
-                       docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                        container_running=true
-                    fi
-                fi
-                
-                if [ "$container_running" = false ]; then
-                    colorized_echo red "Failed to start database container '$container_name'. Please start it manually."
-                    rm -rf "$temp_restore_dir"
-                    exit 1
-                fi
-            fi
+            container_name="$verified_container"
 
             colorized_echo blue "Restoring $db_type database from container: $container_name"
 
             # Prepare restore credentials
-            local restore_user="${db_user:-${DB_USER:-postgres}}"
-            local restore_password="${db_password:-${DB_PASSWORD:-}}"
+                local restore_user="${db_user:-${DB_USER:-postgres}}"
+                local restore_password="${db_password:-${DB_PASSWORD:-}}"
 
-            if [ -z "$restore_password" ]; then
-                colorized_echo red "No database password found for restore."
-                rm -rf "$temp_restore_dir"
-                exit 1
-            fi
+                if [ -z "$restore_password" ]; then
+                    colorized_echo red "No database password found for restore."
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
 
             # Try to restore using app user credentials first (most common case)
             # This works because pg_dump backups can be restored by the user who created them
             colorized_echo blue "Attempting restore using app user '$restore_user' to database '$db_name'..."
-            export PGPASSWORD="$restore_password"
+                export PGPASSWORD="$restore_password"
             local restore_success=false
             
             # First try restoring to the specific database with app user
-            if docker exec -i "$container_name" psql -U "$restore_user" -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                colorized_echo green "$db_type database restored successfully."
+                if docker exec -i "$container_name" psql -U "$restore_user" -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    colorized_echo green "$db_type database restored successfully."
                 restore_success=true
             else
                 # If that fails, try using postgres superuser
@@ -1388,13 +1341,13 @@ restore_command() {
                 fi
             fi
             
-            unset PGPASSWORD
+                    unset PGPASSWORD
             
             if [ "$restore_success" = false ]; then
                 colorized_echo red "Failed to restore $db_type database."
                 colorized_echo yellow "Check log file for details: $log_file"
-                rm -rf "$temp_restore_dir"
-                exit 1
+                    rm -rf "$temp_restore_dir"
+                    exit 1
             fi
         else
             colorized_echo red "Remote $db_type restore not supported yet."
@@ -1600,122 +1553,7 @@ backup_command() {
 
             # For local databases, try to find container name from docker-compose
             if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
-                detect_compose
-                case $db_type in
-                mariadb)
-                    # Try to get running container ID first
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                    if [ -z "$container_name" ]; then
-                        # Try to get container name from docker compose
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mariadb 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
-                        if [ -z "$container_name" ]; then
-                            # Try docker ps with filters
-                            container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                            if [ -z "$container_name" ]; then
-                                # Try docker inspect with fallback name
-                                local fallback_name="${APP_NAME}-mariadb-1"
-                                if docker inspect "$fallback_name" >/dev/null 2>&1; then
-                                    container_name="$fallback_name"
-                                else
-                                    # Try to find any container with mariadb pattern
-                                    container_name=$(docker ps -a --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                    if [ -z "$container_name" ]; then
-                                        container_name="mariadb"
-                                    fi
-                                fi
-                            fi
-                        fi
-                    fi
-                    ;;
-                mysql)
-                    # Try to get running container ID first (check both mysql and mariadb since MariaDB uses mysql:// URLs)
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-                    if [ -z "$container_name" ]; then
-                        # Try mariadb (MariaDB containers often use mysql:// URLs)
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                    fi
-                    if [ -z "$container_name" ]; then
-                        # Try to get container name from docker compose
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mysql mariadb 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
-                        if [ -z "$container_name" ]; then
-                            # Try docker ps with filters
-                            container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mysql" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                            if [ -z "$container_name" ]; then
-                                container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                            fi
-                            if [ -z "$container_name" ]; then
-                                # Try docker inspect with fallback names
-                                local fallback_name="${APP_NAME}-mysql-1"
-                                if docker inspect "$fallback_name" >/dev/null 2>&1; then
-                                    container_name="$fallback_name"
-                                else
-                                    fallback_name="${APP_NAME}-mariadb-1"
-                                    if docker inspect "$fallback_name" >/dev/null 2>&1; then
-                                        container_name="$fallback_name"
-                                    else
-                                        # Try to find any container with mysql/mariadb pattern
-                                        container_name=$(docker ps -a --filter "name=${APP_NAME}" --filter "name=mysql" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                        if [ -z "$container_name" ]; then
-                                            container_name=$(docker ps -a --filter "name=${APP_NAME}" --filter "name=mariadb" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                        fi
-                                        if [ -z "$container_name" ]; then
-                                            container_name="mysql"
-                                        fi
-                                    fi
-                                fi
-                            fi
-                        fi
-                    fi
-                    ;;
-                postgresql|timescaledb)
-                    # Try timescaledb first (more specific)
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
-                    if [ -z "$container_name" ]; then
-                        # Try postgresql
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-                    fi
-                    if [ -z "$container_name" ]; then
-                        # Try to get container name from docker compose using service names
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json timescaledb postgresql 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1 || true)
-                        # If still empty, try to get actual container name with project prefix
-                        if [ -z "$container_name" ]; then
-                            local service_name=""
-                            if grep -q "^\s*timescaledb:" "$COMPOSE_FILE" 2>/dev/null; then
-                                service_name="timescaledb"
-                            elif grep -q "^\s*postgresql:" "$COMPOSE_FILE" 2>/dev/null; then
-                                service_name="postgresql"
-                            fi
-                            if [ -n "$service_name" ]; then
-                                # Try to get container ID/name from running containers
-                                container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=${service_name}" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                if [ -z "$container_name" ]; then
-                                    # Try docker inspect to get actual container name
-                                    local fallback_name="${APP_NAME}-${service_name}-1"
-                                    if docker inspect "$fallback_name" >/dev/null 2>&1; then
-                                        container_name="$fallback_name"
-                                    else
-                                        # Try to find any container with the service name pattern
-                                        container_name=$(docker ps -a --filter "name=${APP_NAME}" --filter "name=${service_name}" --format '{{.ID}}' 2>/dev/null | head -n 1 || true)
-                                        if [ -z "$container_name" ]; then
-                                            # Final fallback - use constructed name (might not exist, but docker exec will fail gracefully)
-                                            container_name="${APP_NAME}-${service_name}-1"
-                                        fi
-                                    fi
-                                fi
-                            else
-                                # Default fallback - try postgresql first, then timescaledb
-                                if docker ps --filter "name=${APP_NAME}" --filter "name=postgresql" --format '{{.ID}}' 2>/dev/null | head -n 1 | grep -q .; then
-                                    container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=postgresql" --format '{{.ID}}' 2>/dev/null | head -n 1)
-                                elif docker ps --filter "name=${APP_NAME}" --filter "name=timescaledb" --format '{{.ID}}' 2>/dev/null | head -n 1 | grep -q .; then
-                                    container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=timescaledb" --format '{{.ID}}' 2>/dev/null | head -n 1)
-                                else
-                                    container_name="${APP_NAME}-postgresql-1"
-                                fi
-                            fi
-                        fi
-                    fi
-                    ;;
-                esac
+                container_name=$(find_container "$db_type")
                 echo "Container name/ID for $db_type: $container_name" >>"$log_file"
             fi
         fi
@@ -1734,92 +1572,59 @@ backup_command() {
                     echo "MariaDB container not found. Container name: ${container_name:-empty}" >>"$log_file"
                     error_messages+=("MariaDB container not found or not running.")
                 else
-                    # Check if container exists and is running
-                    local actual_container=""
-                    if docker inspect "$container_name" >/dev/null 2>&1; then
-                        actual_container="$container_name"
+                    local verified_container=$(check_container "$container_name" "$db_type")
+                    if [ -z "$verified_container" ]; then
+                        colorized_echo red "Error: MariaDB container not found or not running."
+                        echo "Container not found or not running: $container_name" >>"$log_file"
+                        error_messages+=("MariaDB container not found or not running.")
                     else
-                        # Try to find container by service name using docker compose
-                        actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                        if [ -z "$actual_container" ]; then
-                            # Try with full container name pattern
-                            local full_container_name="${APP_NAME}-mariadb-1"
-                            if docker inspect "$full_container_name" >/dev/null 2>&1; then
-                                actual_container="$full_container_name"
+                        container_name="$verified_container"
+                # Local Docker container
+                # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
+                if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                    colorized_echo blue "Backing up all MariaDB databases from container: $container_name (using root user)"
+                    if docker exec "$container_name" mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "MariaDB backup completed successfully (all databases)"
+                    else
+                        # Fallback to SQL URL credentials for specific database
+                        colorized_echo yellow "Root backup failed, falling back to app user for specific database"
+                        local backup_user="${db_user:-${DB_USER:-}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                        
+                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("MariaDB backup failed - root backup failed and fallback credentials incomplete.")
+                        else
+                            colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
+                            if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                colorized_echo red "MariaDB dump failed. Check log file for details."
+                                error_messages+=("MariaDB dump failed.")
+                            else
+                                colorized_echo green "MariaDB backup completed successfully"
                             fi
                         fi
                     fi
+                else
+                    # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
+                    local backup_user="${db_user:-${DB_USER:-}}"
+                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
                     
-                    if [ -z "$actual_container" ]; then
-                        colorized_echo red "Error: MariaDB container not found. Is the container running?"
-                        echo "Container not found. Tried: $container_name and various patterns" >>"$log_file"
-                        error_messages+=("MariaDB container not found or not running.")
+                    if [ -z "$backup_password" ]; then
+                        colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                        error_messages+=("MariaDB password not found.")
+                    elif [ -z "$db_name" ]; then
+                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                        error_messages+=("MariaDB database name not found.")
                     else
-                        container_name="$actual_container"
-                        # Verify container is actually running (handle both ID and name)
-                        local container_running=false
-                        if docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q .; then
-                            container_running=true
-                        elif docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                            container_running=true
-                        elif docker ps --format '{{.Names}}' | grep -qE "^${container_name}$|/${container_name}$"; then
-                            container_running=true
-                        elif docker ps --format '{{.ID}}' | grep -q "^${container_name}"; then
-                            container_running=true
-                        fi
-                        
-                        if [ "$container_running" = false ]; then
-                            colorized_echo red "Error: MariaDB container '$container_name' is not running."
-                            echo "Container '$container_name' is not running" >>"$log_file"
-                            error_messages+=("MariaDB container is not running.")
+                        colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
+                        if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo red "MariaDB dump failed. Check log file for details."
+                            error_messages+=("MariaDB dump failed.")
                         else
-                            # Local Docker container
-                            # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
-                            if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
-                                colorized_echo blue "Backing up all MariaDB databases from container: $container_name (using root user)"
-                                if docker exec "$container_name" mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                    colorized_echo green "MariaDB backup completed successfully (all databases)"
-                                else
-                                    # Fallback to SQL URL credentials for specific database
-                                    colorized_echo yellow "Root backup failed, falling back to app user for specific database"
-                                    local backup_user="${db_user:-${DB_USER:-}}"
-                                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                                    
-                                    if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
-                                        colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
-                                        error_messages+=("MariaDB backup failed - root backup failed and fallback credentials incomplete.")
-                                    else
-                                        colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
-                                        if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                            colorized_echo red "MariaDB dump failed. Check log file for details."
-                                            error_messages+=("MariaDB dump failed.")
-                                        else
-                                            colorized_echo green "MariaDB backup completed successfully"
-                                        fi
-                                    fi
-                                fi
-                            else
-                                # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
-                                local backup_user="${db_user:-${DB_USER:-}}"
-                                local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                                
-                                if [ -z "$backup_password" ]; then
-                                    colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
-                                    error_messages+=("MariaDB password not found.")
-                                elif [ -z "$db_name" ]; then
-                                    colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
-                                    error_messages+=("MariaDB database name not found.")
-                                else
-                                    colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
-                                    if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                        colorized_echo red "MariaDB dump failed. Check log file for details."
-                                        error_messages+=("MariaDB dump failed.")
-                                    else
-                                        colorized_echo green "MariaDB backup completed successfully"
-                                    fi
-                                fi
-                            fi
+                            colorized_echo green "MariaDB backup completed successfully"
                         fi
+                    fi
+                fi
                     fi
                 fi
             else
@@ -1835,62 +1640,22 @@ backup_command() {
                     echo "MySQL container not found. Container name: ${container_name:-empty}" >>"$log_file"
                     error_messages+=("MySQL container not found or not running.")
                 else
-                    # Check if container exists and is running
-                    local actual_container=""
-                    if docker inspect "$container_name" >/dev/null 2>&1; then
-                        actual_container="$container_name"
-                    else
-                        # Try to find container by service name using docker compose (check both mysql and mariadb)
-                        actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null || true)
-                        if [ -z "$actual_container" ]; then
-                            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
-                        fi
-                        if [ -z "$actual_container" ]; then
-                            # Try with full container name pattern
-                            local full_container_name="${APP_NAME}-mysql-1"
-                            if docker inspect "$full_container_name" >/dev/null 2>&1; then
-                                actual_container="$full_container_name"
-                            else
-                                full_container_name="${APP_NAME}-mariadb-1"
-                                if docker inspect "$full_container_name" >/dev/null 2>&1; then
-                                    actual_container="$full_container_name"
-                                fi
-                            fi
-                        fi
-                    fi
-                    
-                    if [ -z "$actual_container" ]; then
-                        colorized_echo red "Error: MySQL/MariaDB container not found. Is the container running?"
-                        echo "Container not found. Tried: $container_name and various patterns" >>"$log_file"
+                    local verified_container=$(check_container "$container_name" "$db_type")
+                    if [ -z "$verified_container" ]; then
+                        colorized_echo red "Error: MySQL/MariaDB container not found or not running."
+                        echo "Container not found or not running: $container_name" >>"$log_file"
                         error_messages+=("MySQL/MariaDB container not found or not running.")
                     else
-                        container_name="$actual_container"
-                        # Verify container is actually running (handle both ID and name)
-                        local container_running=false
-                        if docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q .; then
-                            container_running=true
-                        elif docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                            container_running=true
-                        elif docker ps --format '{{.Names}}' | grep -qE "^${container_name}$|/${container_name}$"; then
-                            container_running=true
-                        elif docker ps --format '{{.ID}}' | grep -q "^${container_name}"; then
-                            container_running=true
-                        fi
-                        
-                        if [ "$container_running" = false ]; then
-                            colorized_echo red "Error: MySQL/MariaDB container '$container_name' is not running."
-                            echo "Container '$container_name' is not running" >>"$log_file"
-                            error_messages+=("MySQL/MariaDB container is not running.")
-                        else
+                        container_name="$verified_container"
                             # Check if this is actually a MariaDB container (try mariadb-dump first)
                             local is_mariadb=false
                             if docker exec "$container_name" mariadb-dump --version >/dev/null 2>&1; then
                                 is_mariadb=true
                             fi
                             
-                            # Local Docker container
-                            # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
-                            if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                    # Local Docker container
+                    # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
+                    if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                                 # Choose command based on whether it's MariaDB or MySQL
                                 local mysql_cmd="mysql"
                                 local dump_cmd="mysqldump"
@@ -1903,16 +1668,16 @@ backup_command() {
                                 
                                 colorized_echo blue "Backing up all $db_type_name databases from container: $container_name (using root user)"
                                 databases=$(docker exec "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
-                                if [ -z "$databases" ]; then
-                                    colorized_echo yellow "No user databases found, falling back to specific database backup"
-                                    # Fallback to SQL URL credentials
-                                    local backup_user="${db_user:-${DB_USER:-}}"
-                                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                                    
-                                    if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
-                                        colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
-                                        error_messages+=("MySQL backup failed - no databases found and fallback credentials incomplete.")
-                                    else
+                        if [ -z "$databases" ]; then
+                            colorized_echo yellow "No user databases found, falling back to specific database backup"
+                            # Fallback to SQL URL credentials
+                            local backup_user="${db_user:-${DB_USER:-}}"
+                            local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                            
+                            if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                                colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                                error_messages+=("MySQL backup failed - no databases found and fallback credentials incomplete.")
+                            else
                                         colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
                                         if ! docker exec "$container_name" "$dump_cmd" -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                             colorized_echo red "$db_type_name dump failed. Check log file for details."
@@ -1922,15 +1687,15 @@ backup_command() {
                                         fi
                                     fi
                                 elif ! docker exec "$container_name" "$dump_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                    # Root backup failed, fallback to SQL URL credentials
-                                    colorized_echo yellow "Root backup failed, falling back to app user for specific database"
-                                    local backup_user="${db_user:-${DB_USER:-}}"
-                                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                                    
-                                    if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
-                                        colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
-                                        error_messages+=("MySQL backup failed - root backup failed and fallback credentials incomplete.")
-                                    else
+                            # Root backup failed, fallback to SQL URL credentials
+                            colorized_echo yellow "Root backup failed, falling back to app user for specific database"
+                            local backup_user="${db_user:-${DB_USER:-}}"
+                            local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                            
+                            if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                                colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                                error_messages+=("MySQL backup failed - root backup failed and fallback credentials incomplete.")
+                            else
                                         colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
                                         if ! docker exec "$container_name" "$dump_cmd" -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                             colorized_echo red "$db_type_name dump failed. Check log file for details."
@@ -1938,28 +1703,28 @@ backup_command() {
                                         else
                                             colorized_echo green "$db_type_name backup completed successfully"
                                         fi
-                                    fi
-                                else
+                            fi
+                        else
                                     colorized_echo green "$db_type_name backup completed successfully (all databases)"
-                                fi
-                            else
-                                # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
-                                local backup_user="${db_user:-${DB_USER:-}}"
-                                local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                        fi
+                    else
+                        # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
+                        local backup_user="${db_user:-${DB_USER:-}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
                                 local dump_cmd="mysqldump"
                                 local db_type_name="MySQL"
                                 if [ "$is_mariadb" = true ]; then
                                     dump_cmd="mariadb-dump"
                                     db_type_name="MariaDB"
                                 fi
-                                
-                                if [ -z "$backup_password" ]; then
-                                    colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
-                                    error_messages+=("MySQL password not found.")
-                                elif [ -z "$db_name" ]; then
-                                    colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
-                                    error_messages+=("MySQL database name not found.")
-                                else
+                        
+                        if [ -z "$backup_password" ]; then
+                            colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                            error_messages+=("MySQL password not found.")
+                        elif [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("MySQL database name not found.")
+                        else
                                     colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
                                     if ! docker exec "$container_name" "$dump_cmd" -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                         colorized_echo red "$db_type_name dump failed. Check log file for details."
@@ -1968,7 +1733,6 @@ backup_command() {
                                         colorized_echo green "$db_type_name backup completed successfully"
                                     fi
                                 fi
-                            fi
                         fi
                     fi
                 fi
@@ -1985,107 +1749,66 @@ backup_command() {
                     echo "PostgreSQL container not found. Container name: ${container_name:-empty}" >>"$log_file"
                     error_messages+=("PostgreSQL container not found or not running.")
                 else
-                    # Check if container exists and is running
-                    local actual_container=""
-                    if docker inspect "$container_name" >/dev/null 2>&1; then
-                        actual_container="$container_name"
-                    else
-                        # Try to find container by service name using docker compose
-                        actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null || true)
-                        if [ -z "$actual_container" ]; then
-                            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null || true)
-                        fi
-                        if [ -z "$actual_container" ]; then
-                            # Try with full container name pattern
-                            local full_container_name="${APP_NAME}-postgresql-1"
-                            if docker inspect "$full_container_name" >/dev/null 2>&1; then
-                                actual_container="$full_container_name"
-                            else
-                                full_container_name="${APP_NAME}-timescaledb-1"
-                                if docker inspect "$full_container_name" >/dev/null 2>&1; then
-                                    actual_container="$full_container_name"
-                                fi
-                            fi
-                        fi
-                    fi
-                    
-                    if [ -z "$actual_container" ]; then
-                        colorized_echo red "Error: PostgreSQL container not found. Is the container running?"
-                        echo "Container not found. Tried: $container_name and various patterns" >>"$log_file"
+                    local verified_container=$(check_container "$container_name" "$db_type")
+                    if [ -z "$verified_container" ]; then
+                        colorized_echo red "Error: PostgreSQL container not found or not running."
+                        echo "Container not found or not running: $container_name" >>"$log_file"
                         error_messages+=("PostgreSQL container not found or not running.")
                     else
-                        container_name="$actual_container"
-                        # Verify container is actually running (check by name or ID)
-                        local container_running=false
-                        if docker ps --format '{{.Names}}' | grep -qE "^${container_name}$|/${container_name}$"; then
-                            container_running=true
-                        elif docker ps --format '{{.ID}}' | grep -q "^${container_name}$"; then
-                            container_running=true
-                        elif docker ps --filter "id=${container_name}" --format '{{.ID}}' | grep -q .; then
-                            container_running=true
-                        elif docker ps --filter "name=${container_name}" --format '{{.Names}}' | grep -q .; then
-                            container_running=true
-                        fi
+                        container_name="$verified_container"
+                # Local Docker container
+                # Try postgres superuser with DB_PASSWORD first for pg_dumpall (all databases)
+                if [ -n "${DB_PASSWORD:-}" ]; then
+                    colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using postgres superuser)"
+                    export PGPASSWORD="$DB_PASSWORD"
+                    if docker exec "$container_name" pg_dumpall -U postgres >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "PostgreSQL backup completed successfully (all databases)"
+                        unset PGPASSWORD
+                    else
+                        # Fallback to pg_dump with SQL URL credentials
+                        unset PGPASSWORD
+                        colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
+                        local backup_user="${db_user:-${DB_USER:-postgres}}"
+                        local backup_password="${db_password:-${DB_PASSWORD:-}}"
                         
-                        if [ "$container_running" = false ]; then
-                            colorized_echo red "Error: PostgreSQL container '$container_name' is not running."
-                            echo "Container '$container_name' is not running" >>"$log_file"
-                            error_messages+=("PostgreSQL container is not running.")
+                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("PostgreSQL backup failed - pg_dumpall failed and fallback credentials incomplete.")
                         else
-                            # Local Docker container
-                            # Try postgres superuser with DB_PASSWORD first for pg_dumpall (all databases)
-                            if [ -n "${DB_PASSWORD:-}" ]; then
-                                colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using postgres superuser)"
-                                export PGPASSWORD="$DB_PASSWORD"
-                                if docker exec "$container_name" pg_dumpall -U postgres >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                    colorized_echo green "PostgreSQL backup completed successfully (all databases)"
-                                    unset PGPASSWORD
-                                else
-                                    # Fallback to pg_dump with SQL URL credentials
-                                    unset PGPASSWORD
-                                    colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
-                                    local backup_user="${db_user:-${DB_USER:-postgres}}"
-                                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                                    
-                                    if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
-                                        colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
-                                        error_messages+=("PostgreSQL backup failed - pg_dumpall failed and fallback credentials incomplete.")
-                                    else
-                                        colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
-                                        export PGPASSWORD="$backup_password"
-                                        if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                            colorized_echo red "PostgreSQL dump failed. Check log file for details."
-                                            error_messages+=("PostgreSQL dump failed.")
-                                        else
-                                            colorized_echo green "PostgreSQL backup completed successfully"
-                                        fi
-                                        unset PGPASSWORD
-                                    fi
-                                fi
+                            colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
+                            export PGPASSWORD="$backup_password"
+                            if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                colorized_echo red "PostgreSQL dump failed. Check log file for details."
+                                error_messages+=("PostgreSQL dump failed.")
                             else
-                                # No DB_PASSWORD, use SQL URL credentials for pg_dump
-                                local backup_user="${db_user:-${DB_USER:-postgres}}"
-                                local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                                
-                                if [ -z "$backup_password" ]; then
-                                    colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
-                                    error_messages+=("PostgreSQL password not found.")
-                                elif [ -z "$db_name" ]; then
-                                    colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
-                                    error_messages+=("PostgreSQL database name not found.")
-                                else
-                                    colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
-                                    export PGPASSWORD="$backup_password"
-                                    if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                        colorized_echo red "PostgreSQL dump failed. Check log file for details."
-                                        error_messages+=("PostgreSQL dump failed.")
-                                    else
-                                        colorized_echo green "PostgreSQL backup completed successfully"
-                                    fi
-                                    unset PGPASSWORD
-                                fi
+                                colorized_echo green "PostgreSQL backup completed successfully"
                             fi
+                            unset PGPASSWORD
                         fi
+                    fi
+                else
+                    # No DB_PASSWORD, use SQL URL credentials for pg_dump
+                    local backup_user="${db_user:-${DB_USER:-postgres}}"
+                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
+                    
+                    if [ -z "$backup_password" ]; then
+                        colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                        error_messages+=("PostgreSQL password not found.")
+                    elif [ -z "$db_name" ]; then
+                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                        error_messages+=("PostgreSQL database name not found.")
+                    else
+                        colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
+                        export PGPASSWORD="$backup_password"
+                        if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo red "PostgreSQL dump failed. Check log file for details."
+                            error_messages+=("PostgreSQL dump failed.")
+                        else
+                            colorized_echo green "PostgreSQL backup completed successfully"
+                        fi
+                        unset PGPASSWORD
+                    fi
+                fi
                     fi
                 fi
             else
