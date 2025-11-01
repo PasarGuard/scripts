@@ -643,6 +643,7 @@ remove_backup_service() {
 }
 
 backup_command() {
+    colorized_echo blue "Starting backup process..."
     local backup_dir="$APP_DIR/backup"
     local temp_dir="/tmp/pasarguard_backup"
     local timestamp=$(date +"%Y%m%d%H%M%S")
@@ -650,7 +651,7 @@ backup_command() {
     local error_messages=()
     local log_file="/var/log/pasarguard_backup_error.log"
     >"$log_file"
-    echo "Backup Log - $(date)" >"$log_file"
+    echo "Backup Log - $(date)" >>"$log_file"
 
     if ! command -v rsync >/dev/null 2>&1; then
         detect_os
@@ -807,16 +808,35 @@ backup_command() {
                     fi
                     ;;
                 postgresql|timescaledb)
-                    # Try postgresql first
-                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null)
+                    # Try timescaledb first (more specific)
+                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null)
                     if [ -z "$container_name" ]; then
-                        # Try timescaledb
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null)
+                        # Try postgresql
+                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null)
                     fi
                     if [ -z "$container_name" ]; then
-                        # Try to get container name from docker compose
-                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json postgresql timescaledb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1)
-                        [ -z "$container_name" ] && container_name="postgresql"
+                        # Try to get container name from docker compose using service names
+                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json timescaledb postgresql 2>/dev/null | jq -r 'if type == "array" then .[] else . end | .Name' 2>/dev/null | head -n 1)
+                        # If still empty, try to get actual container name with project prefix
+                        if [ -z "$container_name" ]; then
+                            local service_name=""
+                            if grep -q "^\s*timescaledb:" "$COMPOSE_FILE" 2>/dev/null; then
+                                service_name="timescaledb"
+                            elif grep -q "^\s*postgresql:" "$COMPOSE_FILE" 2>/dev/null; then
+                                service_name="postgresql"
+                            fi
+                            if [ -n "$service_name" ]; then
+                                # Try to get container ID/name from running containers
+                                container_name=$(docker ps --filter "name=${APP_NAME}" --filter "name=${service_name}" --format '{{.ID}}' | head -n 1)
+                                if [ -z "$container_name" ]; then
+                                    # Fallback to service name for docker exec (compose will resolve it)
+                                    container_name="${APP_NAME}-${service_name}-1"
+                                fi
+                            else
+                                # Default fallback
+                                container_name="${APP_NAME}-timescaledb-1"
+                            fi
+                        fi
                     fi
                     ;;
                 esac
@@ -1025,58 +1045,65 @@ backup_command() {
             fi
             ;;
         timescaledb)
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
-                # Local Docker container
-                # Try postgres superuser with DB_PASSWORD first for pg_dumpall (all databases)
-                if [ -n "${DB_PASSWORD:-}" ]; then
-                    colorized_echo blue "Backing up all TimescaleDB databases from container: $container_name (using postgres superuser)"
-                    export PGPASSWORD="$DB_PASSWORD"
-                    if docker exec "$container_name" pg_dumpall -U postgres >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                        colorized_echo green "TimescaleDB backup completed successfully (all databases)"
-                        unset PGPASSWORD
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+                if [ -z "$container_name" ]; then
+                    colorized_echo red "Error: TimescaleDB container not found. Is the container running?"
+                    echo "Container name detection failed. Checked for: timescaledb, postgresql" >>"$log_file"
+                    error_messages+=("TimescaleDB container not found or not running.")
+                else
+                    # Get actual container name/ID - ps -q returns container ID, which is what we need
+                    # But first verify the container exists
+                    local actual_container=""
+                    if docker inspect "$container_name" >/dev/null 2>&1; then
+                        actual_container="$container_name"
                     else
-                        # Fallback to pg_dump with SQL URL credentials
-                        unset PGPASSWORD
-                        colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
+                        # Try to find container by service name using docker compose
+                        actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null)
+                        if [ -z "$actual_container" ]; then
+                            actual_container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null)
+                        fi
+                        if [ -z "$actual_container" ]; then
+                            # Try with full container name pattern
+                            local full_container_name="${APP_NAME}-timescaledb-1"
+                            if docker inspect "$full_container_name" >/dev/null 2>&1; then
+                                actual_container="$full_container_name"
+                            else
+                                full_container_name="${APP_NAME}-postgresql-1"
+                                if docker inspect "$full_container_name" >/dev/null 2>&1; then
+                                    actual_container="$full_container_name"
+                                fi
+                            fi
+                        fi
+                    fi
+                    
+                    if [ -z "$actual_container" ]; then
+                        colorized_echo red "Error: TimescaleDB container not found. Is the container running?"
+                        echo "Container not found. Tried: $container_name and various patterns" >>"$log_file"
+                        error_messages+=("TimescaleDB container not found or not running.")
+                    else
+                        container_name="$actual_container"
+                        # Local Docker container
+                        # Use SQL URL credentials directly for pg_dump (more reliable than pg_dumpall)
                         local backup_user="${db_user:-${DB_USER:-postgres}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
                         
-                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
-                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
-                            error_messages+=("TimescaleDB backup failed - pg_dumpall failed and fallback credentials incomplete.")
+                        if [ -z "$backup_password" ]; then
+                            colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                            error_messages+=("TimescaleDB password not found.")
+                        elif [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("TimescaleDB database name not found.")
                         else
-                            colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using app user)"
+                            colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using user: $backup_user)"
                             export PGPASSWORD="$backup_password"
                             if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                colorized_echo red "TimescaleDB dump failed. Check log file for details."
-                                error_messages+=("TimescaleDB dump failed.")
+                                colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
+                                error_messages+=("TimescaleDB dump failed for database '$db_name'.")
                             else
                                 colorized_echo green "TimescaleDB backup completed successfully"
                             fi
                             unset PGPASSWORD
                         fi
-                    fi
-                else
-                    # No DB_PASSWORD, use SQL URL credentials for pg_dump
-                    local backup_user="${db_user:-${DB_USER:-postgres}}"
-                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                    
-                    if [ -z "$backup_password" ]; then
-                        colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
-                        error_messages+=("TimescaleDB password not found.")
-                    elif [ -z "$db_name" ]; then
-                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
-                        error_messages+=("TimescaleDB database name not found.")
-                    else
-                        colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using app user)"
-                        export PGPASSWORD="$backup_password"
-                        if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                            colorized_echo red "TimescaleDB dump failed. Check log file for details."
-                            error_messages+=("TimescaleDB dump failed.")
-                        else
-                            colorized_echo green "TimescaleDB backup completed successfully"
-                        fi
-                        unset PGPASSWORD
                     fi
                 fi
             else
@@ -1101,13 +1128,29 @@ backup_command() {
         echo "SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:-not set}" >>"$log_file"
     fi
 
-    cp "$APP_DIR/.env" "$temp_dir/" 2>>"$log_file"
-    cp "$APP_DIR/docker-compose.yml" "$temp_dir/" 2>>"$log_file"
-    rsync -av --exclude 'xray-core' --exclude 'mysql' "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1
+    colorized_echo blue "Copying configuration files..."
+    if ! cp "$APP_DIR/.env" "$temp_dir/" 2>>"$log_file"; then
+        error_messages+=("Failed to copy .env file.")
+        echo "Failed to copy .env file" >>"$log_file"
+    fi
+    if ! cp "$APP_DIR/docker-compose.yml" "$temp_dir/" 2>>"$log_file"; then
+        error_messages+=("Failed to copy docker-compose.yml file.")
+        echo "Failed to copy docker-compose.yml file" >>"$log_file"
+    fi
+    
+    colorized_echo blue "Copying data directory..."
+    if ! rsync -av --exclude 'xray-core' --exclude 'mysql' "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
+        error_messages+=("Failed to copy data directory.")
+        echo "Failed to copy data directory" >>"$log_file"
+    fi
 
-    if ! tar -czf "$backup_file" -C "$temp_dir" .; then
+    colorized_echo blue "Creating backup archive..."
+    if ! tar -czf "$backup_file" -C "$temp_dir" . 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
+    else
+        local backup_size=$(du -h "$backup_file" | cut -f1)
+        colorized_echo green "Backup archive created: $backup_file (Size: $backup_size)"
     fi
 
     rm -rf "$temp_dir"
@@ -1118,11 +1161,21 @@ backup_command() {
             colorized_echo red "  - $error"
         done
         colorized_echo yellow "Check log file: $log_file"
-        send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
+        if [ -f "$ENV_FILE" ]; then
+            send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
+        fi
         return 1
     fi
-    colorized_echo green "Backup created: $backup_file"
-    send_backup_to_telegram "$backup_file"
+    
+    if [ ! -f "$backup_file" ]; then
+        colorized_echo red "Backup file was not created. Check log file: $log_file"
+        return 1
+    fi
+    
+    colorized_echo green "Backup completed successfully: $backup_file"
+    if [ -f "$ENV_FILE" ]; then
+        send_backup_to_telegram "$backup_file"
+    fi
 }
 
 install_pasarguard() {
