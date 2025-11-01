@@ -668,6 +668,8 @@ backup_command() {
             fi
             key=$(echo "$key" | xargs)
             value=$(echo "$value" | xargs)
+            # Remove surrounding quotes from value if present
+            value=$(echo "$value" | sed -E 's/^["'\''](.*)["'\'']$/\1/')
             if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
                 export "$key"="$value"
             else
@@ -690,9 +692,14 @@ backup_command() {
     local db_name=""
     local container_name=""
 
-    # Parse SQLALCHEMY_DATABASE_URL from environment
+    # SQLALCHEMY_DATABASE_URL should already be loaded from .env above
+    # Just log what we have
+    echo "SQLALCHEMY_DATABASE_URL from environment: ${SQLALCHEMY_DATABASE_URL:-not set}" >>"$log_file"
+    
     if [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
-        SQLALCHEMY_DATABASE_URL=$(grep "^SQLALCHEMY_DATABASE_URL" "$ENV_FILE" | sed -E 's/^[^=]*=\s*"?([^"]*)"?/\1/' | tr -d '"')
+        colorized_echo red "Error: SQLALCHEMY_DATABASE_URL not found in .env file or not set"
+        echo "Please check $ENV_FILE for SQLALCHEMY_DATABASE_URL" >>"$log_file"
+        error_messages+=("SQLALCHEMY_DATABASE_URL not found in .env file")
     fi
 
     if [ -n "$SQLALCHEMY_DATABASE_URL" ]; then
@@ -798,6 +805,7 @@ backup_command() {
     if [ -n "$db_type" ]; then
         echo "Database detected: $db_type" >>"$log_file"
         echo "Database host: ${db_host:-localhost}" >>"$log_file"
+        colorized_echo blue "Database detected: $db_type"
         case $db_type in
         mariadb)
             # Use root password from env if available, otherwise use parsed password
@@ -880,6 +888,10 @@ backup_command() {
             fi
             ;;
         esac
+    else
+        colorized_echo yellow "Warning: No database type detected. Skipping database backup."
+        echo "Warning: No database type detected." >>"$log_file"
+        echo "SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:-not set}" >>"$log_file"
     fi
 
     cp "$APP_DIR/.env" "$temp_dir/" 2>>"$log_file"
@@ -894,8 +906,13 @@ backup_command() {
     rm -rf "$temp_dir"
 
     if [ ${#error_messages[@]} -gt 0 ]; then
+        colorized_echo red "Backup completed with errors:"
+        for error in "${error_messages[@]}"; do
+            colorized_echo red "  - $error"
+        done
+        colorized_echo yellow "Check log file: $log_file"
         send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
-        return
+        return 1
     fi
     colorized_echo green "Backup created: $backup_file"
     send_backup_to_telegram "$backup_file"
