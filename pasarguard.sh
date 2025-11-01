@@ -789,15 +789,38 @@ backup_command() {
                 detect_compose
                 case $db_type in
                 mariadb)
-                    container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mariadb 2>/dev/null || echo "mariadb")
+                    # Try to get running container ID first, then try container name
+                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null)
+                    if [ -z "$container_name" ]; then
+                        # If not running, try to get container name from docker compose
+                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mariadb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1)
+                        [ -z "$container_name" ] && container_name="mariadb"
+                    fi
                     ;;
                 mysql)
-                    container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mysql 2>/dev/null || echo "mysql")
+                    # Try to get running container ID first, then try container name
+                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mysql 2>/dev/null)
+                    if [ -z "$container_name" ]; then
+                        # If not running, try to get container name from docker compose
+                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json mysql 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1)
+                        [ -z "$container_name" ] && container_name="mysql"
+                    fi
                     ;;
                 postgresql|timescaledb)
-                    container_name=$(docker compose -f "$COMPOSE_FILE" ps -q postgresql 2>/dev/null || docker compose -f "$COMPOSE_FILE" ps -q timescaledb 2>/dev/null || echo "postgresql")
+                    # Try postgresql first
+                    container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q postgresql 2>/dev/null)
+                    if [ -z "$container_name" ]; then
+                        # Try timescaledb
+                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q timescaledb 2>/dev/null)
+                    fi
+                    if [ -z "$container_name" ]; then
+                        # Try to get container name from docker compose
+                        container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps --format json postgresql timescaledb 2>/dev/null | jq -r '.Name' 2>/dev/null | head -n 1)
+                        [ -z "$container_name" ] && container_name="postgresql"
+                    fi
                     ;;
                 esac
+                echo "Container name/ID for $db_type: $container_name" >>"$log_file"
             fi
         fi
     fi
@@ -827,16 +850,30 @@ backup_command() {
             local backup_user="${db_user:-root}"
             local backup_password="${MYSQL_ROOT_PASSWORD:-$db_password}"
             
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
-                # Local Docker container
-                databases=$(docker exec "$container_name" mysql -u "$backup_user" -p"$backup_password" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
-                if [ -z "$databases" ]; then
-                    echo "No user databases found to backup" >>"$log_file"
-                elif ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                    error_messages+=("MySQL dump failed.")
+            echo "MySQL backup - host: $db_host, container: $container_name, user: $backup_user" >>"$log_file"
+            
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+                if [ -z "$container_name" ]; then
+                    colorized_echo red "Error: MySQL container not found. Is the container running?"
+                    echo "MySQL container not found. Container name: ${container_name:-empty}" >>"$log_file"
+                    error_messages+=("MySQL container not found or not running.")
+                else
+                    # Local Docker container
+                    colorized_echo blue "Backing up MySQL database from container: $container_name"
+                    databases=$(docker exec "$container_name" mysql -u "$backup_user" -p"$backup_password" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
+                    if [ -z "$databases" ]; then
+                        colorized_echo yellow "No user databases found to backup"
+                        echo "No user databases found to backup" >>"$log_file"
+                    elif ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo red "MySQL dump failed. Check log file for details."
+                        error_messages+=("MySQL dump failed.")
+                    else
+                        colorized_echo green "MySQL backup completed successfully"
+                    fi
                 fi
             else
                 # Remote database - would need mysql-client installed
+                colorized_echo red "Remote MySQL backup not yet supported. Please use local database or install mysql-client."
                 error_messages+=("Remote MySQL backup not yet supported. Please use local database or install mysql-client.")
             fi
             ;;
