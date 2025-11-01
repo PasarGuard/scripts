@@ -683,55 +683,191 @@ backup_command() {
 
     local db_type=""
     local sqlite_file=""
-    if grep -q "image: mariadb" "$COMPOSE_FILE"; then
-        db_type="mariadb"
-        container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mariadb || echo "mariadb")
+    local db_host=""
+    local db_port=""
+    local db_user=""
+    local db_password=""
+    local db_name=""
+    local container_name=""
 
-    elif grep -q "image: mysql" "$COMPOSE_FILE"; then
-        db_type="mysql"
-        container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mysql || echo "mysql")
+    # Parse SQLALCHEMY_DATABASE_URL from environment
+    if [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
+        SQLALCHEMY_DATABASE_URL=$(grep "^SQLALCHEMY_DATABASE_URL" "$ENV_FILE" | sed -E 's/^[^=]*=\s*"?([^"]*)"?/\1/' | tr -d '"')
+    fi
 
-    elif grep -q "image: postgres" "$COMPOSE_FILE"; then
-        db_type="postgresql"
-        container_name=$(docker compose -f "$COMPOSE_FILE" ps -q postgresql || echo "postgresql")
+    if [ -n "$SQLALCHEMY_DATABASE_URL" ]; then
+        echo "Parsing SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL%%@*}" >>"$log_file"
+        
+        # Extract database type from scheme
+        if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
+            db_type="sqlite"
+            # Extract SQLite file path
+            # SQLite URLs: sqlite:///relative/path or sqlite:////absolute/path
+            local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
+            sqlite_url_part="${sqlite_url_part%%\?*}"
+            sqlite_url_part="${sqlite_url_part%%#*}"
+            
+            # SQLite URL format:
+            # sqlite:////absolute/path (4 slashes = absolute path /path)
+            # After removing 'sqlite://', //absolute/path remains, convert to /absolute/path
+            if [[ "$sqlite_url_part" =~ ^//(.*)$ ]]; then
+                # Absolute path: sqlite:////absolute/path -> /absolute/path
+                sqlite_file="/${BASH_REMATCH[1]}"
+            elif [[ "$sqlite_url_part" =~ ^/(.*)$ ]]; then
+                # Could be absolute (sqlite:///path) or relative depending on context
+                # In practice, treat as absolute since SQLAlchemy uses 4 slashes for absolute
+                sqlite_file="/${BASH_REMATCH[1]}"
+            else
+                # Relative path (no leading slash)
+                sqlite_file="$sqlite_url_part"
+            fi
+        elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
+            # Extract scheme to determine type
+            if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mariadb[^:]*:// ]]; then
+                db_type="mariadb"
+            elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mysql[^:]*:// ]]; then
+                db_type="mysql"
+            elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^postgresql[^:]*:// ]]; then
+                # Check if it's timescaledb by checking for specific patterns or container
+                if grep -q "image: timescale/timescaledb" "$COMPOSE_FILE" 2>/dev/null; then
+                    db_type="timescaledb"
+                else
+                    db_type="postgresql"
+                fi
+            fi
 
-    elif grep -q "image: timescale/timescaledb" "$COMPOSE_FILE"; then
-        db_type="timescaledb"
-        container_name=$(docker compose -f "$COMPOSE_FILE" ps -q timescaledb || echo "timescaledb")
+            # Parse connection string: scheme://[user[:password]@]host[:port]/database[?query]
+            # Remove scheme prefix
+            local url_part="${SQLALCHEMY_DATABASE_URL#*://}"
+            # Remove query parameters if present
+            url_part="${url_part%%\?*}"
+            url_part="${url_part%%#*}"
+            
+            # Extract auth part (user:password@)
+            if [[ "$url_part" =~ ^([^@]+)@(.+)$ ]]; then
+                local auth_part="${BASH_REMATCH[1]}"
+                url_part="${BASH_REMATCH[2]}"
+                
+                # Extract username and password
+                if [[ "$auth_part" =~ ^([^:]+):(.+)$ ]]; then
+                    db_user="${BASH_REMATCH[1]}"
+                    db_password="${BASH_REMATCH[2]}"
+                else
+                    db_user="$auth_part"
+                fi
+            fi
+            
+            # Extract host, port, and database
+            if [[ "$url_part" =~ ^([^:/]+)(:([0-9]+))?/(.+)$ ]]; then
+                db_host="${BASH_REMATCH[1]}"
+                db_port="${BASH_REMATCH[3]:-}"
+                db_name="${BASH_REMATCH[4]}"
+                
+                # Remove query parameters from database name if any
+                db_name="${db_name%%\?*}"
+                db_name="${db_name%%#*}"
+                
+                # Set default ports if not specified
+                if [ -z "$db_port" ]; then
+                    if [[ "$db_type" =~ ^(mysql|mariadb)$ ]]; then
+                        db_port="3306"
+                    elif [[ "$db_type" =~ ^(postgresql|timescaledb)$ ]]; then
+                        db_port="5432"
+                    fi
+                fi
+            fi
 
-    elif grep -q "SQLALCHEMY_DATABASE_URL = .*sqlite" "$ENV_FILE"; then
-        db_type="sqlite"
-        sqlite_file=$(grep -oP 'SQLALCHEMY_DATABASE_URL = "sqlite\+aiosqlite:///\K[^"]+' "$ENV_FILE")
-        if [[ ! "$sqlite_file" =~ ^/ ]]; then
-            sqlite_file="/$sqlite_file"
+            # For local databases, try to find container name from docker-compose
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+                detect_compose
+                case $db_type in
+                mariadb)
+                    container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mariadb 2>/dev/null || echo "mariadb")
+                    ;;
+                mysql)
+                    container_name=$(docker compose -f "$COMPOSE_FILE" ps -q mysql 2>/dev/null || echo "mysql")
+                    ;;
+                postgresql|timescaledb)
+                    container_name=$(docker compose -f "$COMPOSE_FILE" ps -q postgresql 2>/dev/null || docker compose -f "$COMPOSE_FILE" ps -q timescaledb 2>/dev/null || echo "postgresql")
+                    ;;
+                esac
+            fi
         fi
-
     fi
 
     if [ -n "$db_type" ]; then
         echo "Database detected: $db_type" >>"$log_file"
+        echo "Database host: ${db_host:-localhost}" >>"$log_file"
         case $db_type in
         mariadb)
-            if ! docker exec "$container_name" mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                error_messages+=("MariaDB dump failed.")
+            # Use root password from env if available, otherwise use parsed password
+            local backup_user="${db_user:-root}"
+            local backup_password="${MYSQL_ROOT_PASSWORD:-$db_password}"
+            
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
+                # Local Docker container
+                if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    error_messages+=("MariaDB dump failed.")
+                fi
+            else
+                # Remote database - would need mariadb-client installed
+                error_messages+=("Remote MariaDB backup not yet supported. Please use local database or install mariadb-client.")
             fi
             ;;
         mysql)
-            databases=$(docker exec "$container_name" mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
-            if [ -z "$databases" ]; then
-                echo "No user databases found to backup" >>"$log_file"
-            elif ! docker exec "$container_name" mysqldump -u root -p"$MYSQL_ROOT_PASSWORD" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                error_messages+=("MySQL dump failed.")
+            # Use root password from env if available, otherwise use parsed password
+            local backup_user="${db_user:-root}"
+            local backup_password="${MYSQL_ROOT_PASSWORD:-$db_password}"
+            
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
+                # Local Docker container
+                databases=$(docker exec "$container_name" mysql -u "$backup_user" -p"$backup_password" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
+                if [ -z "$databases" ]; then
+                    echo "No user databases found to backup" >>"$log_file"
+                elif ! docker exec "$container_name" mysqldump -u "$backup_user" -p"$backup_password" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    error_messages+=("MySQL dump failed.")
+                fi
+            else
+                # Remote database - would need mysql-client installed
+                error_messages+=("Remote MySQL backup not yet supported. Please use local database or install mysql-client.")
             fi
             ;;
         postgresql)
-            if ! docker exec "$container_name" pg_dumpall -U "$DB_USER" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                error_messages+=("PostgreSQL dump failed.")
+            # Use parsed credentials with fallback to env
+            local backup_user="${db_user:-${DB_USER:-postgres}}"
+            local backup_password="${db_password:-${DB_PASSWORD:-}}"
+            
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
+                # Local Docker container
+                if [ -n "$backup_password" ]; then
+                    export PGPASSWORD="$backup_password"
+                fi
+                if ! docker exec "$container_name" pg_dumpall -U "$backup_user" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    error_messages+=("PostgreSQL dump failed.")
+                fi
+                unset PGPASSWORD
+            else
+                # Remote database - would need postgresql-client installed
+                error_messages+=("Remote PostgreSQL backup not yet supported. Please use local database or install postgresql-client.")
             fi
             ;;
         timescaledb)
-            if ! docker exec "$container_name" pg_dumpall -U "$DB_USER" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                error_messages+=("TimescaleDB dump failed.")
+            # Use parsed credentials with fallback to env
+            local backup_user="${db_user:-${DB_USER:-postgres}}"
+            local backup_password="${db_password:-${DB_PASSWORD:-}}"
+            
+            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
+                # Local Docker container
+                if [ -n "$backup_password" ]; then
+                    export PGPASSWORD="$backup_password"
+                fi
+                if ! docker exec "$container_name" pg_dumpall -U "$backup_user" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    error_messages+=("TimescaleDB dump failed.")
+                fi
+                unset PGPASSWORD
+            else
+                # Remote database - would need postgresql-client installed
+                error_messages+=("Remote TimescaleDB backup not yet supported. Please use local database or install postgresql-client.")
             fi
             ;;
         sqlite)
