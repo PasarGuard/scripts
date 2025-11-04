@@ -452,8 +452,11 @@ install_node() {
     # Keep the container mount path but point the host path at DATA_DIR
     existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
     if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
-        container_path="${existing_volume#*:}"
-        if [ "$container_path" = "$existing_volume" ]; then
+        # Extract container path (everything after the colon)
+        if [[ "$existing_volume" == *:* ]]; then
+            container_path="${existing_volume#*:}"
+        else
+            # If no colon found, use the existing volume as container path
             container_path="$existing_volume"
         fi
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
@@ -1189,6 +1192,21 @@ update_core_command() {
     sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${DATA_DIR}/xray-core/xray|" "$APP_DIR/.env"
     grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${DATA_DIR}/xray-core/xray" >>"$APP_DIR/.env"
 
+    # Ensure volumes match DATA_DIR when custom name is used
+    service_name="node"
+    existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
+    if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
+        # Extract container path (everything after the colon)
+        if [[ "$existing_volume" == *:* ]]; then
+            container_path="${existing_volume#*:}"
+        else
+            # If no colon found, use the existing volume as container path
+            container_path="$existing_volume"
+        fi
+        # Update volumes to use DATA_DIR (which is based on APP_NAME)
+        yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
+    fi
+
     # Restart node
     colorized_echo red "Restarting node..."
     $APP_NAME restart -n
@@ -1290,6 +1308,11 @@ usage() {
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit .env file (via nano or vi)"
     colorized_echo yellow "  core-update     $(tput sgr0)– Update/Change Xray core"
     colorized_echo yellow "  geofiles        $(tput sgr0)– Download geoip and geosite files for specific regions"
+    echo
+    colorized_echo cyan "Install Options:"
+    colorized_echo yellow "  -v, --version VERSION  $(tput sgr0)– Install specific version"
+    colorized_echo yellow "  --pre-release          $(tput sgr0)– Install pre-release version"
+    colorized_echo yellow "  --name NAME            $(tput sgr0)– Install with custom name"
 
     echo
     colorized_echo cyan "Node Information:"
@@ -1360,8 +1383,24 @@ geofiles_command() {
     done
 
     if [ "$restart_needed" = true ]; then
-        sed -i "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $DATA_DIR/assets|" "$ENV_FILE"
-        grep -q '^XRAY_ASSETS_PATH =' "$ENV_FILE" || echo "XRAY_ASSETS_PATH = $DATA_DIR/assets" >> "$ENV_FILE"
+        # Get the container path from the volume mapping
+        service_name="node"
+        existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
+        if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
+            # Extract container path (everything after the colon)
+            if [[ "$existing_volume" == *:* ]]; then
+                container_path="${existing_volume#*:}"
+                # XRAY_ASSETS_PATH should point to the container path
+                xray_assets_path="${container_path}/assets"
+            else
+                xray_assets_path="$DATA_DIR/assets"
+            fi
+        else
+            xray_assets_path="$DATA_DIR/assets"
+        fi
+
+        sed -i "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $xray_assets_path|" "$ENV_FILE"
+        grep -q '^XRAY_ASSETS_PATH =' "$ENV_FILE" || echo "XRAY_ASSETS_PATH = $xray_assets_path" >> "$ENV_FILE"
         colorized_echo blue "XRAY_ASSETS_PATH updated in $ENV_FILE"
         colorized_echo blue "Restarting node services..."
         restart_command -n
