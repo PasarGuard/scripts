@@ -1189,9 +1189,6 @@ update_core_command() {
     check_running_as_root
     get_xray_core
 
-    sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${DATA_DIR}/xray-core/xray|" "$APP_DIR/.env"
-    grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${DATA_DIR}/xray-core/xray" >>"$APP_DIR/.env"
-
     # Ensure volumes match DATA_DIR when custom name is used
     service_name="node"
     existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
@@ -1205,6 +1202,14 @@ update_core_command() {
         fi
         # Update volumes to use DATA_DIR (which is based on APP_NAME)
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
+
+        # Set XRAY_EXECUTABLE_PATH to the container path, not host path
+        sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray|" "$APP_DIR/.env"
+        grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray" >>"$APP_DIR/.env"
+    else
+        # Fallback to default if no volume found
+        sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray|" "$APP_DIR/.env"
+        grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray" >>"$APP_DIR/.env"
     fi
 
     # Restart node
