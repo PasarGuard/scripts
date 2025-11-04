@@ -1144,9 +1144,8 @@ restore_command() {
     colorized_echo green "✓ Database configuration detected: $db_type"
 
     # Confirm restore
-    colorized_echo red "⚠️  CRITICAL WARNING: This action is NOT REVERSIBLE!"
-    colorized_echo red "   All current data will be permanently lost!"
-    colorized_echo yellow "This will overwrite your current $db_type database!"
+    colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
+    colorized_echo yellow "WARNING: This will overwrite your current $db_type database!"
     colorized_echo blue "Database type: $db_type"
     if [ -n "$db_name" ]; then
         colorized_echo blue "Database name: $db_name"
@@ -1170,43 +1169,36 @@ restore_command() {
     done
 
     # Stop pasarguard services before restore for clean state
-    colorized_echo blue "🛑 Stopping pasarguard services for clean restore..."
+    colorized_echo blue "Stopping pasarguard services for clean restore..."
     if [[ "$db_type" == "sqlite" ]]; then
         # For SQLite, stop all services since we need to restore files
         down_pasarguard
-        colorized_echo green "✓ All services stopped"
     else
         # For containerized databases, just stop the pasarguard app container
         # Keep database containers running for restore via docker exec
         $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" stop pasarguard 2>/dev/null || true
-        colorized_echo green "✓ PasarGuard app container stopped"
     fi
 
     # Perform restore
-    colorized_echo blue "🔄 Starting database restore process..."
+    colorized_echo red "⚠️  DANGER: Starting database restore - this will overwrite existing data!"
+    colorized_echo blue "Starting database restore..."
 
     case $db_type in
     sqlite)
-        colorized_echo blue "🗑️  Preparing SQLite data directory for restore..."
-        colorized_echo yellow "Removing existing SQLite database files..."
-        if [ -f "$sqlite_file" ]; then
-            colorized_echo blue "Creating backup of current database..."
-            cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
-            rm -f "$sqlite_file" 2>>"$log_file"
-            colorized_echo green "✓ Current database backed up and removed"
-        fi
-
         if [ ! -f "$temp_restore_dir/db_backup.sqlite" ]; then
             colorized_echo red "SQLite backup file not found in backup archive."
             rm -rf "$temp_restore_dir"
             exit 1
         fi
 
-        colorized_echo blue "Restoring SQLite database..."
+        if [ -f "$sqlite_file" ]; then
+            cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+        fi
+
         if cp "$temp_restore_dir/db_backup.sqlite" "$sqlite_file" 2>>"$log_file"; then
-            colorized_echo green "✓ SQLite database restored successfully."
+            colorized_echo green "SQLite database restored successfully."
         else
-            colorized_echo red "❌ Failed to restore SQLite database."
+            colorized_echo red "Failed to restore SQLite database."
             echo "SQLite restore failed" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
@@ -1245,32 +1237,15 @@ restore_command() {
                     db_type_name="MariaDB"
                 fi
 
-                colorized_echo blue "🗑️  Preparing $db_type_name data for restore..."
-                colorized_echo yellow "Removing existing $db_type_name data..."
-
-                # Stop the container first
-                colorized_echo blue "Stopping $db_type_name container..."
-                $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" stop "$db_type" 2>/dev/null || docker stop "$container_name" 2>/dev/null || true
-
-                # Remove MySQL data directory from host (bind mounted directory)
-                # The compose file typically uses /var/lib/mysql/${APP_NAME}:/var/lib/mysql
-                colorized_echo blue "Removing MySQL data directory..."
-                rm -rf "/var/lib/mysql/${APP_NAME}" 2>>"$log_file" || {
-                    colorized_echo yellow "⚠️  Could not remove MySQL data directory, continuing..."
-                }
-
-                colorized_echo green "✓ $db_type_name container prepared for restore"
-
                 colorized_echo blue "Restoring $db_type_name database from container: $container_name"
 
             # Use root user if MYSQL_ROOT_PASSWORD is available
             if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                 colorized_echo blue "Using root user for restore..."
-                colorized_echo blue "Importing backup data..."
                     if docker exec -i "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                        colorized_echo green "✓ $db_type_name database restored successfully."
+                        colorized_echo green "$db_type_name database restored successfully."
                 else
-                        colorized_echo red "❌ Failed to restore $db_type_name database."
+                        colorized_echo red "Failed to restore $db_type_name database."
                         echo "$db_type_name restore failed with root user" >>"$log_file"
                     rm -rf "$temp_restore_dir"
                     exit 1
@@ -1281,17 +1256,16 @@ restore_command() {
                 local restore_password="${db_password:-${DB_PASSWORD:-}}"
 
                 if [ -z "$restore_password" ]; then
-                    colorized_echo red "❌ No database password found for restore."
+                    colorized_echo red "No database password found for restore."
                     rm -rf "$temp_restore_dir"
                     exit 1
                 fi
 
                 colorized_echo blue "Using app user '$restore_user' for restore..."
-                colorized_echo blue "Importing backup data to database '$db_name'..."
                     if docker exec -i "$container_name" "$mysql_cmd" -u "$restore_user" -p"$restore_password" "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                        colorized_echo green "✓ $db_type_name database restored successfully."
+                        colorized_echo green "$db_type_name database restored successfully."
                 else
-                        colorized_echo red "❌ Failed to restore $db_type_name database."
+                        colorized_echo red "Failed to restore $db_type_name database."
                         echo "$db_type_name restore failed with app user" >>"$log_file"
                     rm -rf "$temp_restore_dir"
                     exit 1
@@ -1331,39 +1305,52 @@ restore_command() {
             fi
             container_name="$verified_container"
 
-            colorized_echo blue "🗑️  Preparing $db_type data for restore..."
-            colorized_echo yellow "Removing existing $db_type data..."
-
-            # Stop the container first
-            colorized_echo blue "Stopping $db_type container..."
-            $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" stop "$db_type" 2>/dev/null || docker stop "$container_name" 2>/dev/null || true
-
-            # Remove PostgreSQL data directory from host (bind mounted directory)
-            # The compose file typically uses /var/lib/postgresql/${APP_NAME}:/var/lib/postgresql
-            colorized_echo blue "Removing PostgreSQL data directory..."
-            rm -rf "/var/lib/postgresql/${APP_NAME}" 2>>"$log_file" || {
-                colorized_echo yellow "⚠️  Could not remove PostgreSQL data directory, continuing..."
-            }
-
-            colorized_echo green "✓ $db_type container prepared for restore"
-
             colorized_echo blue "Restoring $db_type database from container: $container_name"
 
-            # Import backup data - since we removed all data, we need to restore as postgres superuser
-            colorized_echo blue "Importing backup data..."
-            export PGPASSWORD="$POSTGRES_PASSWORD"
+            # Prepare restore credentials
+                local restore_user="${db_user:-${DB_USER:-postgres}}"
+                local restore_password="${db_password:-${DB_PASSWORD:-}}"
 
-            if docker exec -i "$container_name" psql -U postgres -d postgres < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                colorized_echo green "✓ $db_type database restored successfully."
+                if [ -z "$restore_password" ]; then
+                    colorized_echo red "No database password found for restore."
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+
+            # Try to restore using app user credentials first (most common case)
+            # This works because pg_dump backups can be restored by the user who created them
+            colorized_echo blue "Attempting restore using app user '$restore_user' to database '$db_name'..."
+                export PGPASSWORD="$restore_password"
+            local restore_success=false
+            
+            # First try restoring to the specific database with app user
+                if docker exec -i "$container_name" psql -U "$restore_user" -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    colorized_echo green "$db_type database restored successfully."
+                restore_success=true
             else
-                colorized_echo red "❌ Failed to restore $db_type database."
-                colorized_echo yellow "Check log file for details: $log_file"
-                unset PGPASSWORD
-                rm -rf "$temp_restore_dir"
-                exit 1
+                # If that fails, try using postgres superuser
+                # In standard postgres Docker images, POSTGRES_PASSWORD also sets the postgres superuser password
+                colorized_echo yellow "Trying with postgres superuser..."
+                if docker exec -i "$container_name" psql -U postgres -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    colorized_echo green "$db_type database restored successfully."
+                    restore_success=true
+                else
+                    # Try restoring to postgres database (for pg_dumpall backups)
+                    if docker exec -i "$container_name" psql -U postgres -d postgres < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "$db_type database restored successfully."
+                        restore_success=true
+                    fi
+                fi
             fi
-
-            unset PGPASSWORD
+            
+                    unset PGPASSWORD
+            
+            if [ "$restore_success" = false ]; then
+                colorized_echo red "Failed to restore $db_type database."
+                colorized_echo yellow "Check log file for details: $log_file"
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+            fi
         else
             colorized_echo red "Remote $db_type restore not supported yet."
             rm -rf "$temp_restore_dir"
@@ -1378,40 +1365,34 @@ restore_command() {
     esac
 
     # Restore configuration files if needed
-    colorized_echo blue "📄 Restoring configuration files..."
+    colorized_echo blue "Restoring configuration files..."
     if [ -f "$temp_restore_dir/.env" ]; then
-        colorized_echo blue "Creating backup of current .env file..."
         cp "$temp_restore_dir/.env" "$APP_DIR/.env.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
         cp "$temp_restore_dir/.env" "$APP_DIR/.env" 2>>"$log_file"
-        colorized_echo green "✓ Environment file restored"
+        colorized_echo green "Environment file restored."
     fi
 
     if [ -f "$temp_restore_dir/docker-compose.yml" ]; then
-        colorized_echo blue "Creating backup of current docker-compose.yml..."
         cp "$temp_restore_dir/docker-compose.yml" "$APP_DIR/docker-compose.yml.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
         cp "$temp_restore_dir/docker-compose.yml" "$APP_DIR/docker-compose.yml" 2>>"$log_file"
-        colorized_echo green "✓ Docker Compose file restored"
+        colorized_echo green "Docker Compose file restored."
     fi
 
     # Clean up
-    colorized_echo blue "🧹 Cleaning up temporary files..."
     rm -rf "$temp_restore_dir"
-    colorized_echo green "✓ Cleanup completed"
 
     # Restart pasarguard services
-    colorized_echo blue "🚀 Restarting pasarguard services..."
+    colorized_echo blue "Restarting pasarguard services..."
     if [[ "$db_type" == "sqlite" ]]; then
         # For SQLite, restart all services
         up_pasarguard
-        colorized_echo green "✓ All services restarted"
     else
         # For containerized databases, just restart the pasarguard app container
         $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" start pasarguard 2>/dev/null || true
-        colorized_echo green "✓ PasarGuard app container restarted"
     fi
 
-    colorized_echo green "🎉 Restore completed successfully!"
-    colorized_echo green "   PasarGuard services have been restarted and are ready to use."
+    colorized_echo green "Restore completed successfully!"
+    colorized_echo green "PasarGuard services have been restarted."
 }
 
 backup_command() {
