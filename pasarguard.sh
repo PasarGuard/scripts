@@ -2142,6 +2142,111 @@ prompt_for_pgadmin_password() {
 
 }
 
+check_existing_database_volumes() {
+    local db_type=$1
+    local found_volumes=()
+    
+    # Only check for containerized databases, skip SQLite
+    if [[ "$db_type" == "sqlite" ]]; then
+        return 0
+    fi
+    
+    # Check if docker is available
+    if ! command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # Common volume name patterns to check
+    local volume_patterns=(
+        "${APP_NAME}_${db_type}_data"
+        "${APP_NAME}-${db_type}-data"
+        "${APP_NAME}_${db_type}"
+        "${APP_NAME}-${db_type}"
+    )
+    
+    # For MySQL/MariaDB, also check both names
+    if [[ "$db_type" == "mysql" ]]; then
+        volume_patterns+=(
+            "${APP_NAME}_mariadb_data"
+            "${APP_NAME}-mariadb-data"
+            "${APP_NAME}_mariadb"
+            "${APP_NAME}-mariadb"
+        )
+    elif [[ "$db_type" == "mariadb" ]]; then
+        volume_patterns+=(
+            "${APP_NAME}_mysql_data"
+            "${APP_NAME}-mysql-data"
+            "${APP_NAME}_mysql"
+            "${APP_NAME}-mysql"
+        )
+    fi
+    
+    # For TimescaleDB, also check PostgreSQL patterns
+    if [[ "$db_type" == "timescaledb" ]]; then
+        volume_patterns+=(
+            "${APP_NAME}_postgresql_data"
+            "${APP_NAME}-postgresql-data"
+            "${APP_NAME}_postgresql"
+            "${APP_NAME}-postgresql"
+        )
+    elif [[ "$db_type" == "postgresql" ]]; then
+        volume_patterns+=(
+            "${APP_NAME}_timescaledb_data"
+            "${APP_NAME}-timescaledb-data"
+            "${APP_NAME}_timescaledb"
+            "${APP_NAME}-timescaledb"
+        )
+    fi
+    
+    # Check each pattern
+    for pattern in "${volume_patterns[@]}"; do
+        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q "^${pattern}$"; then
+            found_volumes+=("$pattern")
+        fi
+    done
+    
+    # If no volumes found, return
+    if [ ${#found_volumes[@]} -eq 0 ]; then
+        return 0
+    fi
+    
+    # Display found volumes
+    colorized_echo yellow "⚠️  WARNING: Found existing Docker volumes that may conflict with the installation:"
+    for volume in "${found_volumes[@]}"; do
+        # Try to get volume size, but don't fail if it doesn't work
+        local volume_size="unknown size"
+        local mountpoint=$(docker volume inspect "$volume" --format '{{.Mountpoint}}' 2>/dev/null)
+        if [ -n "$mountpoint" ] && [ -d "$mountpoint" ]; then
+            volume_size=$(du -sh "$mountpoint" 2>/dev/null | cut -f1 || echo "unknown size")
+        fi
+        colorized_echo yellow "  - $volume (Size: $volume_size)"
+    done
+    
+    echo
+    colorized_echo red "⚠️  DANGER: These volumes may contain data from a previous pasarguard installation."
+    colorized_echo yellow "If you proceed without deleting them, there may be conflicts or data corruption."
+    echo
+    colorized_echo cyan "Do you want to delete these volumes? (default: no)"
+    colorized_echo yellow "WARNING: This will PERMANENTLY delete all data in these volumes!"
+    read -p "Delete volumes? [y/N]: " delete_volumes
+    
+    if [[ "$delete_volumes" =~ ^[Yy]$ ]]; then
+        colorized_echo yellow "Deleting volumes..."
+        for volume in "${found_volumes[@]}"; do
+            if docker volume rm "$volume" >/dev/null 2>&1; then
+                colorized_echo green "✓ Deleted volume: $volume"
+            else
+                colorized_echo red "✗ Failed to delete volume: $volume (may be in use)"
+            fi
+        done
+        colorized_echo green "Volume cleanup completed."
+    else
+        colorized_echo yellow "Keeping existing volumes. Proceeding with installation..."
+        colorized_echo yellow "Note: If you encounter conflicts, you may need to manually remove these volumes later."
+    fi
+    echo
+}
+
 install_command() {
     check_running_as_root
 
@@ -2274,6 +2379,8 @@ install_command() {
     # Check if the version is valid and exists
     if [[ "$pasarguard_version" == "latest" || "$pasarguard_version" == "dev" || "$pasarguard_version" == "pre-release" || "$pasarguard_version" =~ $semver_regex ]]; then
         if check_version_exists "$pasarguard_version"; then
+            # Check for existing database volumes before installation
+            check_existing_database_volumes "$database_type"
             install_pasarguard "$pasarguard_version" "$major_version" "$database_type"
             echo "Installing $pasarguard_version version"
         else
