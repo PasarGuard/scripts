@@ -2144,82 +2144,64 @@ prompt_for_pgadmin_password() {
 
 check_existing_database_volumes() {
     local db_type=$1
-    local found_volumes=()
+    local found_paths=()
+    local found_named_volumes=()
     
-    # Only check for containerized databases, skip SQLite
     if [[ "$db_type" == "sqlite" ]]; then
         return 0
     fi
     
-    # Check if docker is available
-    if ! command -v docker >/dev/null 2>&1; then
-        return 0
-    fi
+    case "$db_type" in
+    mariadb|mysql)
+        found_paths=("/var/lib/mysql/pasarguard")
+        ;;
+    postgresql|timescaledb)
+        found_paths=("/var/lib/postgresql/pasarguard")
+        found_named_volumes=("pgadmin")
+        ;;
+    esac
     
-    # Common volume name patterns to check
-    local volume_patterns=(
-        "${APP_NAME}_${db_type}_data"
-        "${APP_NAME}-${db_type}-data"
-        "${APP_NAME}_${db_type}"
-        "${APP_NAME}-${db_type}"
-    )
-    
-    # For MySQL/MariaDB, also check both names
-    if [[ "$db_type" == "mysql" ]]; then
-        volume_patterns+=(
-            "${APP_NAME}_mariadb_data"
-            "${APP_NAME}-mariadb-data"
-            "${APP_NAME}_mariadb"
-            "${APP_NAME}-mariadb"
-        )
-    elif [[ "$db_type" == "mariadb" ]]; then
-        volume_patterns+=(
-            "${APP_NAME}_mysql_data"
-            "${APP_NAME}-mysql-data"
-            "${APP_NAME}_mysql"
-            "${APP_NAME}-mysql"
-        )
-    fi
-    
-    # For TimescaleDB, also check PostgreSQL patterns
-    if [[ "$db_type" == "timescaledb" ]]; then
-        volume_patterns+=(
-            "${APP_NAME}_postgresql_data"
-            "${APP_NAME}-postgresql-data"
-            "${APP_NAME}_postgresql"
-            "${APP_NAME}-postgresql"
-        )
-    elif [[ "$db_type" == "postgresql" ]]; then
-        volume_patterns+=(
-            "${APP_NAME}_timescaledb_data"
-            "${APP_NAME}-timescaledb-data"
-            "${APP_NAME}_timescaledb"
-            "${APP_NAME}-timescaledb"
-        )
-    fi
-    
-    # Check each pattern
-    for pattern in "${volume_patterns[@]}"; do
-        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q "^${pattern}$"; then
-            found_volumes+=("$pattern")
+    local existing_paths=()
+    for path in "${found_paths[@]}"; do
+        if [ -d "$path" ] && [ -n "$(ls -A "$path" 2>/dev/null)" ]; then
+            existing_paths+=("$path")
         fi
     done
     
-    # If no volumes found, return
-    if [ ${#found_volumes[@]} -eq 0 ]; then
+    local existing_named_volumes=()
+    if [ ${#found_named_volumes[@]} -gt 0 ] && command -v docker >/dev/null 2>&1; then
+        for vol_name in "${found_named_volumes[@]}"; do
+            local prefixed_vol="${APP_NAME}_${vol_name}"
+            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE "^${prefixed_vol}$|^${vol_name}$"; then
+                existing_named_volumes+=("$vol_name")
+            fi
+        done
+    fi
+    
+    if [ ${#existing_paths[@]} -eq 0 ] && [ ${#existing_named_volumes[@]} -eq 0 ]; then
         return 0
     fi
     
-    # Display found volumes
-    colorized_echo yellow "⚠️  WARNING: Found existing Docker volumes that may conflict with the installation:"
-    for volume in "${found_volumes[@]}"; do
-        # Try to get volume size, but don't fail if it doesn't work
-        local volume_size="unknown size"
-        local mountpoint=$(docker volume inspect "$volume" --format '{{.Mountpoint}}' 2>/dev/null)
-        if [ -n "$mountpoint" ] && [ -d "$mountpoint" ]; then
-            volume_size=$(du -sh "$mountpoint" 2>/dev/null | cut -f1 || echo "unknown size")
+    colorized_echo yellow "⚠️  WARNING: Found existing volumes/directories that may conflict with the installation:"
+    
+    for path in "${existing_paths[@]}"; do
+        local dir_size=$(du -sh "$path" 2>/dev/null | cut -f1 || echo "unknown size")
+        colorized_echo yellow "  - Directory: $path (Size: $dir_size)"
+    done
+    
+    for vol_name in "${existing_named_volumes[@]}"; do
+        local vol_size="unknown size"
+        local prefixed_vol="${APP_NAME}_${vol_name}"
+        local actual_vol=$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${prefixed_vol}$|^${vol_name}$" | head -n1)
+        if [ -n "$actual_vol" ]; then
+            local mountpoint=$(docker volume inspect "$actual_vol" --format '{{.Mountpoint}}' 2>/dev/null)
+            if [ -n "$mountpoint" ] && [ -d "$mountpoint" ]; then
+                vol_size=$(du -sh "$mountpoint" 2>/dev/null | cut -f1 || echo "unknown size")
+            fi
+            colorized_echo yellow "  - Docker volume: $actual_vol (Size: $vol_size)"
+        else
+            colorized_echo yellow "  - Docker volume: $vol_name"
         fi
-        colorized_echo yellow "  - $volume (Size: $volume_size)"
     done
     
     echo
@@ -2232,13 +2214,27 @@ check_existing_database_volumes() {
     
     if [[ "$delete_volumes" =~ ^[Yy]$ ]]; then
         colorized_echo yellow "Deleting volumes..."
-        for volume in "${found_volumes[@]}"; do
-            if docker volume rm "$volume" >/dev/null 2>&1; then
-                colorized_echo green "✓ Deleted volume: $volume"
+        
+        for path in "${existing_paths[@]}"; do
+            if rm -rf "$path" 2>/dev/null; then
+                colorized_echo green "✓ Deleted directory: $path"
             else
-                colorized_echo red "✗ Failed to delete volume: $volume (may be in use)"
+                colorized_echo red "✗ Failed to delete directory: $path (may be in use or permission denied)"
             fi
         done
+        
+        for vol_name in "${existing_named_volumes[@]}"; do
+            local prefixed_vol="${APP_NAME}_${vol_name}"
+            local actual_vol=$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${prefixed_vol}$|^${vol_name}$" | head -n1)
+            if [ -n "$actual_vol" ]; then
+                if docker volume rm "$actual_vol" >/dev/null 2>&1; then
+                    colorized_echo green "✓ Deleted Docker volume: $actual_vol"
+                else
+                    colorized_echo red "✗ Failed to delete Docker volume: $actual_vol (may be in use)"
+                fi
+            fi
+        done
+        
         colorized_echo green "Volume cleanup completed."
     else
         colorized_echo yellow "Keeping existing volumes. Proceeding with installation..."
@@ -2379,7 +2375,6 @@ install_command() {
     # Check if the version is valid and exists
     if [[ "$pasarguard_version" == "latest" || "$pasarguard_version" == "dev" || "$pasarguard_version" == "pre-release" || "$pasarguard_version" =~ $semver_regex ]]; then
         if check_version_exists "$pasarguard_version"; then
-            # Check for existing database volumes before installation
             check_existing_database_volumes "$database_type"
             install_pasarguard "$pasarguard_version" "$major_version" "$database_type"
             echo "Installing $pasarguard_version version"
