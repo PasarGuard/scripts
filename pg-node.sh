@@ -4,6 +4,7 @@ set -e
 # Handle global options
 AUTO_CONFIRM=false
 APP_NAME=""
+CUSTOM_NAME_SET=false
 ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -17,6 +18,7 @@ while [[ $# -gt 0 ]]; do
             exit 1
         fi
         APP_NAME="$2"
+        CUSTOM_NAME_SET=true
         shift 2
         ;;
     --name=*)
@@ -25,6 +27,7 @@ while [[ $# -gt 0 ]]; do
             echo "Error: --name requires a value." >&2
             exit 1
         fi
+        CUSTOM_NAME_SET=true
         shift
         ;;
     *)
@@ -34,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 set -- "${ARGS[@]}"
+COMMAND="$1"
 
 # Fetch IP address from ifconfig.io API
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
@@ -46,6 +50,13 @@ fi
 if [ -z "$APP_NAME" ]; then
     SCRIPT_NAME=$(basename "$0")
     APP_NAME="${SCRIPT_NAME%.*}"
+fi
+
+if [[ "$CUSTOM_NAME_SET" == true && "$COMMAND" =~ ^(install|install-script)$ ]]; then
+    if command -v "$APP_NAME" >/dev/null 2>&1; then
+        echo "Error: '$APP_NAME' is an existing Linux command. Please choose a different --name." >&2
+        exit 1
+    fi
 fi
 
 INSTALL_DIR="/opt"
