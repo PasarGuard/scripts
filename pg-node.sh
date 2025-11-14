@@ -3,11 +3,28 @@ set -e
 
 # Handle global options
 AUTO_CONFIRM=false
+APP_NAME=""
 ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
     -y | --yes)
         AUTO_CONFIRM=true
+        shift
+        ;;
+    --name)
+        if [[ -z "${2:-}" ]]; then
+            echo "Error: --name requires a value." >&2
+            exit 1
+        fi
+        APP_NAME="$2"
+        shift 2
+        ;;
+    --name=*)
+        APP_NAME="${1#*=}"
+        if [[ -z "$APP_NAME" ]]; then
+            echo "Error: --name requires a value." >&2
+            exit 1
+        fi
         shift
         ;;
     *)
@@ -17,17 +34,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 set -- "${ARGS[@]}"
-
-if [[ "$1" == "install" || "$1" == "install script" ]]; then
-    if echo "$@" | grep -q -- "--name"; then
-        APP_NAME=$(echo "$@" | sed -n 's/.*--name \([^ ]*\).*/\1/p')
-    fi
-else
-    if echo "$@" | grep -q -- "--name"; then
-        echo "Error: --name is only allowed with 'install' or 'install script' commands."
-        exit 1
-    fi
-fi
 
 # Fetch IP address from ifconfig.io API
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
@@ -1214,7 +1220,7 @@ update_core_command() {
 
     # Restart node
     colorized_echo red "Restarting node..."
-    $APP_NAME restart -n
+    restart_command -n
     colorized_echo blue "Installation of XRAY-CORE version $selected_version completed."
 }
 
@@ -1296,6 +1302,7 @@ usage() {
     echo
     colorized_echo cyan "Options:"
     colorized_echo yellow "  -y, --yes       $(tput sgr0)– Use default answers for all prompts"
+    colorized_echo yellow "  --name NAME     $(tput sgr0)– Target a specific node instance"
     echo
 
     colorized_echo cyan "Commands:"
