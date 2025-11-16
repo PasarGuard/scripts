@@ -16,64 +16,68 @@
 
 ### 📦 Examples
 
+> ⚠️ The installation scripts are larger than many shells' command-line limits, so feed them through STDIN ( `curl ... | sudo bash -s --` ) instead of `sudo bash -c "$(curl ...)"` to avoid `Argument list too long`.
+
 -   **Install pasarguard with SQLite**:
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | sudo bash -s -- @ install
     ```
 
 -   **Install pasarguard with MySQL**:
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database mysql
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | sudo bash -s -- @ install --database mysql
     ```
 
 -   **Install pasarguard with PostgreSQL(v1+ only)**:
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database postgresql
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | sudo bash -s -- @ install --database postgresql
     ```
 
 -   **Install pasarguard with TimescaleDB(v1+ only) and pre-release version**:
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database timescaledb --pre-release
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | sudo bash -s -- @ install --database timescaledb --pre-release
     ```
 
 -   **Install pasarguard with MariaDB and Dev branch**:
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database mariadb --dev
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | sudo bash -s -- @ install --database mariadb --dev
     ```
 
 -   **Install pasarguard with MariaDB and Manual version**:
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database mariadb --version v0.5.2
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh | sudo bash -s -- @ install --database mariadb --version v0.5.2
     ```
 
 ## Installing Node
 
 ### 📦 Examples
 
+> ⚠️ Use the same `curl ... | sudo bash -s --` invocation style for node installation to avoid command-length limits on some systems.
+
 -   **Install Node**
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh | sudo bash -s -- @ install
     ```
 -   **Install Node Manual version:**
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --version 0.1.0
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh | sudo bash -s -- @ install --version 0.1.0
     ```
 -   **Install Node pre-release version:**
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --pre-release
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh | sudo bash -s -- @ install --pre-release
     ```
 
 -   **Install Node with custom name:**
 
     ```bash
-    sudo bash -c "$(curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --name Node2
+    curl -sL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh | sudo bash -s -- @ install --name Node2
     ```
 
     > 📌 **Tip:**  
