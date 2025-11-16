@@ -439,7 +439,26 @@ send_backup_to_telegram() {
             colorized_echo red "Incomplete backup parts for $base"
             return 1
         fi
+    elif [[ "$latest_backup" =~ \.z[0-9]{2}$ ]]; then
+        local base="${latest_backup%.z??}"
+        while IFS= read -r file; do
+            [ -n "$file" ] && backup_paths+=("$file")
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base}.z[0-9][0-9]" | sort)
+        if [ -f "$backup_dir/${base}.zip" ]; then
+            backup_paths+=("$backup_dir/${base}.zip")
+        else
+            colorized_echo red "Missing final .zip file for split archive $base"
+            return 1
+        fi
     elif [[ "$latest_backup" =~ \.zip$ ]]; then
+        local base="${latest_backup%.zip}"
+        local split_files=()
+        while IFS= read -r file; do
+            [ -n "$file" ] && split_files+=("$file")
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base}.z[0-9][0-9]" | sort)
+        if [ ${#split_files[@]} -gt 0 ]; then
+            backup_paths=("${split_files[@]}")
+        fi
         backup_paths+=("$backup_dir/$latest_backup")
     elif [[ "$latest_backup" =~ \.tar\.gz$ ]]; then
         cleanup_dir="/tmp/pasarguard_backup_split"
@@ -1098,6 +1117,9 @@ restore_command() {
         if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]] && [[ ! "$filename" =~ \.part01\.zip$ ]]; then
             continue
         fi
+        if [[ "$filename" =~ \.z[0-9]{2}$ ]]; then
+            continue
+        fi
         backup_files+=("$file")
     done
 
@@ -1132,6 +1154,40 @@ restore_command() {
                 fi
                 local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
                 echo "$i. $filename (Parts: ${part_count:-1}, Total Size: $human_size, Date: $file_date)"
+            elif [[ "$filename" =~ \.zip$ ]]; then
+                local base_name="${filename%.zip}"
+                local zip_part_files=()
+                while IFS= read -r part_file; do
+                    zip_part_files+=("$part_file")
+                done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.z[0-9][0-9]" | sort)
+                if [ ${#zip_part_files[@]} -gt 0 ]; then
+                    local total_size_bytes=0
+                    for part_file in "${zip_part_files[@]}"; do
+                        local part_size=$(stat -c%s "$part_file" 2>/dev/null || stat -f%z "$part_file" 2>/dev/null)
+                        if [ -z "$part_size" ]; then
+                            part_size=$(wc -c <"$part_file")
+                        fi
+                        total_size_bytes=$((total_size_bytes + part_size))
+                    done
+                    local main_size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+                    if [ -z "$main_size" ]; then
+                        main_size=$(wc -c <"$file")
+                    fi
+                    total_size_bytes=$((total_size_bytes + main_size))
+                    local part_display=""
+                    if command -v numfmt >/dev/null 2>&1; then
+                        part_display=$(numfmt --to=iec --suffix=B "$total_size_bytes" 2>/dev/null || awk -v size="$total_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
+                    else
+                        part_display=$(awk -v size="$total_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
+                    fi
+                    local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
+                    local part_count=$(( ${#zip_part_files[@]} + 1 ))
+                    echo "$i. $filename (Zip splits: $part_count parts, Total Size: $part_display, Date: $file_date)"
+                else
+                    local file_size=$(du -h "$file" | cut -f1)
+                    local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
+                    echo "$i. $filename (Size: $file_size, Date: $file_date)"
+                fi
             else
                 local file_size=$(du -h "$file" | cut -f1)
                 local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
@@ -1679,7 +1735,7 @@ backup_command() {
     local error_messages=()
     local log_file="/var/log/pasarguard_backup_error.log"
     local final_backup_paths=()
-    local max_part_bytes=$((49 * 1000 * 1000)) # keep under Telegram's 50MB limit
+    local split_size_arg="47m" # keep Telegram chunks under 50MB
     >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
     
@@ -1698,6 +1754,7 @@ backup_command() {
     # Remove old backups before creating new one (keep only latest)
     rm -f "$backup_dir"/backup_*.tar.gz
     rm -f "$backup_dir"/backup_*.zip
+    rm -f "$backup_dir"/backup_*.z[0-9][0-9] 2>/dev/null || true
     mkdir -p "$backup_dir"
     
     # Clean up temp directory completely before starting
@@ -2208,7 +2265,7 @@ backup_command() {
     if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
-    elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
+    elif ! (cd "$temp_dir" && zip -rq -s "$split_size_arg" "$backup_file" .) 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
@@ -2217,28 +2274,10 @@ backup_command() {
     fi
 
     if [ -f "$backup_file" ]; then
-        local backup_size_bytes=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null)
-        if [ -z "$backup_size_bytes" ]; then
-            backup_size_bytes=$(wc -c <"$backup_file")
-        fi
-        if [ "$backup_size_bytes" -gt "$max_part_bytes" ]; then
-            colorized_echo yellow "Backup archive larger than ~50MB. Creating parts..."
-            if split -b "$max_part_bytes" -d -a 2 --numeric-suffixes=1 --additional-suffix=".zip" "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
-                while IFS= read -r file; do
-                    [ -n "$file" ] && final_backup_paths+=("$file")
-                done < <(find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.part*.zip" | sort)
-                rm -f "$backup_file"
-                if [ ${#final_backup_paths[@]} -eq 0 ]; then
-                    error_messages+=("Failed to create backup parts.")
-                    echo "Failed to locate backup parts after splitting." >>"$log_file"
-                fi
-            else
-                error_messages+=("Failed to split backup archive into parts.")
-                echo "Split command failed for $backup_file" >>"$log_file"
-            fi
-        else
-            final_backup_paths+=("$backup_file")
-        fi
+        while IFS= read -r file; do
+            final_backup_paths+=("$file")
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.z[0-9][0-9]" | sort)
+        final_backup_paths+=("$backup_file")
     fi
 
     # Clean up temp directory after archive is created
