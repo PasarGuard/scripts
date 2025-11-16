@@ -490,23 +490,17 @@ send_backup_to_telegram() {
     for part in "${backup_paths[@]}"; do
         local part_name=$(basename "$part")
         local custom_filename="$part_name"
-        # Escape special characters in variables first (only MarkdownV2 specials)
-        local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
-        local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
-        local escaped_time=$(printf '%s' "$backup_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
-        local restore_tip="📝 *Restore Tip*\nDownload all archive files - the \\*.zip plus any \\*.zXX parts - into the same folder, then start extraction from the \\*.zip file only."
-        local escaped_tip=$(printf '%s' "$restore_tip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+        local caption="📦 Backup Information
+🌐 Server IP: $server_ip
+📁 Backup File: $custom_filename
+⏰ Backup Time: $backup_time
 
-        local caption="📦 *Backup Information*
-🌐 *Server IP*: \`$escaped_server_ip\`
-📁 *Backup File*: \`$escaped_filename\`
-⏰ *Backup Time*: \`$escaped_time\`
-$escaped_tip"
+📝 Restore Tip
+Download all archive files - the *.zip plus any *.zXX parts - into the same folder, then start extraction from the *.zip file only."
 
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
-            -F caption="$(printf '%b' "$caption")" \
-            -F parse_mode="MarkdownV2" \
+            -F caption="$(printf '%s' "$caption")" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
         
         local http_code=$(echo "$response" | tail -n1)
@@ -551,41 +545,29 @@ send_backup_error_to_telegram() {
         server_ip="Unknown IP"
     fi
     local error_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
-    # Escape special characters in variables first (only MarkdownV2 specials)
-    local escaped_error_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
-    local escaped_errors=$(printf '%s' "$error_messages" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
-    local escaped_error_time=$(printf '%s' "$error_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
-
-    local message="⚠️ *Backup Error Notification*
-🌐 *Server IP*: \`$escaped_error_ip\`
-❌ *Errors*:
-\`$escaped_errors\`
-⏰ *Time*: \`$escaped_error_time\`"
-
-    message=$(printf '%b' "$message")
+    local message="⚠️ Backup Error Notification
+🌐 Server IP: $server_ip
+❌ Errors: $error_messages
+⏰ Time: $error_time"
 
     local max_length=1000
     if [ ${#message} -gt $max_length ]; then
-        message="${message:0:$((max_length - 50))}...
-\`[Message truncated]\`"
+        message="${message:0:$((max_length - 25))}...
+[Message truncated]"
     fi
 
     curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
         -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-        -d parse_mode="MarkdownV2" \
         -d text="$message" >/dev/null 2>&1 &&
         colorized_echo green "Backup error notification sent to Telegram." ||
         colorized_echo red "Failed to send error notification to Telegram."
 
     if [ -f "$log_file" ]; then
-        # Escape the error_time for the log caption (only MarkdownV2 specials)
-        local escaped_log_time=$(printf '%s' "$error_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
 
         response=$(curl "${curl_proxy_args[@]}" -s -w "%{http_code}" -o /tmp/tg_response.json \
             -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$log_file;filename=backup_error.log" \
-            -F caption="📜 *Backup Error Log* \\- $escaped_log_time" \
-            -F parse_mode="MarkdownV2" \
+            -F caption="📜 Backup Error Log - $error_time" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument")
 
         http_code="${response:(-3)}"
