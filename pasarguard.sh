@@ -490,17 +490,20 @@ send_backup_to_telegram() {
     for part in "${backup_paths[@]}"; do
         local part_name=$(basename "$part")
         local custom_filename="$part_name"
-        local caption="📦 Backup Information
+        local caption_text="📦 Backup Information
 🌐 Server IP: $server_ip
 📁 Backup File: $custom_filename
 ⏰ Backup Time: $backup_time
 
 📝 Restore Tip
 Download every archive file. Include the .zip file and all .zXX parts. Place them together in one folder and start extraction from the .zip file."
+        local escaped_caption=$(printf '%s' "$caption_text" | sed -e 's/&/\\&amp;/g' -e 's/</\\&lt;/g' -e 's/>/\\&gt;/g' -e 's/\"/\\&quot;/g')
+        local caption="<pre>$escaped_caption</pre>"
 
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
-            -F caption="$(printf '%s' "$caption")" \
+            -F caption="$caption" \
+            -F parse_mode="HTML" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
         
         local http_code=$(echo "$response" | tail -n1)
