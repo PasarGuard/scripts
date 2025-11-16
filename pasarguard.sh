@@ -496,7 +496,7 @@ send_backup_to_telegram() {
 ⏰ Backup Time: $backup_time
 
 📝 Restore Tip
-Download all archive files - the *.zip plus any *.zXX parts - into the same folder, then start extraction from the *.zip file only."
+Download every archive file. Include the .zip file and all .zXX parts. Place them together in one folder and start extraction from the .zip file."
 
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
