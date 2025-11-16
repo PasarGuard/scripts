@@ -17,6 +17,53 @@ COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
 LAST_XRAY_CORES=10
 
+replace_or_append_env_var() {
+    local key="$1"
+    local value="$2"
+    local quote_value="${3:-false}"
+    local target_file="${4:-$ENV_FILE}"
+    local formatted_value="$value"
+
+    if [ "$quote_value" = "true" ]; then
+        local sanitized_value="${value//\"/\\\"}"
+        formatted_value="\"$sanitized_value\""
+    fi
+
+    local escaped_value
+    escaped_value=$(printf '%s' "$formatted_value" | sed -e 's/[&|\\]/\\&/g')
+
+    if grep -q "^$key=" "$target_file"; then
+        sed -i "s|^$key=.*|$key=$escaped_value|" "$target_file"
+    else
+        printf '%s=%s\n' "$key" "$formatted_value" >>"$target_file"
+    fi
+}
+
+is_valid_proxy_url() {
+    local proxy_url="$1"
+    [[ -z "$proxy_url" ]] && return 1
+    if [[ "$proxy_url" =~ ^(http|https|socks|socks4|socks4a|socks5|socks5h):// ]]; then
+        return 0
+    fi
+    return 1
+}
+
+get_backup_proxy_url() {
+    local proxy_value="${BACKUP_PROXY_URL:-${BACKUP_PROXY:-}}"
+    local proxy_enabled="${BACKUP_PROXY_ENABLED:-}"
+
+    if [ -z "$proxy_value" ]; then
+        return 1
+    fi
+
+    if [ -n "$proxy_enabled" ] && [[ ! "$proxy_enabled" =~ ^([Tt]rue|[Yy]es|1)$ ]]; then
+        return 1
+    fi
+
+    printf '%s\n' "$proxy_value"
+    return 0
+}
+
 colorized_echo() {
     local color=$1
     local text=$2
@@ -328,6 +375,7 @@ send_backup_to_telegram() {
             fi
             key=$(echo "$key" | xargs)
             value=$(echo "$value" | xargs)
+            value=$(echo "$value" | sed -E 's/^["'"'"'](.*)["'"'"']$/\1/')
             if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
                 export "$key"="$value"
             else
@@ -355,7 +403,20 @@ send_backup_to_telegram() {
         return 1
     fi
 
-    local server_ip=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || hostname -I 2>/dev/null | awk '{print $1}' || echo "Unknown IP")
+    local proxy_url=""
+    local curl_proxy_args=()
+    if proxy_url=$(get_backup_proxy_url); then
+        curl_proxy_args=(--proxy "$proxy_url")
+        colorized_echo cyan "Using configured proxy for Telegram backup upload."
+    fi
+
+    local server_ip="$(curl "${curl_proxy_args[@]}" -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
+    if [ -z "$server_ip" ]; then
+        server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    if [ -z "$server_ip" ]; then
+        server_ip="Unknown IP"
+    fi
     local backup_dir="$APP_DIR/backup"
     local latest_backup=$(ls -t "$backup_dir" 2>/dev/null | head -n 1)
 
@@ -418,7 +479,7 @@ send_backup_to_telegram() {
 📁 *Backup File*: \`$escaped_filename\`
 ⏰ *Backup Time*: \`$escaped_time\`"
 
-        local response=$(curl -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
+        local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
             -F caption="$(printf '%b' "$caption")" \
             -F parse_mode="MarkdownV2" \
@@ -452,7 +513,19 @@ send_backup_to_telegram() {
 send_backup_error_to_telegram() {
     local error_messages=$1
     local log_file=$2
-    local server_ip=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || hostname -I 2>/dev/null | awk '{print $1}' || echo "Unknown IP")
+    local proxy_url=""
+    local curl_proxy_args=()
+    if proxy_url=$(get_backup_proxy_url); then
+        curl_proxy_args=(--proxy "$proxy_url")
+        colorized_echo cyan "Using configured proxy for Telegram error notifications."
+    fi
+    local server_ip="$(curl "${curl_proxy_args[@]}" -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
+    if [ -z "$server_ip" ]; then
+        server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    if [ -z "$server_ip" ]; then
+        server_ip="Unknown IP"
+    fi
     local error_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
     # Escape special characters in variables first (only MarkdownV2 specials)
     local escaped_error_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
@@ -473,7 +546,7 @@ send_backup_error_to_telegram() {
 \`[Message truncated]\`"
     fi
 
-    curl -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
+    curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
         -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
         -d parse_mode="MarkdownV2" \
         -d text="$message" >/dev/null 2>&1 &&
@@ -484,7 +557,7 @@ send_backup_error_to_telegram() {
         # Escape the error_time for the log caption (only MarkdownV2 specials)
         local escaped_log_time=$(printf '%s' "$error_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
 
-        response=$(curl -s -w "%{http_code}" -o /tmp/tg_response.json \
+        response=$(curl "${curl_proxy_args[@]}" -s -w "%{http_code}" -o /tmp/tg_response.json \
             -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$log_file;filename=backup_error.log" \
             -F caption="📜 *Backup Error Log* \\- $escaped_log_time" \
@@ -508,6 +581,8 @@ backup_service() {
     local telegram_chat_id=""
     local cron_schedule=""
     local interval_hours=""
+    local backup_proxy_enabled="false"
+    local backup_proxy_url=""
 
     colorized_echo blue "====================================="
     colorized_echo blue "      Welcome to Backup Service      "
@@ -518,6 +593,10 @@ backup_service() {
             telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
             telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
             cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+            backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
+            backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
+            backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
+            [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
 
             if [[ "$cron_schedule" == "0 0 * * *" ]]; then
                 interval_hours=24
@@ -530,6 +609,11 @@ backup_service() {
             colorized_echo cyan "Telegram Bot API Key: $telegram_bot_key"
             colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
             colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
+            if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
+                colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
+            else
+                colorized_echo cyan "Proxy: Disabled"
+            fi
             colorized_echo green "====================================="
             echo "Choose an option:"
             echo "1. Check Backup Service"
@@ -623,10 +707,47 @@ backup_service() {
         fi
     done
 
+    while true; do
+        read -p "Do you need to use an HTTP/SOCKS proxy for Telegram backups? (y/N): " proxy_choice
+        case "$proxy_choice" in
+        [Yy]*)
+            backup_proxy_enabled="true"
+            break
+            ;;
+        [Nn]*|"")
+            backup_proxy_enabled="false"
+            break
+            ;;
+        *)
+            colorized_echo red "Invalid choice. Please enter y or n."
+            ;;
+        esac
+    done
+
+    if [ "$backup_proxy_enabled" = "true" ]; then
+        while true; do
+            read -p "Enter proxy URL (e.g. http://127.0.0.1:8080 or socks5://127.0.0.1:1080): " backup_proxy_url
+            backup_proxy_url=$(echo "$backup_proxy_url" | xargs)
+            if [ -z "$backup_proxy_url" ]; then
+                colorized_echo red "Proxy URL cannot be empty."
+                continue
+            fi
+            if is_valid_proxy_url "$backup_proxy_url"; then
+                break
+            else
+                colorized_echo red "Invalid proxy URL. Supported prefixes: http://, https://, socks5://, socks5h://, socks4://."
+            fi
+        done
+    else
+        backup_proxy_url=""
+    fi
+
     sed -i '/^BACKUP_SERVICE_ENABLED/d' "$ENV_FILE"
     sed -i '/^BACKUP_TELEGRAM_BOT_KEY/d' "$ENV_FILE"
     sed -i '/^BACKUP_TELEGRAM_CHAT_ID/d' "$ENV_FILE"
     sed -i '/^BACKUP_CRON_SCHEDULE/d' "$ENV_FILE"
+    sed -i '/^BACKUP_PROXY_ENABLED/d' "$ENV_FILE"
+    sed -i '/^BACKUP_PROXY_URL/d' "$ENV_FILE"
 
     {
         echo ""
@@ -635,6 +756,8 @@ backup_service() {
         echo "BACKUP_TELEGRAM_BOT_KEY=$telegram_bot_key"
         echo "BACKUP_TELEGRAM_CHAT_ID=$telegram_chat_id"
         echo "BACKUP_CRON_SCHEDULE=\"$cron_schedule\""
+        echo "BACKUP_PROXY_ENABLED=$backup_proxy_enabled"
+        echo "BACKUP_PROXY_URL=\"$backup_proxy_url\""
     } >>"$ENV_FILE"
 
     colorized_echo green "Backup service configuration saved in $ENV_FILE."
@@ -692,6 +815,10 @@ view_backup_service() {
     local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
     local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
     local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+    local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
+    local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
+    backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
+    [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
     local interval_hours=""
 
     if [[ "$cron_schedule" == "0 0 * * *" ]]; then
@@ -712,6 +839,11 @@ view_backup_service() {
     else
         colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
     fi
+    if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
+        colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
+    else
+        colorized_echo cyan "Proxy: Disabled"
+    fi
     colorized_echo blue "====================================="
     echo ""
     read -p "Press Enter to continue..."
@@ -726,6 +858,10 @@ edit_backup_service() {
     local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
     local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
     local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+    local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
+    local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
+    backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
+    [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
     local interval_hours=""
 
     if [[ "$cron_schedule" == "0 0 * * *" ]]; then
@@ -738,12 +874,17 @@ edit_backup_service() {
     colorized_echo blue "      Edit Backup Service            "
     colorized_echo blue "====================================="
     echo "Current configuration:"
+    local proxy_display="Disabled"
+    if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
+        proxy_display="Enabled ($backup_proxy_url)"
+    fi
     colorized_echo cyan "1. Telegram Bot API Key: $telegram_bot_key"
     colorized_echo cyan "2. Telegram Chat ID: $telegram_chat_id"
     colorized_echo cyan "3. Backup Interval: Every $interval_hours hour(s)"
-    colorized_echo yellow "4. Cancel"
+    colorized_echo cyan "4. Proxy: $proxy_display"
+    colorized_echo yellow "5. Cancel"
     echo ""
-    read -p "Which setting would you like to edit? (1-4): " edit_choice
+    read -p "Which setting would you like to edit? (1-5): " edit_choice
 
     case $edit_choice in
     1)
@@ -818,6 +959,53 @@ edit_backup_service() {
         done
         ;;
     4)
+        local new_proxy_enabled="$backup_proxy_enabled"
+        local new_proxy_url="$backup_proxy_url"
+        while true; do
+            read -p "Enable proxy for Telegram backups? (y/N) [current: $proxy_display]: " proxy_choice
+            case "$proxy_choice" in
+            [Yy]*)
+                new_proxy_enabled="true"
+                break
+                ;;
+            [Nn]*|"")
+                new_proxy_enabled="false"
+                break
+                ;;
+            *)
+                colorized_echo red "Invalid choice. Please enter y or n."
+                ;;
+            esac
+        done
+
+        if [ "$new_proxy_enabled" = "true" ]; then
+            while true; do
+                read -p "Enter proxy URL (e.g. http://127.0.0.1:8080 or socks5://127.0.0.1:1080) [current: $backup_proxy_url]: " input_proxy_url
+                if [ -z "$input_proxy_url" ]; then
+                    if [ -n "$backup_proxy_url" ]; then
+                        input_proxy_url="$backup_proxy_url"
+                    else
+                        colorized_echo red "Proxy URL cannot be empty."
+                        continue
+                    fi
+                fi
+                input_proxy_url=$(echo "$input_proxy_url" | xargs)
+                if is_valid_proxy_url "$input_proxy_url"; then
+                    new_proxy_url="$input_proxy_url"
+                    break
+                else
+                    colorized_echo red "Invalid proxy URL. Supported prefixes: http://, https://, socks5://, socks5h://, socks4://."
+                fi
+            done
+        else
+            new_proxy_url=""
+        fi
+
+        replace_or_append_env_var "BACKUP_PROXY_ENABLED" "$new_proxy_enabled"
+        replace_or_append_env_var "BACKUP_PROXY_URL" "$new_proxy_url" true
+        colorized_echo green "Backup proxy configuration updated successfully."
+        ;;
+    5)
         colorized_echo yellow "Edit cancelled."
         return
         ;;
@@ -838,6 +1026,8 @@ remove_backup_service() {
     sed -i '/BACKUP_TELEGRAM_BOT_KEY/d' "$ENV_FILE"
     sed -i '/BACKUP_TELEGRAM_CHAT_ID/d' "$ENV_FILE"
     sed -i '/BACKUP_CRON_SCHEDULE/d' "$ENV_FILE"
+    sed -i '/BACKUP_PROXY_ENABLED/d' "$ENV_FILE"
+    sed -i '/BACKUP_PROXY_URL/d' "$ENV_FILE"
 
     local temp_cron=$(mktemp)
     crontab -l 2>/dev/null >"$temp_cron"
