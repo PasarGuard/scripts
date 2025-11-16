@@ -494,11 +494,14 @@ send_backup_to_telegram() {
         local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
         local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
         local escaped_time=$(printf '%s' "$backup_time" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
+        local restore_tip="📝 *Restore Tip*\nDownload all archive files (the \\*.zip plus any \\*.zXX parts) into the same folder, then start extraction from the \\*.zip file only."
+        local escaped_tip=$(printf '%s' "$restore_tip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
 
         local caption="📦 *Backup Information*
 🌐 *Server IP*: \`$escaped_server_ip\`
 📁 *Backup File*: \`$escaped_filename\`
-⏰ *Backup Time*: \`$escaped_time\`"
+⏰ *Backup Time*: \`$escaped_time\`
+$escaped_tip"
 
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
