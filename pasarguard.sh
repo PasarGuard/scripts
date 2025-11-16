@@ -514,6 +514,7 @@ Restore tip: download every archive file (the .zip plus all .zXX parts), place t
                 # Extract error message from Telegram response
                 local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "Unknown error")
                 colorized_echo red "Failed to send backup part $custom_filename to Telegram: $error_msg"
+                echo "Telegram API status: $http_code" >&2
                 echo "Telegram API Response: $response_body" >&2
             fi
         else
