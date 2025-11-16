@@ -500,7 +500,7 @@ Download every archive file. Include the .zip file and all .zXX parts. Place the
         local escaped_caption=$(printf '%s' "$caption_text" | sed -e 's/&/\\&amp;/g' -e 's/</\\&lt;/g' -e 's/>/\\&gt;/g' -e 's/\"/\\&quot;/g')
         local caption="<pre>$escaped_caption</pre>"
 
-        echo "caption is: $caption"
+        colorized_echo red "caption is: $caption"
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
             -F caption="$caption" \
