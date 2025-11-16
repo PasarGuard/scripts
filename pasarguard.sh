@@ -428,6 +428,8 @@ send_backup_to_telegram() {
     local backup_paths=()
     local cleanup_dir=""
 
+    local telegram_split_bytes=$((49 * 1000 * 1000))
+
     if [[ "$latest_backup" =~ \.part[0-9]{2}\.zip$ ]]; then
         local base="${latest_backup%%.part*}"
         while IFS= read -r file; do
@@ -447,7 +449,7 @@ send_backup_to_telegram() {
         local backup_size=$(du -m "$legacy_backup" | cut -f1)
         if [ "$backup_size" -gt 49 ]; then
             colorized_echo yellow "Legacy backup is larger than 49MB. Splitting before upload..."
-            split -b 49M "$legacy_backup" "$cleanup_dir/${latest_backup}_part_"
+            split -b "$telegram_split_bytes" "$legacy_backup" "$cleanup_dir/${latest_backup}_part_"
         else
             cp "$legacy_backup" "$cleanup_dir/$latest_backup"
         fi
@@ -1677,7 +1679,7 @@ backup_command() {
     local error_messages=()
     local log_file="/var/log/pasarguard_backup_error.log"
     local final_backup_paths=()
-    local max_part_bytes=$((50 * 1024 * 1024))
+    local max_part_bytes=$((49 * 1000 * 1000)) # keep under Telegram's 50MB limit
     >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
     
@@ -2220,8 +2222,8 @@ backup_command() {
             backup_size_bytes=$(wc -c <"$backup_file")
         fi
         if [ "$backup_size_bytes" -gt "$max_part_bytes" ]; then
-            colorized_echo yellow "Backup archive larger than 50MB. Creating parts..."
-            if split -b 50M -d -a 2 --numeric-suffixes=1 --additional-suffix=".zip" "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
+            colorized_echo yellow "Backup archive larger than ~50MB. Creating parts..."
+            if split -b "$max_part_bytes" -d -a 2 --numeric-suffixes=1 --additional-suffix=".zip" "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
                 while IFS= read -r file; do
                     [ -n "$file" ] && final_backup_paths+=("$file")
                 done < <(find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.part*.zip" | sort)
