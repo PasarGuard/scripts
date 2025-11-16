@@ -487,6 +487,8 @@ send_backup_to_telegram() {
 
     local backup_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
 
+    local uploaded_files=()
+
     for part in "${backup_paths[@]}"; do
         local part_name=$(basename "$part")
         local custom_filename="$part_name"
@@ -502,14 +504,7 @@ send_backup_to_telegram() {
             # Check if response contains "ok":true
             if echo "$response_body" | grep -q '"ok":true'; then
                 colorized_echo green "Backup part $custom_filename successfully sent to Telegram."
-                local info_message="📦 Backup uploaded: $custom_filename
-Server IP: $server_ip
-Time: $backup_time
-
-Restore tip: download every archive file (the .zip plus all .zXX parts), place them in one folder, and start extraction from the .zip file."
-                curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
-                    -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-                    -d text="$info_message" >/dev/null 2>&1 || true
+                uploaded_files+=("$custom_filename")
             else
                 # Extract error message from Telegram response
                 local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "Unknown error")
@@ -523,6 +518,29 @@ Restore tip: download every archive file (the .zip plus all .zXX parts), place t
             echo "Telegram API Response: $response_body" >&2
         fi
     done
+
+    if [ ${#uploaded_files[@]} -gt 0 ]; then
+        local files_list=""
+        for file in "${uploaded_files[@]}"; do
+            files_list+="- $file"$'\n'
+        done
+        files_list="${files_list%$'\n'}"
+
+        local info_message=$'📦 Backup upload summary\n'
+        info_message+="Server IP: $server_ip\n"
+        info_message+="Time: $backup_time\n"
+        info_message+=$'Files uploaded:\n'
+        info_message+="$files_list"$'\n\n'
+        info_message+=$'Extraction guide:\n'
+        info_message+=$'Windows: Install and use 7-Zip. Download the .zip plus all .zXX parts into the same folder, then start extraction from the .zip file.\n'
+        info_message+=$'Linux: Use unzip (e.g., `unzip backup_xxx.zip`) with every .zXX part present in the same directory.\n'
+        info_message+=$'macOS: Use Archive Utility or run `unzip backup_xxx.zip` from Terminal with the .zXX parts beside the .zip file.\n'
+        info_message+=$'Always download every archive file (the .zip and all .zXX parts) before extracting.'
+
+        curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
+            -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
+            -d text="$info_message" >/dev/null 2>&1 || true
+    fi
 
     if [ -n "$cleanup_dir" ]; then
         rm -rf "$cleanup_dir"
