@@ -356,33 +356,58 @@ send_backup_to_telegram() {
     fi
 
     local server_ip=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || hostname -I 2>/dev/null | awk '{print $1}' || echo "Unknown IP")
-    local latest_backup=$(ls -t "$APP_DIR/backup" | head -n 1)
-    local backup_path="$APP_DIR/backup/$latest_backup"
+    local backup_dir="$APP_DIR/backup"
+    local latest_backup=$(ls -t "$backup_dir" 2>/dev/null | head -n 1)
 
-    if [ ! -f "$backup_path" ]; then
+    if [ -z "$latest_backup" ]; then
         colorized_echo red "No backups found to send."
-        return
+        return 1
     fi
 
-    local backup_size=$(du -m "$backup_path" | cut -f1)
-    local split_dir="/tmp/pasarguard_backup_split"
-    local is_single_file=true
+    local backup_paths=()
+    local cleanup_dir=""
 
-    mkdir -p "$split_dir"
-
-    if [ "$backup_size" -gt 49 ]; then
-        colorized_echo yellow "Backup is larger than 49MB. Splitting the archive..."
-        split -b 49M "$backup_path" "$split_dir/part_"
-        is_single_file=false
+    if [[ "$latest_backup" =~ \.part[0-9]{2}\.zip$ ]]; then
+        local base="${latest_backup%%.part*}"
+        while IFS= read -r file; do
+            [ -n "$file" ] && backup_paths+=("$file")
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base}.part*.zip" | sort)
+        if [ ${#backup_paths[@]} -eq 0 ]; then
+            colorized_echo red "Incomplete backup parts for $base"
+            return 1
+        fi
+    elif [[ "$latest_backup" =~ \.zip$ ]]; then
+        backup_paths+=("$backup_dir/$latest_backup")
+    elif [[ "$latest_backup" =~ \.tar\.gz$ ]]; then
+        cleanup_dir="/tmp/pasarguard_backup_split"
+        rm -rf "$cleanup_dir"
+        mkdir -p "$cleanup_dir"
+        local legacy_backup="$backup_dir/$latest_backup"
+        local backup_size=$(du -m "$legacy_backup" | cut -f1)
+        if [ "$backup_size" -gt 49 ]; then
+            colorized_echo yellow "Legacy backup is larger than 49MB. Splitting before upload..."
+            split -b 49M "$legacy_backup" "$cleanup_dir/${latest_backup}_part_"
+        else
+            cp "$legacy_backup" "$cleanup_dir/$latest_backup"
+        fi
+        while IFS= read -r file; do
+            [ -n "$file" ] && backup_paths+=("$file")
+        done < <(find "$cleanup_dir" -maxdepth 1 -type f -print | sort)
+        if [ ${#backup_paths[@]} -eq 0 ]; then
+            colorized_echo red "Failed to prepare legacy backup for upload."
+            rm -rf "$cleanup_dir"
+            return 1
+        fi
     else
-        cp "$backup_path" "$split_dir/part_aa"
+        colorized_echo red "Unsupported backup format: $latest_backup"
+        return 1
     fi
 
     local backup_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
 
-    for part in "$split_dir"/*; do
+    for part in "${backup_paths[@]}"; do
         local part_name=$(basename "$part")
-        local custom_filename="backup_${part_name}.tar.gz"
+        local custom_filename="$part_name"
         # Escape special characters in variables first (only MarkdownV2 specials)
         local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
         local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*[\]()~`>#+\-=|{}!.]/\\&/g')
@@ -419,7 +444,9 @@ send_backup_to_telegram() {
         fi
     done
 
-    rm -rf "$split_dir"
+    if [ -n "$cleanup_dir" ]; then
+        rm -rf "$cleanup_dir"
+    fi
 }
 
 send_backup_error_to_telegram() {
@@ -861,21 +888,30 @@ restore_command() {
     fi
 
     # List available backup files (find all backup-related files in backup directory)
-    local backup_files=()
+    local backup_candidates=()
     while IFS= read -r -d '' file; do
-        backup_files+=("$file")
-    done < <(find "$backup_dir" -maxdepth 1 \( -name "*backup*.gz" -o -name "*backup*.tar.gz" -o -name "*.tar.gz" \) -type f -print0 2>/dev/null)
+        backup_candidates+=("$file")
+    done < <(find "$backup_dir" -maxdepth 1 \( -name "*backup*.gz" -o -name "*backup*.tar.gz" -o -name "*.tar.gz" -o -name "*backup*.zip" -o -name "*.zip" \) -type f -print0 2>/dev/null)
 
-    if [ ${#backup_files[@]} -eq 0 ]; then
-        # Fallback: try to find any .gz files
+    if [ ${#backup_candidates[@]} -eq 0 ]; then
+        # Fallback: try to find any archive files
         while IFS= read -r -d '' file; do
-            backup_files+=("$file")
-        done < <(find "$backup_dir" -maxdepth 1 -name "*.gz" -type f -print0 2>/dev/null)
+            backup_candidates+=("$file")
+        done < <(find "$backup_dir" -maxdepth 1 \( -name "*.gz" -o -name "*.zip" \) -type f -print0 2>/dev/null)
     fi
+
+    local backup_files=()
+    for file in "${backup_candidates[@]}"; do
+        local filename=$(basename "$file")
+        if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]] && [[ ! "$filename" =~ \.part01\.zip$ ]]; then
+            continue
+        fi
+        backup_files+=("$file")
+    done
 
     if [ ${#backup_files[@]} -eq 0 ]; then
         colorized_echo red "No backup files found in $backup_dir"
-        colorized_echo yellow "Looking for files with extensions: .gz, .tar.gz or containing 'backup'"
+        colorized_echo yellow "Looking for files with extensions: .gz, .zip, .tar.gz or containing 'backup'"
         exit 1
     fi
 
@@ -884,9 +920,31 @@ restore_command() {
     for file in "${backup_files[@]}"; do
         if [ -f "$file" ]; then
             local filename=$(basename "$file")
-            local file_size=$(du -h "$file" | cut -f1)
-            local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
-            echo "$i. $filename (Size: $file_size, Date: $file_date)"
+            if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]]; then
+                local base_name="${filename%%.part*}"
+                local part_count=$(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | wc -l | awk '{print $1}')
+                [ -z "$part_count" ] && part_count=0
+                local total_size_bytes=0
+                while IFS= read -r part_file; do
+                    local part_size=$(stat -c%s "$part_file" 2>/dev/null || stat -f%z "$part_file" 2>/dev/null)
+                    if [ -z "$part_size" ]; then
+                        part_size=$(wc -c <"$part_file")
+                    fi
+                    total_size_bytes=$((total_size_bytes + part_size))
+                done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip")
+                local human_size=""
+                if command -v numfmt >/dev/null 2>&1; then
+                    human_size=$(numfmt --to=iec --suffix=B "$total_size_bytes" 2>/dev/null || awk -v size="$total_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
+                else
+                    human_size=$(awk -v size="$total_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
+                fi
+                local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
+                echo "$i. $filename (Parts: ${part_count:-1}, Total Size: $human_size, Date: $file_date)"
+            else
+                local file_size=$(du -h "$file" | cut -f1)
+                local file_date=$(date -r "$file" "+%Y-%m-%d %H:%M:%S")
+                echo "$i. $filename (Size: $file_size, Date: $file_date)"
+            fi
             ((i++))
         fi
     done
@@ -913,52 +971,70 @@ restore_command() {
 
     colorized_echo blue "Selected backup: $selected_filename"
 
-    # Extract backup
+    colorized_echo blue "Preparing archive for extraction..."
+    local archive_to_extract="$selected_file"
+    local archive_format="tar"
+
+    if [[ "$selected_filename" =~ \.part[0-9]{2}\.zip$ ]]; then
+        archive_format="zip"
+        local base_name="${selected_filename%%.part*}"
+        colorized_echo yellow "Detected split zip backup. Checking available parts..."
+        if [ ! -f "$backup_dir/${base_name}.part01.zip" ]; then
+            colorized_echo red "Missing ${base_name}.part01.zip. Cannot restore split backup."
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        local concatenated_file="$temp_restore_dir/${base_name}_combined.zip"
+        >"$concatenated_file"
+        local part_count=0
+        while IFS= read -r part_file; do
+            cat "$part_file" >>"$concatenated_file"
+            part_count=$((part_count + 1))
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | sort)
+        if [ "$part_count" -eq 0 ]; then
+            colorized_echo red "No parts found for $base_name"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        archive_to_extract="$concatenated_file"
+        colorized_echo green "✓ Combined $part_count part(s)"
+    elif [[ "$selected_filename" =~ \.zip$ ]]; then
+        archive_format="zip"
+    else
+        archive_format="tar"
+    fi
+
     colorized_echo blue "Extracting backup..."
-
-    # Check if it's a valid gzip file
-    if ! gzip -t "$selected_file" 2>/dev/null; then
-        colorized_echo red "ERROR: The backup file is not a valid gzip archive."
-        echo "File is not a valid gzip archive: $selected_file" >>"$log_file"
-        rm -rf "$temp_restore_dir"
-        exit 1
-    fi
-
-    # Check if this is a split backup file
-    if [[ "$selected_filename" =~ backup_part_[a-z]+\.tar\.gz ]]; then
-        colorized_echo yellow "Detected split backup file. Checking for all parts..."
-
-        # Look for all parts of this split backup
-        local base_name="${selected_filename%_part_*}"
-        local part_pattern="${base_name}_part_*.tar.gz"
-        local all_parts=()
-        while IFS= read -r -d '' file; do
-            all_parts+=("$file")
-        done < <(find "$backup_dir" -maxdepth 1 -name "$part_pattern" -type f -print0 2>/dev/null)
-
-        if [ ${#all_parts[@]} -gt 1 ]; then
-            colorized_echo blue "Found ${#all_parts[@]} parts. Concatenating before extraction..."
-            # Concatenate all parts in correct order (sorted)
-            local concatenated_file="$temp_restore_dir/backup_concatenated.tar.gz"
-            printf '%s\n' "${all_parts[@]}" | sort | xargs cat > "$concatenated_file"
-            selected_file="$concatenated_file"
-            colorized_echo green "✓ Parts concatenated successfully"
-        else
-            colorized_echo yellow "⚠ Warning: Only found 1 part of a split backup. This may be incomplete."
-            colorized_echo yellow "If you have multiple parts, ensure they're all in the backup directory."
-            colorized_echo yellow "Continuing with single part (may fail if incomplete)..."
+    if [ "$archive_format" = "zip" ]; then
+        if ! command -v unzip >/dev/null 2>&1; then
+            detect_os
+            install_package unzip
         fi
-    fi
-
-    # Try to extract the file
-    if ! tar -xzf "$selected_file" -C "$temp_restore_dir" 2>>"$log_file"; then
-        colorized_echo red "Failed to extract backup file."
-        echo "Failed to extract $selected_file" >>"$log_file"
-        if [[ "$selected_filename" =~ backup_part_[a-z]+\.tar\.gz ]]; then
-            colorized_echo yellow "This appears to be a split backup part. You may need all parts to restore successfully."
+        if ! unzip -tq "$archive_to_extract" >/dev/null 2>>"$log_file"; then
+            colorized_echo red "ERROR: The backup file is not a valid zip archive."
+            echo "File is not a valid zip archive: $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
         fi
-        rm -rf "$temp_restore_dir"
-        exit 1
+        if ! unzip -oq "$archive_to_extract" -d "$temp_restore_dir" 2>>"$log_file"; then
+            colorized_echo red "Failed to extract backup file."
+            echo "Failed to extract $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+    else
+        if ! gzip -t "$archive_to_extract" 2>/dev/null; then
+            colorized_echo red "ERROR: The backup file is not a valid gzip archive."
+            echo "File is not a valid gzip archive: $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        if ! tar -xzf "$archive_to_extract" -C "$temp_restore_dir" 2>>"$log_file"; then
+            colorized_echo red "Failed to extract backup file."
+            echo "Failed to extract $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
     fi
     colorized_echo green "✓ Archive extracted successfully"
 
@@ -1407,9 +1483,11 @@ backup_command() {
     local backup_dir="$APP_DIR/backup"
     local temp_dir="/tmp/pasarguard_backup"
     local timestamp=$(date +"%Y%m%d%H%M%S")
-    local backup_file="$backup_dir/backup_$timestamp.tar.gz"
+    local backup_file="$backup_dir/backup_$timestamp.zip"
     local error_messages=()
     local log_file="/var/log/pasarguard_backup_error.log"
+    local final_backup_paths=()
+    local max_part_bytes=$((50 * 1024 * 1024))
     >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
     
@@ -1420,8 +1498,14 @@ backup_command() {
         install_package rsync
     fi
 
+    if ! command -v zip >/dev/null 2>&1; then
+        detect_os
+        install_package zip
+    fi
+
     # Remove old backups before creating new one (keep only latest)
     rm -f "$backup_dir"/backup_*.tar.gz
+    rm -f "$backup_dir"/backup_*.zip
     mkdir -p "$backup_dir"
     
     # Clean up temp directory completely before starting
@@ -1932,12 +2016,37 @@ backup_command() {
     if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
-    elif ! tar -czf "$backup_file" -C "$temp_dir" . 2>>"$log_file"; then
+    elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
         local backup_size=$(du -h "$backup_file" | cut -f1)
         colorized_echo green "Backup archive created: $backup_file (Size: $backup_size)"
+    fi
+
+    if [ -f "$backup_file" ]; then
+        local backup_size_bytes=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null)
+        if [ -z "$backup_size_bytes" ]; then
+            backup_size_bytes=$(wc -c <"$backup_file")
+        fi
+        if [ "$backup_size_bytes" -gt "$max_part_bytes" ]; then
+            colorized_echo yellow "Backup archive larger than 50MB. Creating parts..."
+            if split -b 50M -d -a 2 --numeric-suffixes=1 --additional-suffix=".zip" "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
+                while IFS= read -r file; do
+                    [ -n "$file" ] && final_backup_paths+=("$file")
+                done < <(find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.part*.zip" | sort)
+                rm -f "$backup_file"
+                if [ ${#final_backup_paths[@]} -eq 0 ]; then
+                    error_messages+=("Failed to create backup parts.")
+                    echo "Failed to locate backup parts after splitting." >>"$log_file"
+                fi
+            else
+                error_messages+=("Failed to split backup archive into parts.")
+                echo "Split command failed for $backup_file" >>"$log_file"
+            fi
+        else
+            final_backup_paths+=("$backup_file")
+        fi
     fi
 
     # Clean up temp directory after archive is created
@@ -1955,12 +2064,19 @@ backup_command() {
         return 1
     fi
     
-    if [ ! -f "$backup_file" ]; then
+    if [ ${#final_backup_paths[@]} -eq 0 ]; then
         colorized_echo red "Backup file was not created. Check log file: $log_file"
         return 1
     fi
     
-    colorized_echo green "Backup completed successfully: $backup_file"
+    if [ ${#final_backup_paths[@]} -eq 1 ]; then
+        colorized_echo green "Backup completed successfully: ${final_backup_paths[0]}"
+    else
+        colorized_echo green "Backup completed successfully in ${#final_backup_paths[@]} parts:"
+        for part in "${final_backup_paths[@]}"; do
+            colorized_echo green "  - $(basename "$part")"
+        done
+    fi
     if [ -f "$ENV_FILE" ]; then
         send_backup_to_telegram "$backup_file"
     fi
