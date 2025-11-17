@@ -526,16 +526,17 @@ send_backup_to_telegram() {
         done
         files_list="${files_list%$'\n'}"
 
-        local info_message=$'📦 Backup upload summary\n'
-        info_message+="Server IP: $server_ip\n"
-        info_message+="Time: $backup_time\n"
-        info_message+=$'Files uploaded:\n'
-        info_message+="$files_list"$'\n\n'
-        info_message+=$'Extraction guide:\n'
-        info_message+=$'Windows: Install and use 7-Zip. Download the .zip plus all .zXX parts into the same folder, then start extraction from the .zip file.\n'
-        info_message+=$'Linux: Use unzip (e.g., `unzip backup_xxx.zip`) with every .zXX part present in the same directory.\n'
-        info_message+=$'macOS: Use Archive Utility or run `unzip backup_xxx.zip` from Terminal with the .zXX parts beside the .zip file.\n'
-        info_message+=$'Always download every archive file (the .zip and all .zXX parts) before extracting.'
+        local info_message=$'📦 Backup Upload Summary\n'
+        info_message+=$'──────────────────────\n'
+        info_message+="🌐 Server IP: $server_ip"$'\n'
+        info_message+="⏰ Time: $backup_time"$'\n'
+        info_message+=$'\n✅ Files Uploaded:\n'
+        info_message+="$files_list"$'\n'
+        info_message+=$'\n📂 Extraction Guide:\n'
+        info_message+=$'🪟 Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
+        info_message+=$'🐧 Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
+        info_message+=$'🍎 macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
+        info_message+=$'⚠️ Always download the .zip and every .zXX part before extracting.'
 
         curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
             -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
