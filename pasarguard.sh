@@ -407,7 +407,6 @@ send_backup_to_telegram() {
     local curl_proxy_args=()
     if proxy_url=$(get_backup_proxy_url); then
         curl_proxy_args=(--proxy "$proxy_url")
-        colorized_echo cyan "Using configured proxy for Telegram backup upload."
     fi
 
     local server_ip="$(curl "${curl_proxy_args[@]}" -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
@@ -487,14 +486,19 @@ send_backup_to_telegram() {
 
     local backup_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
 
-    local uploaded_files=()
-
     for part in "${backup_paths[@]}"; do
         local part_name=$(basename "$part")
         local custom_filename="$part_name"
 
+        local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
+        local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
+        local escaped_time=$(printf '%s' "$backup_time" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
+        local caption="📦 *Backup Information*\n🌐 *Server IP*: \`$escaped_server_ip\`\n📁 *Backup File*: \`$escaped_filename\`\n⏰ *Backup Time*: \`$escaped_time\`"
+
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
+            -F caption="$(printf '%b' "$caption")" \
+            -F parse_mode="MarkdownV2" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
         
         local http_code=$(echo "$response" | tail -n1)
@@ -504,7 +508,6 @@ send_backup_to_telegram() {
             # Check if response contains "ok":true
             if echo "$response_body" | grep -q '"ok":true'; then
                 colorized_echo green "Backup part $custom_filename successfully sent to Telegram."
-                uploaded_files+=("$custom_filename")
             else
                 # Extract error message from Telegram response
                 local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "Unknown error")
@@ -519,29 +522,6 @@ send_backup_to_telegram() {
         fi
     done
 
-    if [ ${#uploaded_files[@]} -gt 0 ]; then
-        local files_list=""
-        for file in "${uploaded_files[@]}"; do
-            files_list+="- $file"$'\n'
-        done
-        files_list="${files_list%$'\n'}"
-
-        local info_message=$'📦 Backup upload summary\n'
-        info_message+="Server IP: $server_ip\n"
-        info_message+="Time: $backup_time\n"
-        info_message+=$'Files uploaded:\n'
-        info_message+="$files_list"$'\n\n'
-        info_message+=$'Extraction guide:\n'
-        info_message+=$'Windows: Install and use 7-Zip. Download the .zip plus all .zXX parts into the same folder, then start extraction from the .zip file.\n'
-        info_message+=$'Linux: Use unzip (e.g., `unzip backup_xxx.zip`) with every .zXX part present in the same directory.\n'
-        info_message+=$'macOS: Use Archive Utility or run `unzip backup_xxx.zip` from Terminal with the .zXX parts beside the .zip file.\n'
-        info_message+=$'Always download every archive file (the .zip and all .zXX parts) before extracting.'
-
-        curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
-            -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-            -d text="$info_message" >/dev/null 2>&1 || true
-    fi
-
     if [ -n "$cleanup_dir" ]; then
         rm -rf "$cleanup_dir"
     fi
@@ -554,7 +534,6 @@ send_backup_error_to_telegram() {
     local curl_proxy_args=()
     if proxy_url=$(get_backup_proxy_url); then
         curl_proxy_args=(--proxy "$proxy_url")
-        colorized_echo cyan "Using configured proxy for Telegram error notifications."
     fi
     local server_ip="$(curl "${curl_proxy_args[@]}" -4 -s --max-time 5 ifconfig.me 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')"
     if [ -z "$server_ip" ]; then
