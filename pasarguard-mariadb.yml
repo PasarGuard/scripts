@@ -34,6 +34,7 @@ services:
       - --slow_query_log=1 # Enables slow query log for identifying performance issues
       - --slow_query_log_file=/var/lib/mysql/slow.log # Logs slow queries for troubleshooting
       - --long_query_time=2 # Defines slow query threshold as 2 seconds
+      - --innodb_snapshot_isolation=0   # Disables snapshot isolation for better performance
     volumes:
       - /var/lib/mysql/pasarguard:/var/lib/mysql
     healthcheck:
