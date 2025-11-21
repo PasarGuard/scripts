@@ -2267,6 +2267,17 @@ backup_command() {
         mkdir -p "$temp_dir/pasarguard_data"
     fi
 
+    # Remove Unix socket files so zip doesn't fail with ENXIO ("No such device or address")
+    if [ -d "$temp_dir" ]; then
+        local socket_files
+        socket_files=$(find "$temp_dir" -type s -print 2>/dev/null || true)
+        if [ -n "$socket_files" ]; then
+            colorized_echo yellow "Removing Unix socket files before archiving (zip cannot archive sockets)."
+            printf "%s\n" "$socket_files" >>"$log_file"
+            find "$temp_dir" -type s -delete >>"$log_file" 2>&1 || true
+        fi
+    fi
+
     colorized_echo blue "Creating backup archive..."
     # Verify temp_dir exists and has content before creating archive
     if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
