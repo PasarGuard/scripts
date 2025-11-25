@@ -1007,6 +1007,7 @@ identify_the_operating_system_and_architecture() {
 
 # Function to update the Xray core
 get_xray_core() {
+    local requested_version="${1:-}"
     identify_the_operating_system_and_architecture
     clear
 
@@ -1043,7 +1044,21 @@ get_xray_core() {
 
     versions=($(echo "$latest_releases" | grep -oP '"tag_name": "\K(.*?)(?=")'))
 
-    if [ "$AUTO_CONFIRM" = true ]; then
+    if [ ${#versions[@]} -eq 0 ]; then
+        echo -e "\033[1;31mNo Xray-core releases found.\033[0m"
+        exit 1
+    fi
+
+    if [[ -n "$requested_version" ]]; then
+        if [[ "$requested_version" == "latest" ]]; then
+            selected_version=${versions[0]}
+        elif [ "$(validate_version "$requested_version")" == "valid" ]; then
+            selected_version="$requested_version"
+        else
+            echo -e "\033[1;31mInvalid version or version does not exist. Please try again.\033[0m"
+            exit 1
+        fi
+    elif [ "$AUTO_CONFIRM" = true ]; then
         selected_version=${versions[0]}
     else
         while true; do
@@ -1204,7 +1219,31 @@ install_yq() {
 
 update_core_command() {
     check_running_as_root
-    get_xray_core
+    local core_version_arg=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        -v | --version)
+            if [[ -z "${2:-}" ]]; then
+                colorized_echo red "Error: --version requires a value."
+                exit 1
+            fi
+            core_version_arg="$2"
+            shift 2
+            ;;
+        -h | --help)
+            colorized_echo red "Usage: node core-update [--version VERSION]"
+            echo "  --version VERSION   Install a specific Xray-core version (use 'latest' for newest release)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+        esac
+    done
+
+    get_xray_core "$core_version_arg"
 
     # Ensure volumes match DATA_DIR when custom name is used
     service_name="node"
@@ -1336,6 +1375,8 @@ usage() {
     colorized_echo yellow "  -v, --version VERSION  $(tput sgr0)– Install specific version"
     colorized_echo yellow "  --pre-release          $(tput sgr0)– Install pre-release version"
     colorized_echo yellow "  --name NAME            $(tput sgr0)– Install with custom name"
+    colorized_echo cyan "Core-update Options:"
+    colorized_echo yellow "  --version VERSION     $(tput sgr0)– Update Xray-core to specific version (use 'latest' for newest)"
 
     echo
     colorized_echo cyan "Node Information:"
@@ -1463,7 +1504,8 @@ logs)
     logs_command "$@"
     ;;
 core-update)
-    update_core_command
+    shift
+    update_core_command "$@"
     ;;
 geofiles)
     shift

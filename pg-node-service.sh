@@ -104,13 +104,36 @@ respond() {
 handle_node_update(){
     log "Executing $APP_NAME update"
     $APP_NAME update
-    respond 200 "{\"detaile\":\"node updated successfully\"}"
+    respond 200 "{\"detail\":\"node updated successfully\"}"
 }
 
 handle_node_core_update(){
-    log "Executing $APP_NAME core-update"
-    $APP_NAME core-update
-    respond 200 "{\"detaile\":\"node core updated successfully\"}"
+    local body="${1:-}"
+    local core_version=""
+
+    if ! command -v jq >/dev/null 2>&1; then
+      log "jq is required to parse core_version from request body"
+      respond 500 '{"detail":"jq not installed on server"}'
+      return
+    fi
+
+    if [[ -n "$body" ]]; then
+      if ! core_version=$(printf '%s' "$body" | jq -r '."core_version" // ""' 2>/dev/null); then
+        log "Failed to parse JSON body for core_version"
+        respond 400 '{"detail":"Invalid JSON body"}'
+        return
+      fi
+    fi
+
+    if [[ -n "$core_version" ]]; then
+      log "Executing $APP_NAME core-update with version: $core_version"
+      if $APP_NAME core-update --version "$core_version"; then
+        respond 200 "{\"detail\":\"node core updated successfully\"}"
+      else
+        log "core-update failed for version: $core_version"
+        respond 404 "{\"detail\":\"core-update failed for version $(json_escape "$core_version")\"}"
+      fi
+    fi
 }
 
 handle_connection() {
@@ -126,7 +149,6 @@ handle_connection() {
   while IFS= read -r header_line; do
     header_line=${header_line%$'\r'}
     [[ -z "$header_line" ]] && break
-    log "Header: $header_line"
     if [[ "$header_line" =~ ^[Cc]ontent-[Ll]ength:\ ([0-9]+) ]]; then
       content_length=${BASH_REMATCH[1]}
     fi
@@ -161,7 +183,7 @@ handle_connection() {
     log "Body received: ${#body} bytes"
   fi
 
-  case "$method $path" in
+    case "$method $path" in
     "GET /")
       respond 200 '{"status":"ok"}'
       ;;
@@ -169,16 +191,16 @@ handle_connection() {
         handle_node_update
       ;;
     "POST /node/core_update")
-        handle_node_core_update
+        handle_node_core_update "$body"
       ;;
     *)
-      respond 404 '{"error":"Not found"}'
+      respond 404 '{"detail":"Not found"}'
       ;;
   esac
   log "Responded $LAST_STATUS to $method $path"
 }
 
-log "Bash REST API listening (TLS only) on https://localhost:${PORT}"
+log "Bash REST API listening on https://localhost:${PORT}"
 while true; do
   coproc OPENSSL { openssl s_server -quiet -accept "$PORT" -cert "$SSL_CERT_FILE" -key "$SSL_KEY_FILE" -naccept 1; }
   handle_connection <&"${OPENSSL[0]}" >&"${OPENSSL[1]}" || true
