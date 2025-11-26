@@ -40,7 +40,7 @@ else
   log "Env file not found, using defaults: $ENV_FILE"
 fi
 
-PORT="${PORT:-3000}"
+API_PORT="${API_PORT:-3000}"
 MAX_BODY=1048576
 API_KEY="${API_KEY:-}"
 
@@ -65,7 +65,7 @@ if ! command -v openssl >/dev/null 2>&1; then
   log "openssl is required for TLS mode"
   exit 1
 fi
-log "TLS enforced with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE on port $PORT"
+log "TLS enforced with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE on port $API_PORT"
 log "API key protection enabled"
 
 json_escape() {
@@ -200,9 +200,9 @@ handle_connection() {
   log "Responded $LAST_STATUS to $method $path"
 }
 
-log "Bash REST API listening on https://localhost:${PORT}"
+log "Bash REST API listening on https://localhost:${API_PORT}"
 while true; do
-  coproc OPENSSL { openssl s_server -quiet -accept "$PORT" -cert "$SSL_CERT_FILE" -key "$SSL_KEY_FILE" -naccept 1; }
+  coproc OPENSSL { openssl s_server -quiet -accept "$API_PORT" -cert "$SSL_CERT_FILE" -key "$SSL_KEY_FILE" -naccept 1; }
   handle_connection <&"${OPENSSL[0]}" >&"${OPENSSL[1]}" || true
   exec {OPENSSL[0]}>&-
   exec {OPENSSL[1]}>&-

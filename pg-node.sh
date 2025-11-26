@@ -77,6 +77,7 @@ SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
 FETCH_REPO="PasarGuard/scripts"
 SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node.sh"
+SERVICE_SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node-service.sh"
 
 colorized_echo() {
     local color=$1
@@ -113,6 +114,56 @@ check_running_as_root() {
         colorized_echo red "This command must be run as root."
         exit 1
     fi
+}
+
+set_service_paths() {
+    SERVICE_NAME="${APP_NAME}-service"
+    SERVICE_SCRIPT_PATH="/usr/local/bin/${SERVICE_NAME}.sh"
+    SERVICE_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
+}
+
+require_systemd() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        colorized_echo red "systemd is required to manage the service (systemctl not found)."
+        exit 1
+    fi
+}
+
+service_installed() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 1
+    fi
+    set_service_paths
+    if [ -f "$SERVICE_UNIT" ] || systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
+        return 0
+    fi
+    return 1
+}
+
+restart_service_if_installed() {
+    if ! service_installed; then
+        return
+    fi
+    if [ "$(id -u)" != "0" ]; then
+        colorized_echo yellow "$SERVICE_NAME is installed; run as root to restart it."
+        return
+    fi
+    systemctl restart "$SERVICE_NAME"
+    colorized_echo blue "$SERVICE_NAME service restarted."
+}
+
+update_service_if_installed() {
+    if ! service_installed; then
+        return
+    fi
+    if [ "$(id -u)" != "0" ]; then
+        colorized_echo yellow "$SERVICE_NAME is installed; run as root to update/restart it."
+        return
+    fi
+    install_node_service_script
+    systemctl daemon-reload
+    systemctl restart "$SERVICE_NAME"
+    colorized_echo blue "$SERVICE_NAME service updated and restarted."
 }
 
 detect_os() {
@@ -207,6 +258,15 @@ install_node_script() {
 
     chmod 755 $TARGET_PATH
     colorized_echo green "node script installed successfully at $TARGET_PATH"
+}
+
+install_node_service_script() {
+    set_service_paths
+    colorized_echo blue "Installing node service script"
+    curl -sSL $SERVICE_SCRIPT_URL -o "$SERVICE_SCRIPT_PATH"
+    sed -i "s/^APP_NAME=.*/APP_NAME=\"$APP_NAME\"/" "$SERVICE_SCRIPT_PATH"
+    chmod 755 "$SERVICE_SCRIPT_PATH"
+    colorized_echo green "node service script installed successfully at $SERVICE_SCRIPT_PATH"
 }
 
 # Get a list of occupied ports
@@ -493,6 +553,14 @@ uninstall_node_script() {
     fi
 }
 
+uninstall_node_service_script() {
+    set_service_paths
+    if [ -f "$SERVICE_SCRIPT_PATH" ]; then
+        colorized_echo yellow "Removing node service script"
+        rm "$SERVICE_SCRIPT_PATH"
+    fi
+}
+
 uninstall_node() {
     if [ -d "$APP_DIR" ]; then
         colorized_echo yellow "Removing directory: $APP_DIR"
@@ -551,6 +619,13 @@ is_node_installed() {
         return 0
     else
         return 1
+    fi
+}
+
+ensure_env_exists() {
+    if [ ! -f "$ENV_FILE" ]; then
+        colorized_echo red "Environment file not found at $ENV_FILE. Please install the node first."
+        exit 1
     fi
 }
 
@@ -686,6 +761,18 @@ install_command() {
     up_node
     show_node_logs
 
+    local install_service_choice=""
+    if [ "$AUTO_CONFIRM" = true ]; then
+        install_service_choice="y"
+    else
+        read -p "Do you want to install and start the systemd service for $APP_NAME? (Y/n): " install_service_choice
+    fi
+    if [[ -z "$install_service_choice" || "$install_service_choice" =~ ^[Yy]$ ]]; then
+        install_service_command
+    else
+        colorized_echo yellow "Skipped installing systemd service for $APP_NAME."
+    fi
+
     colorized_echo blue "================================"
     colorized_echo magenta " node is set up with the following IP: $NODE_IP and Port: $SERVICE_PORT."
     colorized_echo magenta "Please use the following Certificate in pasarguard Panel (it's located in ${DATA_DIR}/certs):"
@@ -716,6 +803,9 @@ uninstall_command() {
     detect_compose
     if is_node_up; then
         down_node
+    fi
+    if service_installed; then
+        uninstall_service_command
     fi
     uninstall_completion
     uninstall_node_script
@@ -837,7 +927,124 @@ restart_command() {
 
     down_node
     up_node
+    restart_service_if_installed
 
+}
+
+install_service_command() {
+    check_running_as_root
+    require_systemd
+    set_service_paths
+
+    detect_os
+    if ! command -v jq >/dev/null 2>&1; then
+        install_package jq
+    fi
+
+    if ! is_node_installed; then
+        colorized_echo red "node not installed! Install it before setting up the service."
+        exit 1
+    fi
+
+    ensure_env_exists
+
+    get_occupied_ports
+    local random_api_port existing_api_port=""
+    if existing_api_port=$(grep -E '^API_PORT[[:space:]]*=' "$ENV_FILE" | head -n1 | sed 's/^API_PORT[[:space:]]*=[[:space:]]*//'); then
+        existing_api_port=$(echo "$existing_api_port" | tr -d '"'\')
+    fi
+
+    if [[ "$existing_api_port" =~ ^[0-9]+$ ]] && [ "$existing_api_port" -ge 1 ] && [ "$existing_api_port" -le 65535 ]; then
+        if is_port_occupied "$existing_api_port"; then
+            colorized_echo yellow "Existing API_PORT $existing_api_port is already in use. Selecting a new random port."
+        else
+            random_api_port="$existing_api_port"
+            colorized_echo blue "Keeping existing API_PORT: $random_api_port (available)."
+        fi
+    fi
+
+    if [ -z "$random_api_port" ]; then
+        while true; do
+            random_api_port=$(shuf -i 20000-65000 -n1)
+            if ! is_port_occupied "$random_api_port"; then
+                break
+            fi
+        done
+        colorized_echo blue "API_PORT set to random available port: $random_api_port"
+    fi
+
+    if grep -q '^API_PORT[[:space:]]*=' "$ENV_FILE"; then
+        sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${random_api_port}/" "$ENV_FILE"
+    else
+        echo "API_PORT= ${random_api_port}" >>"$ENV_FILE"
+    fi
+
+    install_node_service_script
+
+    colorized_echo blue "Creating systemd unit at $SERVICE_UNIT"
+    cat >"$SERVICE_UNIT" <<EOF
+[Unit]
+Description=PasarGuard Node Service API ($APP_NAME)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$SERVICE_SCRIPT_PATH
+WorkingDirectory=$APP_DIR
+Restart=on-failure
+RestartSec=5
+Environment="ENV_FILE=$ENV_FILE"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now "$SERVICE_NAME"
+    colorized_echo green "$SERVICE_NAME service installed and started."
+}
+
+uninstall_service_command() {
+    check_running_as_root
+    require_systemd
+    if ! service_installed; then
+        colorized_echo yellow "Service not installed; nothing to uninstall."
+        return
+    fi
+
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+
+    if [ -f "$SERVICE_UNIT" ]; then
+        colorized_echo yellow "Removing systemd unit $SERVICE_UNIT"
+        rm "$SERVICE_UNIT"
+    fi
+
+    uninstall_node_service_script
+
+    systemctl daemon-reload
+    colorized_echo green "$SERVICE_NAME service uninstalled."
+}
+
+restart_service_command() {
+    check_running_as_root
+    require_systemd
+    if ! service_installed; then
+        colorized_echo red "Service not installed. Run service-install first."
+        exit 1
+    fi
+    restart_service_if_installed
+}
+
+status_service_command() {
+    require_systemd
+    if ! service_installed; then
+        colorized_echo red "Service not installed. Run service-install first."
+        exit 1
+    fi
+
+    systemctl status --no-pager "$SERVICE_NAME"
 }
 
 status_command() {
@@ -942,6 +1149,7 @@ update_command() {
     colorized_echo blue "Restarting node services"
     down_node
     up_node
+    update_service_if_installed
 
     colorized_echo blue "node updated successfully"
 }
@@ -1317,7 +1525,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles edit edit-env completion"
+    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles edit edit-env completion service-install service-uninstall service-restart service-status"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1366,6 +1574,10 @@ usage() {
     colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall node"
     colorized_echo yellow "  install-script  $(tput sgr0)– Install node script"
     colorized_echo yellow "  uninstall-script  $(tput sgr0)– Uninstall node script"
+    colorized_echo yellow "  service-install $(tput sgr0)– Install and start pg-node-service (systemd)"
+    colorized_echo yellow "  service-uninstall $(tput sgr0)– Remove pg-node-service (systemd)"
+    colorized_echo yellow "  service-restart $(tput sgr0)– Restart pg-node-service (systemd)"
+    colorized_echo yellow "  service-status  $(tput sgr0)– Show pg-node-service status"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit .env file (via nano or vi)"
     colorized_echo yellow "  core-update     $(tput sgr0)– Update/Change Xray core"
@@ -1516,6 +1728,18 @@ install-script)
     ;;
 uninstall-script)
     uninstall_node_script
+    ;;
+service-install)
+    install_service_command
+    ;;
+service-uninstall)
+    uninstall_service_command
+    ;;
+service-restart)
+    restart_service_command
+    ;;
+service-status)
+    status_service_command
     ;;
 edit)
     edit_command
