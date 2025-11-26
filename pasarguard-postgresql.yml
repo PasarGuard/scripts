@@ -52,8 +52,6 @@ services:
       LOG_DISCONNECTIONS: 0
       LOG_POOLER_ERRORS: 0
       VERBOSE: 0
-    logging:
-      driver: "none"
     ports:
       - "127.0.0.1:6432:6432"
     depends_on:
