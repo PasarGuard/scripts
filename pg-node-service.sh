@@ -103,7 +103,11 @@ respond() {
 }
 handle_node_update(){
     log "Executing $APP_NAME update"
-    $APP_NAME update
+   if ! $APP_NAME update 2>&1; then 
+      log "update failed with exit code: $?" 
+      respond 500 '{"detail":"update failed on server"}' 
+      return 
+    fi
     respond 200 "{\"detail\":\"node updated successfully\"}"
 }
 
@@ -207,4 +211,7 @@ while true; do
   exec {OPENSSL[0]}>&-
   exec {OPENSSL[1]}>&-
   wait "$OPENSSL_PID" 2>/dev/null || true
+  # Ensure cleanup even if wait fails 
+  kill "$OPENSSL_PID" 2>/dev/null || true 
+  sleep 0.1 # Brief pause to avoid rapid respawn storms
 done

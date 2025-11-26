@@ -1003,6 +1003,10 @@ ExecStart=$SERVICE_SCRIPT_PATH
 WorkingDirectory=$APP_DIR
 Restart=on-failure
 RestartSec=5
+StartLimitInterval=600
+StartLimitBurst=3
+TimeoutStartSec=30
+TimeoutStopSec=10
 Environment="ENV_FILE=$ENV_FILE"
 
 [Install]
