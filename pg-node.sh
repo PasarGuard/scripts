@@ -166,6 +166,13 @@ update_service_if_installed() {
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
 }
 
+configure_firewall_for_port() {
+    local port="$1"
+    local proto="${2:-tcp}"
+    local hint="If a firewall is enabled (e.g., UFW or firewalld), allow ${port}/${proto}."
+    colorized_echo yellow "$hint"
+}
+
 detect_os() {
     # Detect the operating system
     if [ -f /etc/lsb-release ]; then
@@ -749,7 +756,7 @@ install_command() {
             install_node "$node_version"
             echo "Installing $node_version version"
         else
-            echo "Version $node_version does not exist. Please enter a valid version (e.g. v0.5.2)"
+            echo "Version $node_version does not exist. Please enter a valid version (e.g. v0.1.2)"
             exit 1
         fi
     else
@@ -978,6 +985,8 @@ install_service_command() {
     else
         echo "API_PORT= ${random_api_port}" >>"$ENV_FILE"
     fi
+    colorized_echo magenta "API_PORT selected: ${random_api_port}"
+    configure_firewall_for_port "$random_api_port" "tcp"
 
     install_node_service_script
 
