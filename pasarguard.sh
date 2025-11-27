@@ -2376,7 +2376,7 @@ install_pasarguard() {
         echo "DB_PASSWORD=${DB_PASSWORD}" >>"$ENV_FILE"
 
         if [[ "$database_type" == "postgresql" || "$database_type" == "timescaledb" ]]; then
-            DB_PORT="5432"
+            DB_PORT="6432"
             prompt_for_pgadmin_password
             echo "" >>"$ENV_FILE"
             echo "# PGAdmin configuration" >>"$ENV_FILE"
