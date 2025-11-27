@@ -140,6 +140,49 @@ handle_node_core_update(){
     fi
 }
 
+handle_geofiles_update(){
+    local body="${1:-}"
+    local region="" flag=""
+
+    if [[ -n "$body" ]]; then
+      if ! command -v jq >/dev/null 2>&1; then
+        log "jq is required to parse region from request body"
+        respond 500 '{"detail":"jq not installed on server"}'
+        return
+      fi
+
+      if ! region=$(printf '%s' "$body" | jq -r '.region // empty' 2>/dev/null); then
+        log "Failed to parse JSON body for region"
+        respond 400 '{"detail":"Invalid JSON body"}'
+        return
+      fi
+    fi
+
+    if [[ -z "$region" ]]; then
+      respond 400 '{"detail":"region is required (iran, russia, china)"}'
+      return
+    fi
+
+    case "${region,,}" in
+      iran) flag="--iran" ;;
+      russia) flag="--russia" ;;
+      china) flag="--china" ;;
+      *)
+        log "Invalid region provided: $region"
+        respond 400 "{\"detail\":\"Unsupported region $(json_escape "$region")\"}"
+        return
+        ;;
+    esac
+
+    log "Executing $APP_NAME geofiles $flag"
+    if $APP_NAME geofiles "$flag"; then
+      respond 200 '{"detail":"geofiles updated successfully"}'
+    else
+      log "geofiles update failed"
+      respond 500 '{"detail":"geofiles update failed on server"}'
+    fi
+}
+
 handle_connection() {
   local request_line method path version
   if ! IFS= read -r request_line; then
@@ -166,12 +209,12 @@ handle_connection() {
   done
 
   if [[ -z "$x_api_key" ]]; then
-    respond 401 '{"error":"missing api key"}'
+    respond 401 '{"detail":"missing api key"}'
     log "Unauthorized: missing x-api-key for $method $path"
     return 0
   fi
   if [[ "$x_api_key" != "$API_KEY" ]]; then
-    respond 401 '{"error":"invalid api key"}'
+    respond 401 '{"detail":"invalid api key"}'
     log "Unauthorized: invalid x-api-key for $method $path"
     return 0
   fi
@@ -196,6 +239,9 @@ handle_connection() {
       ;;
     "POST /node/core_update")
         handle_node_core_update "$body"
+      ;;
+    "POST /node/geofiles")
+        handle_geofiles_update "$body"
       ;;
     *)
       respond 404 '{"detail":"Not found"}'
