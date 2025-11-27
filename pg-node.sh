@@ -956,37 +956,56 @@ install_service_command() {
     ensure_env_exists
 
     get_occupied_ports
-    local random_api_port existing_api_port=""
+    local api_port existing_api_port=""
+    local default_api_port=62051
     if existing_api_port=$(grep -E '^API_PORT[[:space:]]*=' "$ENV_FILE" | head -n1 | sed 's/^API_PORT[[:space:]]*=[[:space:]]*//'); then
         existing_api_port=$(echo "$existing_api_port" | tr -d '"'\')
     fi
 
     if [[ "$existing_api_port" =~ ^[0-9]+$ ]] && [ "$existing_api_port" -ge 1 ] && [ "$existing_api_port" -le 65535 ]; then
-        if is_port_occupied "$existing_api_port"; then
-            colorized_echo yellow "Existing API_PORT $existing_api_port is already in use. Selecting a new random port."
-        else
-            random_api_port="$existing_api_port"
-            colorized_echo blue "Keeping existing API_PORT: $random_api_port (available)."
-        fi
+        colorized_echo blue "Existing API_PORT found in $ENV_FILE: $existing_api_port"
+        default_api_port="$existing_api_port"
     fi
 
-    if [ -z "$random_api_port" ]; then
+    if [ "$AUTO_CONFIRM" = true ]; then
+        api_port="$default_api_port"
+        if is_port_occupied "$api_port"; then
+            colorized_echo red "Port $api_port is already in use. Run without -y to choose another port."
+            exit 1
+        fi
+    else
         while true; do
-            random_api_port=$(shuf -i 20000-65000 -n1)
-            if ! is_port_occupied "$random_api_port"; then
-                break
+            read -p "Enter the API_PORT for node service (default ${default_api_port}): " -r api_port
+            if [[ -z "$api_port" ]]; then
+                api_port="$default_api_port"
+            fi
+            if [[ "$api_port" =~ ^[0-9]+$ && "$api_port" -ge 1 && "$api_port" -le 65535 ]]; then
+                if is_port_occupied "$api_port"; then
+                    colorized_echo red "Port $api_port is already in use. Please enter another port."
+                else
+                    break
+                fi
+            else
+                colorized_echo red "Invalid port. Please enter a port between 1 and 65535."
             fi
         done
-        colorized_echo blue "API_PORT set to random available port: $random_api_port"
     fi
 
+    local api_port_comment="# API_PORT is used by the node service API (pg-node-service)"
     if grep -q '^API_PORT[[:space:]]*=' "$ENV_FILE"; then
-        sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${random_api_port}/" "$ENV_FILE"
+        sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$ENV_FILE"
+        if ! grep -q '^# *API_PORT' "$ENV_FILE"; then
+            sed -i "/^API_PORT[[:space:]]*=.*/i ${api_port_comment}" "$ENV_FILE"
+        fi
     else
-        echo "API_PORT= ${random_api_port}" >>"$ENV_FILE"
+        {
+            echo ""
+            echo "$api_port_comment"
+            echo "API_PORT= ${api_port}"
+        } >>"$ENV_FILE"
     fi
-    colorized_echo magenta "API_PORT selected: ${random_api_port}"
-    configure_firewall_for_port "$random_api_port" "tcp"
+    colorized_echo magenta "API_PORT selected: ${api_port}"
+    configure_firewall_for_port "$api_port" "tcp"
 
     install_node_service_script
 
