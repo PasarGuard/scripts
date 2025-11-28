@@ -934,7 +934,7 @@ restart_command() {
 
     down_node
     up_node
-    restart_service_if_installed
+    # restart_service_if_installed
 
 }
 
@@ -1181,7 +1181,7 @@ update_command() {
     colorized_echo blue "Restarting node services"
     down_node
     up_node
-    update_service_if_installed
+    # update_service_if_installed
 
     colorized_echo blue "node updated successfully"
 }
