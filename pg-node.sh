@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -e
-
 # Handle global options
 AUTO_CONFIRM=false
 APP_NAME=""
@@ -38,11 +37,9 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${ARGS[@]}"
 COMMAND="$1"
-
 # Fetch IP address from ifconfig.io API
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
-
 if [[ "$1" == "install" || "$1" == "install-script" ]] && [ -z "$APP_NAME" ]; then
     APP_NAME="pg-node"
 fi
@@ -51,16 +48,13 @@ if [ -z "$APP_NAME" ]; then
     SCRIPT_NAME=$(basename "$0")
     APP_NAME="${SCRIPT_NAME%.*}"
 fi
-
 if [[ "$CUSTOM_NAME_SET" == true && "$COMMAND" =~ ^(install|install-script)$ ]]; then
     if command -v "$APP_NAME" >/dev/null 2>&1; then
         echo "Error: '$APP_NAME' is an existing Linux command. Please choose a different --name." >&2
         exit 1
     fi
 fi
-
 INSTALL_DIR="/opt"
-
 if [ -d "$INSTALL_DIR/$APP_NAME" ]; then
     APP_DIR="$INSTALL_DIR/$APP_NAME"
 elif [ -d "$INSTALL_DIR/node" ]; then
@@ -68,7 +62,6 @@ elif [ -d "$INSTALL_DIR/node" ]; then
 else
     APP_DIR="$INSTALL_DIR/$APP_NAME"
 fi
-
 DATA_DIR="/var/lib/$APP_NAME"
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
@@ -78,12 +71,10 @@ LAST_XRAY_CORES=5
 FETCH_REPO="PasarGuard/scripts"
 SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node.sh"
 SERVICE_SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node-service.sh"
-
 colorized_echo() {
     local color=$1
     local text=$2
     local style=${3:-0} # Default style is normal
-
     case $color in
     "red")
         printf "\e[${style};91m${text}\e[0m\n"
@@ -108,27 +99,23 @@ colorized_echo() {
         ;;
     esac
 }
-
 check_running_as_root() {
     if [ "$(id -u)" != "0" ]; then
         colorized_echo red "This command must be run as root."
         exit 1
     fi
 }
-
 set_service_paths() {
     SERVICE_NAME="${APP_NAME}-service"
     SERVICE_SCRIPT_PATH="/usr/local/bin/${SERVICE_NAME}.sh"
     SERVICE_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 }
-
 require_systemd() {
     if ! command -v systemctl >/dev/null 2>&1; then
         colorized_echo red "systemd is required to manage the service (systemctl not found)."
         exit 1
     fi
 }
-
 service_installed() {
     if ! command -v systemctl >/dev/null 2>&1; then
         return 1
@@ -139,7 +126,6 @@ service_installed() {
     fi
     return 1
 }
-
 restart_service_if_installed() {
     if ! service_installed; then
         return
@@ -151,7 +137,6 @@ restart_service_if_installed() {
     systemctl restart "$SERVICE_NAME"
     colorized_echo blue "$SERVICE_NAME service restarted."
 }
-
 update_service_if_installed() {
     if ! service_installed; then
         return
@@ -165,14 +150,12 @@ update_service_if_installed() {
     systemctl restart "$SERVICE_NAME"
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
 }
-
 configure_firewall_for_port() {
     local port="$1"
     local proto="${2:-tcp}"
     local hint="If a firewall is enabled (e.g., UFW or firewalld), allow ${port}/${proto}."
     colorized_echo yellow "$hint"
 }
-
 detect_os() {
     # Detect the operating system
     if [ -f /etc/lsb-release ]; then
@@ -188,7 +171,6 @@ detect_os() {
         exit 1
     fi
 }
-
 detect_and_update_package_manager() {
     colorized_echo blue "Updating package manager"
     if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
@@ -212,7 +194,6 @@ detect_and_update_package_manager() {
         exit 1
     fi
 }
-
 detect_compose() {
     # Check if docker compose command exists
     if docker compose >/dev/null 2>&1; then
@@ -224,12 +205,10 @@ detect_compose() {
         exit 1
     fi
 }
-
 install_package() {
     if [ -z "$PKG_MANAGER" ]; then
         detect_and_update_package_manager
     fi
-
     PACKAGE=$1
     colorized_echo blue "Installing $PACKAGE"
     if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
@@ -248,25 +227,20 @@ install_package() {
         exit 1
     fi
 }
-
 install_docker() {
     # Install Docker and Docker Compose using the official installation script
     colorized_echo blue "Installing Docker"
     curl -fsSL https://get.docker.com | sh
     colorized_echo green "Docker installed successfully"
 }
-
 install_node_script() {
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
     curl -sSL $SCRIPT_URL -o $TARGET_PATH
-
     sed -i "s/^APP_NAME=.*/APP_NAME=\"$APP_NAME\"/" $TARGET_PATH
-
     chmod 755 $TARGET_PATH
     colorized_echo green "node script installed successfully at $TARGET_PATH"
 }
-
 install_node_service_script() {
     set_service_paths
     colorized_echo blue "Installing node service script"
@@ -275,7 +249,6 @@ install_node_service_script() {
     chmod 755 "$SERVICE_SCRIPT_PATH"
     colorized_echo green "node service script installed successfully at $SERVICE_SCRIPT_PATH"
 }
-
 # Get a list of occupied ports
 get_occupied_ports() {
     if command -v ss &>/dev/null; then
@@ -294,7 +267,6 @@ get_occupied_ports() {
         fi
     fi
 }
-
 # Function to check if a port is occupied
 is_port_occupied() {
     if echo "$OCCUPIED_PORTS" | grep -q -w "$1"; then
@@ -303,12 +275,10 @@ is_port_occupied() {
         return 1
     fi
 }
-
 validate_san_entry() {
     local entry="$1"
     # Remove leading/trailing whitespace
     entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
     # Check if entry is in format DNS:value or IP:value
     if [[ "$entry" =~ ^DNS:.+ ]]; then
         return 0
@@ -318,20 +288,16 @@ validate_san_entry() {
         return 1
     fi
 }
-
 gen_self_signed_cert() {
     local san_entries=("DNS:localhost" "IP:127.0.0.1")
-
     # Add IPv4 if it exists
     if [ -n "$NODE_IP_V4" ]; then
         san_entries+=("IP:$NODE_IP_V4")
     fi
-
     # Add IPv6 if it exists
     if [ -n "$NODE_IP_V6" ]; then
         san_entries+=("IP:$NODE_IP_V6")
     fi
-
     echo "Current SAN entries: ${san_entries[*]}"
     if [ "$AUTO_CONFIRM" = true ]; then
         extra_san=""
@@ -341,24 +307,20 @@ gen_self_signed_cert() {
         read -rp "Enter additional SAN entries (comma separated, format: DNS:example.com or IP:1.2.3.4), or leave empty to keep current: " extra_san
         local read_status=$?
         set -e
-
         # Check if read was interrupted (Ctrl+C)
         if [ $read_status -ne 0 ]; then
             colorized_echo yellow "Input cancelled, using default SAN entries only"
             extra_san=""
         fi
     fi
-
     if [[ -n "$extra_san" ]]; then
         # Split input by comma and validate each entry
         IFS=',' read -ra user_entries <<<"$extra_san"
         local valid_entries=()
         local invalid_entries=()
-
         for entry in "${user_entries[@]}"; do
             # Trim whitespace
             entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
             if [ -n "$entry" ]; then
                 if validate_san_entry "$entry"; then
                     valid_entries+=("$entry")
@@ -367,29 +329,24 @@ gen_self_signed_cert() {
                 fi
             fi
         done
-
         # Show validation results
         if [ ${#invalid_entries[@]} -gt 0 ]; then
             colorized_echo yellow "Warning: Invalid SAN entries ignored: ${invalid_entries[*]}"
             colorized_echo yellow "Valid format examples: DNS:example.com, IP:192.168.1.1, IP:2001:db8::1"
         fi
-
         if [ ${#valid_entries[@]} -gt 0 ]; then
             san_entries+=("${valid_entries[@]}")
             colorized_echo green "Added ${#valid_entries[@]} valid SAN entry/entries"
         fi
     fi
-
     # Join SAN entries into a comma-separated string and remove duplicates
     local san_string
     san_string=$(printf '%s\n' "${san_entries[@]}" | sort -u | paste -sd, - 2>/dev/null)
-
     # Check if san_string was created successfully
     if [ -z "$san_string" ]; then
         colorized_echo red "Error: Failed to process SAN entries"
         exit 1
     fi
-
     # Generate certificate
     if openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY_FILE" \
         -out "$SSL_CERT_FILE" -days 36500 -nodes \
@@ -401,62 +358,49 @@ gen_self_signed_cert() {
         exit 1
     fi
 }
-
 read_and_save_file() {
     local prompt_message=$1
     local output_file=$2
     local allow_file_input=$3
     local first_line_read=0
-
     # Check if the file exists before clearing it
     if [ -f "$output_file" ]; then
         : >"$output_file"
     fi
-
     echo -e "$prompt_message"
     echo "Press ENTER on a new line when finished: "
-
     while IFS= read -r line; do
         [[ -z $line ]] && break
-
         if [[ "$first_line_read" -eq 0 && "$allow_file_input" -eq 1 && -f "$line" ]]; then
             first_line_read=1
             cp "$line" "$output_file"
             break
         fi
-
         echo "$line" >>"$output_file"
     done
 }
-
 install_node() {
     local node_version=$1
-
     FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/node/main"
     COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/scripts/main"
-
     mkdir -p "$DATA_DIR"
     mkdir -p "$DATA_DIR/certs"
     mkdir -p "$APP_DIR"
-
     echo "A self-signed certificate will be generated by default."
     if [ "$AUTO_CONFIRM" = true ]; then
         use_public_cert=""
     else
         read -r -p "Do you want to use your own public certificate instead? (Y/n): " use_public_cert
     fi
-
     if [[ "$use_public_cert" =~ ^[Yy]$ ]]; then
         read_and_save_file "Please paste the content OR the path to the Client Certificate file." "$SSL_CERT_FILE" 1
         colorized_echo blue "Certificate saved to $SSL_CERT_FILE"
-
         read_and_save_file "Please paste the content OR the path to the Private Key file." "$SSL_KEY_FILE" 1
         colorized_echo blue "Private key saved to $SSL_KEY_FILE"
     else
         gen_self_signed_cert
         colorized_echo blue "self-signed certificate successfully generated"
     fi
-
     if [ "$AUTO_CONFIRM" = true ]; then
         API_KEY=""
     else
@@ -467,22 +411,18 @@ install_node() {
         API_KEY=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python -c "import uuid; print(uuid.uuid4())")
         colorized_echo green "No API Key provided. A random UUID version 4 has been generated"
     fi
-
     if [ "$AUTO_CONFIRM" = true ]; then
         use_rest=""
     else
         read -p "GRPC is recommended by default. Do you want to use REST protocol instead? (Y/n): " -r use_rest
     fi
-
     # Default to "Y" if the user just presses ENTER
     if [[ "$use_rest" =~ ^[Yy]$ ]]; then
         USE_REST=1
     else
         USE_REST=0
     fi
-
     get_occupied_ports
-
     if [ "$AUTO_CONFIRM" = true ]; then
         SERVICE_PORT=62050
         if is_port_occupied "$SERVICE_PORT"; then
@@ -507,32 +447,25 @@ install_node() {
             fi
         done
     fi
-
     colorized_echo blue "Fetching .env and compose file"
     curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"
     curl -sL "$COMPOSE_FILES_URL_PREFIX/node.yml" -o "$APP_DIR/docker-compose.yml"
     colorized_echo green "File saved in $APP_DIR/.env"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
-
     # Modifying .env file
     sed -i "s/^SERVICE_PORT *= *.*/SERVICE_PORT= ${SERVICE_PORT}/" "$APP_DIR/.env"
     sed -i "s/^API_KEY *= *.*/API_KEY= ${API_KEY}/" "$APP_DIR/.env"
-
     if [ "$USE_REST" -eq 1 ]; then
         sed -i 's/^# \(SERVICE_PROTOCOL *=.*\)/SERVICE_PROTOCOL= "rest"/' "$APP_DIR/.env"
     else
         sed -i 's/^# \(SERVICE_PROTOCOL *=.*\)/SERVICE_PROTOCOL= "grpc"/' "$APP_DIR/.env"
     fi
-
     colorized_echo green ".env file modified successfully"
-
     # Modifying compose file
     service_name="node"
-
     if [ "$APP_NAME" != "pg-node" ]; then
         yq eval ".services[\"$service_name\"].container_name = \"$APP_NAME\"" -i "$APP_DIR/docker-compose.yml"
     fi
-
     # Keep the container mount path but point the host path at DATA_DIR
     existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
     if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
@@ -545,21 +478,17 @@ install_node() {
         fi
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
     fi
-
     if [ "$node_version" != "latest" ]; then
         yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml"
     fi
-
     colorized_echo green "compose file modified successfully"
 }
-
 uninstall_node_script() {
     if [ -f "/usr/local/bin/$APP_NAME" ]; then
         colorized_echo yellow "Removing node script"
         rm "/usr/local/bin/$APP_NAME"
     fi
 }
-
 uninstall_node_service_script() {
     set_service_paths
     if [ -f "$SERVICE_SCRIPT_PATH" ]; then
@@ -567,17 +496,14 @@ uninstall_node_service_script() {
         rm "$SERVICE_SCRIPT_PATH"
     fi
 }
-
 uninstall_node() {
     if [ -d "$APP_DIR" ]; then
         colorized_echo yellow "Removing directory: $APP_DIR"
         rm -r "$APP_DIR"
     fi
 }
-
 uninstall_node_docker_images() {
     images=$(docker images | grep node | awk '{print $3}')
-
     if [ -n "$images" ]; then
         colorized_echo yellow "Removing Docker images of node"
         for image in $images; do
@@ -587,40 +513,32 @@ uninstall_node_docker_images() {
         done
     fi
 }
-
 uninstall_node_data_files() {
     if [ -d "$DATA_DIR" ]; then
         colorized_echo yellow "Removing directory: $DATA_DIR"
         rm -r "$DATA_DIR"
     fi
 }
-
 up_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" up -d --remove-orphans
 }
-
 down_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" down
 }
-
 show_node_logs() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs
 }
-
 follow_node_logs() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
 }
-
 update_node_script() {
     colorized_echo blue "Updating node script"
     curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/$APP_NAME
     colorized_echo green "node script updated successfully"
 }
-
 update_node() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
 }
-
 is_node_installed() {
     if [ -d $APP_DIR ]; then
         return 0
@@ -628,14 +546,12 @@ is_node_installed() {
         return 1
     fi
 }
-
 ensure_env_exists() {
     if [ ! -f "$ENV_FILE" ]; then
         colorized_echo red "Environment file not found at $ENV_FILE. Please install the node first."
         exit 1
     fi
 }
-
 is_node_up() {
     if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
         return 1
@@ -643,13 +559,11 @@ is_node_up() {
         return 0
     fi
 }
-
 install_command() {
     check_running_as_root
     # Default values
     node_version="latest"
     node_version_set="false"
-
     # Parse options
     while [[ $# -gt 0 ]]; do
         key="$1"
@@ -682,7 +596,6 @@ install_command() {
             ;;
         esac
     done
-
     # Check if  node is already installed
     if is_node_installed; then
         colorized_echo red "node is already installed at $APP_DIR"
@@ -714,21 +627,17 @@ install_command() {
     check_version_exists() {
         local version=$1
         repo_url="https://api.github.com/repos/PasarGuard/node/releases"
-
         if [ "$version" == "latest" ]; then
             latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
-
             # Check if there is any stable release of  node v1
             if [ "$latest_tag" == "null" ]; then
                 return 1
             fi
             return 0
         fi
-
         if [ "$version" == "pre-release" ]; then
             local latest_stable_tag=$(curl -s "$repo_url/latest" | jq -r '.tag_name')
             local latest_pre_release_tag=$(curl -s "$repo_url" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
-
             if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
                 return 1 # No releases found at all
             elif [ "$latest_stable_tag" == "null" ]; then
@@ -742,7 +651,6 @@ install_command() {
             fi
             return 0
         fi
-
         # Check if the repos contains the version tag
         if curl -s -o /dev/null -w "%{http_code}" "${repo_url}/tags/${version}" | grep -q "^200$"; then
             return 0
@@ -767,7 +675,6 @@ install_command() {
     install_completion
     up_node
     show_node_logs
-
     local install_service_choice=""
     if [ "$AUTO_CONFIRM" = true ]; then
         install_service_choice="y"
@@ -779,7 +686,6 @@ install_command() {
     else
         colorized_echo yellow "Skipped installing systemd service for $APP_NAME."
     fi
-
     colorized_echo blue "================================"
     colorized_echo magenta " node is set up with the following IP: $NODE_IP and Port: $SERVICE_PORT."
     colorized_echo magenta "Please use the following Certificate in pasarguard Panel (it's located in ${DATA_DIR}/certs):"
@@ -788,7 +694,6 @@ install_command() {
     colorized_echo magenta "Next, use the API Key (UUID v4) in pasarguard Panel: "
     colorized_echo red "${API_KEY}"
 }
-
 uninstall_command() {
     check_running_as_root
     # Check if  node is installed
@@ -796,7 +701,6 @@ uninstall_command() {
         colorized_echo red "node not installed!"
         exit 1
     fi
-
     if [ "$AUTO_CONFIRM" = true ]; then
         REPLY=""
     else
@@ -806,7 +710,6 @@ uninstall_command() {
         colorized_echo red "Aborted"
         exit 1
     fi
-
     detect_compose
     if is_node_up; then
         down_node
@@ -818,7 +721,6 @@ uninstall_command() {
     uninstall_node_script
     uninstall_node
     uninstall_node_docker_images
-
     if [ "$AUTO_CONFIRM" = true ]; then
         REPLY=""
     else
@@ -831,7 +733,6 @@ uninstall_command() {
         colorized_echo green "node uninstalled successfully"
     fi
 }
-
 up_command() {
     help() {
         colorized_echo red "Usage: node up [options]"
@@ -840,7 +741,6 @@ up_command() {
         echo "  -h, --help        display this help message"
         echo "  -n, --no-logs     do not follow logs after starting"
     }
-
     local no_logs=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -859,57 +759,52 @@ up_command() {
         esac
         shift
     done
-
     # Check if node is installed
     if ! is_node_installed; then
         colorized_echo red "node's not installed!"
         exit 1
     fi
-
     detect_compose
-
     if is_node_up; then
         colorized_echo red "node's already up"
         exit 1
     fi
-
     up_node
     if [ "$no_logs" = false ]; then
         follow_node_logs
     fi
 }
-
 down_command() {
     # Check if node is installed
     if ! is_node_installed; then
         colorized_echo red "node not installed!"
         exit 1
     fi
-
     detect_compose
-
     if ! is_node_up; then
         colorized_echo red "node already down"
         exit 1
     fi
-
     down_node
 }
-
 restart_command() {
     help() {
         colorized_echo red "Usage: node restart [options]"
         echo
         echo "OPTIONS:"
-        echo "  -h, --help        display this help message"
-        echo "  -n, --no-logs     do not follow logs after starting"
+        echo "  -h, --help              display this help message"
+        echo "  -n, --no-logs           do not follow logs after starting"
+        echo "  --no-restart-service    do not restart the systemd service (if installed)"
     }
-
     local no_logs=false
+    local no_restart_service=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
         -n | --no-logs)
             no_logs=true
+            ;;
+        --no-restart-service)
+            no_restart_service=true
             ;;
         -h | --help)
             help
@@ -918,55 +813,53 @@ restart_command() {
         *)
             echo "Error: Invalid option: $1" >&2
             help
-            exit 0
+            exit 1
             ;;
         esac
         shift
     done
-
     # Check if node is installed
     if ! is_node_installed; then
         colorized_echo red "node not installed!"
         exit 1
     fi
-
     detect_compose
-
     down_node
     up_node
-    # restart_service_if_installed
 
+    if [ "$no_restart_service" = false ]; then
+        restart_service_if_installed
+    else
+        colorized_echo yellow "Skipped restarting $SERVICE_NAME (due to --no-restart-service)"
+    fi
+
+    if [ "$no_logs" = false ]; then
+        follow_node_logs
+    fi
 }
-
 install_service_command() {
     check_running_as_root
     require_systemd
     set_service_paths
-
     detect_os
     if ! command -v jq >/dev/null 2>&1; then
         install_package jq
     fi
-
     if ! is_node_installed; then
         colorized_echo red "node not installed! Install it before setting up the service."
         exit 1
     fi
-
     ensure_env_exists
-
     get_occupied_ports
     local api_port existing_api_port=""
     local default_api_port=62051
     if existing_api_port=$(grep -E '^API_PORT[[:space:]]*=' "$ENV_FILE" | head -n1 | sed 's/^API_PORT[[:space:]]*=[[:space:]]*//'); then
         existing_api_port=$(echo "$existing_api_port" | tr -d '"'\')
     fi
-
     if [[ "$existing_api_port" =~ ^[0-9]+$ ]] && [ "$existing_api_port" -ge 1 ] && [ "$existing_api_port" -le 65535 ]; then
         colorized_echo blue "Existing API_PORT found in $ENV_FILE: $existing_api_port"
         default_api_port="$existing_api_port"
     fi
-
     if [ "$AUTO_CONFIRM" = true ]; then
         api_port="$default_api_port"
         if is_port_occupied "$api_port"; then
@@ -990,8 +883,7 @@ install_service_command() {
             fi
         done
     fi
-
-    local api_port_comment="# API_PORT is used by the node service API (pg-node-service)"
+    local api_port_comment="# API_PORT is used by the node service API ($APP_NAME)"
     if grep -q '^API_PORT[[:space:]]*=' "$ENV_FILE"; then
         sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$ENV_FILE"
         if ! grep -q '^# *API_PORT' "$ENV_FILE"; then
@@ -1006,16 +898,13 @@ install_service_command() {
     fi
     colorized_echo magenta "API_PORT selected: ${api_port}"
     configure_firewall_for_port "$api_port" "tcp"
-
     install_node_service_script
-
     colorized_echo blue "Creating systemd unit at $SERVICE_UNIT"
     cat >"$SERVICE_UNIT" <<EOF
 [Unit]
 Description=PasarGuard Node Service API ($APP_NAME)
 After=network-online.target docker.service
 Wants=network-online.target
-
 [Service]
 Type=simple
 ExecStart=$SERVICE_SCRIPT_PATH
@@ -1027,16 +916,13 @@ StartLimitBurst=3
 TimeoutStartSec=30
 TimeoutStopSec=10
 Environment="ENV_FILE=$ENV_FILE"
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
     systemctl daemon-reload
     systemctl enable --now "$SERVICE_NAME"
     colorized_echo green "$SERVICE_NAME service installed and started."
 }
-
 uninstall_service_command() {
     check_running_as_root
     require_systemd
@@ -1044,19 +930,81 @@ uninstall_service_command() {
         colorized_echo yellow "Service not installed; nothing to uninstall."
         return
     fi
-
     systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-
     if [ -f "$SERVICE_UNIT" ]; then
         colorized_echo yellow "Removing systemd unit $SERVICE_UNIT"
         rm "$SERVICE_UNIT"
     fi
-
     uninstall_node_service_script
-
     systemctl daemon-reload
     colorized_echo green "$SERVICE_NAME service uninstalled."
+}
+
+service_start_command() {
+    check_running_as_root
+    require_systemd
+    if ! service_installed; then
+        colorized_echo red "Service not installed. Run service-install first."
+        exit 1
+    fi
+    systemctl start "$SERVICE_NAME"
+    colorized_echo green "$SERVICE_NAME service started."
+}
+service_stop_command() {
+    check_running_as_root
+    require_systemd
+    if ! service_installed; then
+        colorized_echo red "Service not installed. Run service-install first."
+        exit 1
+    fi
+    systemctl stop "$SERVICE_NAME"
+    colorized_echo green "$SERVICE_NAME service stopped."
+}
+
+service_update_command() {
+    check_running_as_root
+    require_systemd
+    if ! service_installed; then
+        colorized_echo red "Service not installed. Run service-install first."
+        exit 1
+    fi
+    install_node_service_script
+    systemctl daemon-reload
+    systemctl restart "$SERVICE_NAME"
+    colorized_echo green "$SERVICE_NAME service updated and restarted."
+}
+
+service_logs_command() {
+    require_systemd
+    if ! service_installed; then
+        colorized_echo red "Service not installed. Run service-install first."
+        exit 1
+    fi
+    local no_follow=false
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+        -n | --no-follow)
+            no_follow=true
+            ;;
+        -h | --help)
+            colorized_echo red "Usage: $APP_NAME service-logs [options]"
+            echo "  -n, --no-follow   Show logs without following"
+            exit 0
+            ;;
+        *)
+            echo "Error: Invalid option: $1" >&2
+            exit 1
+            ;;
+        esac
+        shift
+    done
+
+    if [ "$no_follow" = true ]; then
+        journalctl -u "$SERVICE_NAME" --no-pager
+    else
+        journalctl -u "$SERVICE_NAME" -f
+    fi
 }
 
 restart_service_command() {
@@ -1068,17 +1016,14 @@ restart_service_command() {
     fi
     restart_service_if_installed
 }
-
 status_service_command() {
     require_systemd
     if ! service_installed; then
         colorized_echo red "Service not installed. Run service-install first."
         exit 1
     fi
-
     systemctl status --no-pager "$SERVICE_NAME"
 }
-
 status_command() {
     # Check if node is installed
     if ! is_node_installed; then
@@ -1086,18 +1031,14 @@ status_command() {
         colorized_echo red "Not Installed"
         exit 1
     fi
-
     detect_compose
-
     if ! is_node_up; then
         echo -n "Status: "
         colorized_echo blue "Down"
         exit 1
     fi
-
     echo -n "Status: "
     colorized_echo green "Up"
-
     json=$($COMPOSE -f $COMPOSE_FILE ps -a --format=json)
     services=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .Service')
     states=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .State')
@@ -1113,7 +1054,6 @@ status_command() {
         fi
     done
 }
-
 logs_command() {
     help() {
         colorized_echo red "Usage: node logs [options]"
@@ -1122,7 +1062,6 @@ logs_command() {
         echo "  -h, --help        display this help message"
         echo "  -n, --no-follow   do not show follow logs"
     }
-
     local no_follow=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -1141,51 +1080,61 @@ logs_command() {
         esac
         shift
     done
-
     # Check if node is installed
     if ! is_node_installed; then
         colorized_echo red "node's not installed!"
         exit 1
     fi
-
     detect_compose
-
     if ! is_node_up; then
         colorized_echo red "node is not up."
         exit 1
     fi
-
     if [ "$no_follow" = true ]; then
         show_node_logs
     else
         follow_node_logs
     fi
 }
-
 update_command() {
     check_running_as_root
+    local no_update_service=false
+    # Parse args
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+        --no-update-service)
+            no_update_service=true
+            shift
+            ;;
+        *)
+            break
+            ;;
+        esac
+    done
+
     # Check if node is installed
     if ! is_node_installed; then
         colorized_echo red "node not installed!"
         exit 1
     fi
-
     detect_compose
-
     update_node_script
     uninstall_completion
     install_completion
     colorized_echo blue "Pulling latest version"
     update_node
-
     colorized_echo blue "Restarting node services"
     down_node
     up_node
-    # update_service_if_installed
+
+    if [ "$no_update_service" = false ]; then
+        update_service_if_installed
+    else
+        colorized_echo yellow "Skipped updating $SERVICE_NAME (due to --no-update-service)"
+    fi
 
     colorized_echo blue "node updated successfully"
 }
-
 identify_the_operating_system_and_architecture() {
     if [[ "$(uname)" == 'Linux' ]]; then
         case "$(uname -m)" in
@@ -1244,16 +1193,13 @@ identify_the_operating_system_and_architecture() {
         exit 1
     fi
 }
-
 # Function to update the Xray core
 get_xray_core() {
     local requested_version="${1:-}"
     identify_the_operating_system_and_architecture
     clear
-
     validate_version() {
         local version="$1"
-
         local response=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases/tags/$version")
         if echo "$response" | grep -q '"message": "Not Found"'; then
             echo "invalid"
@@ -1261,7 +1207,6 @@ get_xray_core() {
             echo "valid"
         fi
     }
-
     print_menu() {
         clear
         echo -e "\033[1;32m==============================\033[0m"
@@ -1279,16 +1224,12 @@ get_xray_core() {
         echo -e "\033[1;31mQ:\033[0m Quit"
         echo -e "\033[1;32m==============================\033[0m"
     }
-
     latest_releases=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=$LAST_XRAY_CORES")
-
     versions=($(echo "$latest_releases" | grep -oP '"tag_name": "\K(.*?)(?=")'))
-
     if [ ${#versions[@]} -eq 0 ]; then
         echo -e "\033[1;31mNo Xray-core releases found.\033[0m"
         exit 1
     fi
-
     if [[ -n "$requested_version" ]]; then
         if [[ "$requested_version" == "latest" ]]; then
             selected_version=${versions[0]}
@@ -1304,11 +1245,8 @@ get_xray_core() {
         while true; do
             print_menu
             read -p "Choose a version to install (1-${#versions[@]}), or press M to enter manually, Q to quit: " choice
-
             if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && [ "$choice" -le "${#versions[@]}" ]; then
-
                 choice=$((choice - 1))
-
                 selected_version=${versions[choice]}
                 break
             elif [ "$choice" == "M" ] || [ "$choice" == "m" ]; then
@@ -1330,25 +1268,19 @@ get_xray_core() {
             fi
         done
     fi
-
     echo -e "\033[1;32mSelected version $selected_version for installation.\033[0m"
-
     if ! dpkg -s unzip >/dev/null 2>&1; then
         echo -e "\033[1;33mInstalling required packages...\033[0m"
         detect_os
         install_package unzip
     fi
-
     mkdir -p $DATA_DIR/xray-core
     cd $DATA_DIR/xray-core
-
     xray_filename="Xray-linux-$ARCH.zip"
     xray_download_url="https://github.com/XTLS/Xray-core/releases/download/${selected_version}/${xray_filename}"
-
     echo -e "\033[1;33mDownloading Xray-core version ${selected_version} in the background...\033[0m"
     wget "${xray_download_url}" -q &
     wait
-
     echo -e "\033[1;33mExtracting Xray-core in the background...\033[0m"
     unzip -o "${xray_filename}" >/dev/null 2>&1 &
     wait
@@ -1364,7 +1296,6 @@ get_current_xray_core_version() {
             return
         fi
     fi
-
     # If local binary is not found or failed, check in the Docker container
     CONTAINER_NAME="$APP_NAME"
     if docker ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
@@ -1376,21 +1307,16 @@ get_current_xray_core_version() {
             return
         fi
     fi
-
     echo "Not installed"
 }
-
 install_yq() {
     if command -v yq &>/dev/null; then
         colorized_echo green "yq is already installed."
         return
     fi
-
     identify_the_operating_system_and_architecture
-
     local base_url="https://github.com/mikefarah/yq/releases/latest/download"
     local yq_binary=""
-
     case "$ARCH" in
     '64' | 'x86_64')
         yq_binary="yq_linux_amd64"
@@ -1409,10 +1335,8 @@ install_yq() {
         exit 1
         ;;
     esac
-
     local yq_url="${base_url}/${yq_binary}"
     colorized_echo blue "Downloading yq from ${yq_url}..."
-
     if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
         colorized_echo yellow "Neither curl nor wget is installed. Attempting to install curl."
         install_package curl || {
@@ -1420,7 +1344,6 @@ install_yq() {
             exit 1
         }
     fi
-
     if command -v curl &>/dev/null; then
         if curl -L "$yq_url" -o /usr/local/bin/yq; then
             chmod +x /usr/local/bin/yq
@@ -1438,17 +1361,13 @@ install_yq() {
             exit 1
         fi
     fi
-
     if ! echo "$PATH" | grep -q "/usr/local/bin"; then
         export PATH="/usr/local/bin:$PATH"
     fi
-
     hash -r
-
     if command -v yq &>/dev/null; then
         colorized_echo green "yq is ready to use."
     elif [ -x "/usr/local/bin/yq" ]; then
-
         colorized_echo yellow "yq is installed at /usr/local/bin/yq but not found in PATH."
         colorized_echo yellow "You can add /usr/local/bin to your PATH environment variable."
     else
@@ -1456,11 +1375,9 @@ install_yq() {
         exit 1
     fi
 }
-
 update_core_command() {
     check_running_as_root
     local core_version_arg=""
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
         -v | --version)
@@ -1482,9 +1399,7 @@ update_core_command() {
             ;;
         esac
     done
-
     get_xray_core "$core_version_arg"
-
     # Ensure volumes match DATA_DIR when custom name is used
     service_name="node"
     existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
@@ -1498,7 +1413,6 @@ update_core_command() {
         fi
         # Update volumes to use DATA_DIR (which is based on APP_NAME)
         yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
-
         # Set XRAY_EXECUTABLE_PATH to the container path, not host path
         sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray|" "$APP_DIR/.env"
         grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray" >>"$APP_DIR/.env"
@@ -1507,13 +1421,11 @@ update_core_command() {
         sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray|" "$APP_DIR/.env"
         grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray" >>"$APP_DIR/.env"
     fi
-
     # Restart node
     colorized_echo red "Restarting node..."
-    restart_command -n
+    restart_command -n --no-restart-service
     colorized_echo blue "Installation of XRAY-CORE version $selected_version completed."
 }
-
 check_editor() {
     if [ -z "$EDITOR" ]; then
         if command -v nano >/dev/null 2>&1; then
@@ -1527,7 +1439,6 @@ check_editor() {
         fi
     fi
 }
-
 edit_command() {
     detect_os
     check_editor
@@ -1538,7 +1449,6 @@ edit_command() {
         exit 1
     fi
 }
-
 edit_env_command() {
     detect_os
     check_editor
@@ -1549,7 +1459,6 @@ edit_env_command() {
         exit 1
     fi
 }
-
 generate_completion() {
     cat <<'EOF'
 _node_completions()
@@ -1557,7 +1466,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles edit edit-env completion service-install service-uninstall service-restart service-status"
+    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1565,7 +1474,6 @@ EOF
     echo "complete -F _node_completions node.sh"
     echo "complete -F _node_completions $APP_NAME"
 }
-
 install_completion() {
     local completion_dir="/etc/bash_completion.d"
     local completion_file="$completion_dir/$APP_NAME"
@@ -1573,7 +1481,6 @@ install_completion() {
     generate_completion >"$completion_file"
     colorized_echo green "Bash completion installed to $completion_file"
 }
-
 uninstall_completion() {
     local completion_dir="/etc/bash_completion.d"
     local completion_file="$completion_dir/$APP_NAME"
@@ -1582,7 +1489,6 @@ uninstall_completion() {
         colorized_echo yellow "Bash completion removed from $completion_file"
     fi
 }
-
 usage() {
     colorized_echo blue "================================"
     colorized_echo magenta "       $APP_NAME Node CLI Help"
@@ -1591,49 +1497,55 @@ usage() {
     echo "  $APP_NAME [command] [options]"
     echo
     colorized_echo cyan "Options:"
-    colorized_echo yellow "  -y, --yes       $(tput sgr0)– Use default answers for all prompts"
-    colorized_echo yellow "  --name NAME     $(tput sgr0)– Target a specific node instance"
+    colorized_echo yellow "  -y, --yes       $(tput sgr0)✓  Use default answers for all prompts"
+    colorized_echo yellow "  --name NAME     $(tput sgr0)✓  Target a specific node instance"
     echo
-
     colorized_echo cyan "Commands:"
-    colorized_echo yellow "  up              $(tput sgr0)– Start services"
-    colorized_echo yellow "  down            $(tput sgr0)– Stop services"
-    colorized_echo yellow "  restart         $(tput sgr0)– Restart services"
-    colorized_echo yellow "  status          $(tput sgr0)– Show status"
-    colorized_echo yellow "  logs            $(tput sgr0)– Show logs"
-    colorized_echo yellow "  install         $(tput sgr0)– Install/reinstall node"
-    colorized_echo yellow "  update          $(tput sgr0)– Update to latest version"
-    colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall node"
-    colorized_echo yellow "  install-script  $(tput sgr0)– Install node script"
-    colorized_echo yellow "  uninstall-script  $(tput sgr0)– Uninstall node script"
-    colorized_echo yellow "  service-install $(tput sgr0)– Install and start pg-node-service (systemd)"
-    colorized_echo yellow "  service-uninstall $(tput sgr0)– Remove pg-node-service (systemd)"
-    colorized_echo yellow "  service-restart $(tput sgr0)– Restart pg-node-service (systemd)"
-    colorized_echo yellow "  service-status  $(tput sgr0)– Show pg-node-service status"
-    colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi)"
-    colorized_echo yellow "  edit-env        $(tput sgr0)– Edit .env file (via nano or vi)"
-    colorized_echo yellow "  core-update     $(tput sgr0)– Update/Change Xray core"
-    colorized_echo yellow "  geofiles        $(tput sgr0)– Download geoip and geosite files for specific regions"
+    colorized_echo yellow "  up                $(tput sgr0)✓  Start services"
+    colorized_echo yellow "  down              $(tput sgr0)✓  Stop services"
+    colorized_echo yellow "  restart           $(tput sgr0)✓  Restart services"
+    colorized_echo yellow "  status            $(tput sgr0)✓  Show status"
+    colorized_echo yellow "  logs              $(tput sgr0)✓  Show logs"
+    colorized_echo yellow "  install           $(tput sgr0)✓  Install/reinstall node"
+    colorized_echo yellow "  update            $(tput sgr0)✓  Update to latest version"
+    colorized_echo yellow "  uninstall         $(tput sgr0)✓  Uninstall node"
+    colorized_echo yellow "  install-script    $(tput sgr0)✓  Install node script"
+    colorized_echo yellow "  uninstall-script  $(tput sgr0)✓  Uninstall node script"
+    colorized_echo yellow "  service-install   $(tput sgr0)✓  Install and start pg-node-service (systemd)"
+    colorized_echo yellow "  service-uninstall $(tput sgr0)✓  Remove pg-node-service (systemd)"
+    colorized_echo yellow "  service-restart   $(tput sgr0)✓  Restart pg-node-service (systemd)"
+    colorized_echo yellow "  service-status    $(tput sgr0)✓  Show pg-node-service status"
+    colorized_echo yellow "  service-logs      $(tput sgr0)✓  View systemd service logs"
+    colorized_echo yellow "  service-update    $(tput sgr0)✓  Update pg-node-service script"
+    colorized_echo yellow "  service-start       $(tput sgr0)✓  Start pg-node-service (systemd)"
+    colorized_echo yellow "  service-stop      $(tput sgr0)✓  Stop pg-node-service"
+    colorized_echo yellow "  edit              $(tput sgr0)✓  Edit docker-compose.yml (via nano or vi)"
+    colorized_echo yellow "  edit-env          $(tput sgr0)✓  Edit .env file (via nano or vi)"
+    colorized_echo yellow "  core-update       $(tput sgr0)✓  Update/Change Xray core"
+    colorized_echo yellow "  geofiles          $(tput sgr0)✓  Download geoip and geosite files for specific regions"
+    colorized_echo yellow "  completion        $(tput sgr0)✓  Generate shell completion script"
     echo
+    colorized_echo cyan "Restart Options:"
+    colorized_echo yellow "  -n, --no-logs           $(tput sgr0)✓  Do not follow logs after restart"
+    colorized_echo yellow "  --no-restart-service    $(tput sgr0)✓  Skip restarting systemd service"
+    colorized_echo cyan "Update Options:"
+    colorized_echo yellow "  --no-update-service     $(tput sgr0)✓  Skip updating systemd service"
     colorized_echo cyan "Install Options:"
-    colorized_echo yellow "  -v, --version VERSION  $(tput sgr0)– Install specific version"
-    colorized_echo yellow "  --pre-release          $(tput sgr0)– Install pre-release version"
-    colorized_echo yellow "  --name NAME            $(tput sgr0)– Install with custom name"
+    colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Install specific version"
+    colorized_echo yellow "  --pre-release           $(tput sgr0)✓  Install pre-release version"
+    colorized_echo yellow "  --name NAME             $(tput sgr0)✓  Install with custom name"
     colorized_echo cyan "Core-update Options:"
-    colorized_echo yellow "  --version VERSION     $(tput sgr0)– Update Xray-core to specific version (use 'latest' for newest)"
-
+    colorized_echo yellow "  --version VERSION       $(tput sgr0)✓  Update Xray-core to specific version (use 'latest' for newest)"
+    colorized_echo cyan "Service Logs Options:"
+    colorized_echo yellow "  -n, --no-follow         $(tput sgr0)✓  Show logs once without following"
     echo
     colorized_echo cyan "Node Information:"
-    colorized_echo magenta "  Node IP: $NODE_IP"
-
+    colorized_echo magenta "  Node IP: $NODE_IP_V4"
     SERVICE_PORT=$(grep '^SERVICE_PORT[[:space:]]*=' "$APP_DIR/.env" | sed 's/^SERVICE_PORT[[:space:]]*=[[:space:]]*//')
     colorized_echo magenta "  Service port: $SERVICE_PORT"
-
     colorized_echo magenta "  Cert file path: $SSL_CERT_FILE"
-
     API_KEY=$(grep '^API_KEY[[:space:]]*=' "$APP_DIR/.env" | sed 's/^API_KEY[[:space:]]*=[[:space:]]*//')
     colorized_echo magenta "  API Key : $API_KEY"
-
     echo
     current_version=$(get_current_xray_core_version)
     colorized_echo cyan "Current Xray-core version: " 1 # 1 for bold
@@ -1642,18 +1554,15 @@ usage() {
     colorized_echo blue "================================="
     echo
 }
-
 geofiles_command() {
     check_running_as_root
     mkdir -p "$DATA_DIR/assets"
     local restart_needed=false
     local args_provided=false
-
     if [[ $# -eq 0 ]]; then
         colorized_echo blue "No region specified, defaulting to Iran geofiles..."
         set -- "--iran"
     fi
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
         --iran)
@@ -1689,7 +1598,6 @@ geofiles_command() {
             ;;
         esac
     done
-
     if [ "$restart_needed" = true ]; then
         # Get the container path from the volume mapping
         service_name="node"
@@ -1706,25 +1614,26 @@ geofiles_command() {
         else
             xray_assets_path="$DATA_DIR/assets"
         fi
-
         sed -i "s|^# *XRAY_ASSETS_PATH *=.*|XRAY_ASSETS_PATH = $xray_assets_path|" "$ENV_FILE"
         grep -q '^XRAY_ASSETS_PATH =' "$ENV_FILE" || echo "XRAY_ASSETS_PATH = $xray_assets_path" >> "$ENV_FILE"
         colorized_echo blue "XRAY_ASSETS_PATH updated in $ENV_FILE"
         colorized_echo blue "Restarting node services..."
-        restart_command -n
+        restart_command -n --no-restart-service
         colorized_echo green "Geofiles updated and node restarted."
     else
         colorized_echo yellow "No geofiles specified for download."
     fi
 }
 
+# Main command router
 case "$1" in
 install)
     shift
     install_command "$@"
     ;;
 update)
-    update_command
+    shift
+    update_command "$@"
     ;;
 uninstall)
     uninstall_command
@@ -1772,6 +1681,19 @@ service-restart)
     ;;
 service-status)
     status_service_command
+    ;;
+service-logs)
+    shift
+    service_logs_command "$@"
+    ;;
+service-update)
+    service_update_command
+    ;;
+service-start)
+    service_start_command
+    ;;
+service-stop)
+    service_stop_command
     ;;
 edit)
     edit_command

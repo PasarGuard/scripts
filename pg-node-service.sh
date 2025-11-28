@@ -156,7 +156,7 @@ respond() {
 
 handle_node_update(){
     log "Executing $APP_NAME update"
-   if ! $APP_NAME update >/dev/null 2>&1; then 
+   if ! $APP_NAME update --no-update-service >/dev/null 2>&1; then 
       log "update failed with exit code: $?" 
       respond 500 '{"detail":"update failed on server"}' 
       return 
