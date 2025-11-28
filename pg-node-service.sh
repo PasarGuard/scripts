@@ -65,7 +65,56 @@ if ! command -v openssl >/dev/null 2>&1; then
   log "openssl is required for TLS mode"
   exit 1
 fi
-log "TLS enforced with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE on port $API_PORT"
+
+# Enhanced certificate validation
+check_certificate() {
+  local cert_file="$1"
+  
+  if ! openssl x509 -in "$cert_file" -noout >/dev/null 2>&1; then
+    log "Error: Invalid certificate file: $cert_file"
+    return 1
+  fi
+  
+  # Check if certificate is self-signed
+  if openssl x509 -in "$cert_file" -noout -subject | grep -q "subject= *CN *= *" && \
+     openssl x509 -in "$cert_file" -noout -issuer | grep -q "issuer= *CN *= *" && \
+     [[ $(openssl x509 -in "$cert_file" -noout -subject) == $(openssl x509 -in "$cert_file" -noout -issuer) ]]; then
+    log "Certificate is self-signed: $cert_file"
+    return 2
+  else
+    log "Certificate appears to be CA-signed: $cert_file"
+    
+    # Check certificate expiration
+    local not_after
+    not_after=$(openssl x509 -in "$cert_file" -noout -enddate | cut -d= -f2)
+    local expire_date
+    expire_date=$(date -d "$not_after" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$not_after" +%s 2>/dev/null || echo "unknown")
+    local current_date
+    current_date=$(date +%s)
+    
+    if [[ "$expire_date" != "unknown" ]] && (( current_date > expire_date )); then
+      log "Warning: Certificate has expired: $cert_file"
+      log "Expiration: $not_after"
+    elif [[ "$expire_date" != "unknown" ]]; then
+      local days_until_expire=$(( (expire_date - current_date) / 86400 ))
+      log "Certificate valid for $days_until_expire more days (expires: $not_after)"
+    fi
+    return 0
+  fi
+}
+
+# Validate certificate
+if check_certificate "$SSL_CERT_FILE"; then
+  case $? in
+    0) log "Using CA-signed TLS certificate: $SSL_CERT_FILE" ;;
+    2) log "Using self-signed TLS certificate: $SSL_CERT_FILE" ;;
+    *) log "Using TLS certificate: $SSL_CERT_FILE" ;;
+  esac
+else
+  log "Certificate validation failed, but continuing anyway..."
+fi
+
+log "TLS enabled on port $API_PORT with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE"
 log "API key protection enabled"
 
 json_escape() {
@@ -87,7 +136,6 @@ status_text() {
   esac
 }
 
-
 respond() {
   local code=$1
   local body=$2
@@ -100,10 +148,15 @@ respond() {
   printf 'Content-Length: %s\r\n' "$body_len"
   printf 'Connection: close\r\n\r\n'
   printf '%s' "$body"
+  # Flush the output to ensure response is sent immediately
+  if command -v flush >/dev/null 2>&1; then
+    flush
+  fi
 }
+
 handle_node_update(){
     log "Executing $APP_NAME update"
-   if ! $APP_NAME update 2>&1; then 
+   if ! $APP_NAME update >/dev/null 2>&1; then 
       log "update failed with exit code: $?" 
       respond 500 '{"detail":"update failed on server"}' 
       return 
@@ -131,7 +184,7 @@ handle_node_core_update(){
 
     if [[ -n "$core_version" ]]; then
       log "Executing $APP_NAME core-update with version: $core_version"
-      if $APP_NAME core-update --version "$core_version"; then
+      if $APP_NAME core-update --version "$core_version" >/dev/null 2>&1; then
         respond 200 "{\"detail\":\"node core updated successfully\"}"
       else
         log "core-update failed for version: $core_version"
@@ -175,7 +228,7 @@ handle_geofiles_update(){
     esac
 
     log "Executing $APP_NAME geofiles $flag"
-    if $APP_NAME geofiles "$flag"; then
+    if $APP_NAME geofiles "$flag" >/dev/null 2>&1; then
       respond 200 '{"detail":"geofiles updated successfully"}'
     else
       log "geofiles update failed"
@@ -185,17 +238,40 @@ handle_geofiles_update(){
 
 handle_connection() {
   local request_line method path version
+  
+  # Read the first line and check if it's a valid HTTP request
   if ! IFS= read -r request_line; then
-    return 0
+    log "Connection closed without data"
+    return 1
   fi
+  
   request_line=${request_line%$'\r'}
+  
+  # Check if this looks like an HTTP request (not an error message)
+  if [[ ! "$request_line" =~ ^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)[[:space:]]+/ ]]; then
+    log "Invalid request line (likely SSL error or non-HTTP data): $request_line"
+    # Consume any remaining data to clear the pipe
+    while IFS= read -r -t 0.1 discard; do
+      : # Discard remaining data
+    done
+    return 1
+  fi
+  
   read -r method path version <<<"$request_line"
-  log "Request line: $request_line"
+  log "Valid HTTP request: $method $path"
 
   local header_line content_length=0 x_api_key="" header_name header_value
+  local connection="close"
+  
   while IFS= read -r header_line; do
     header_line=${header_line%$'\r'}
     [[ -z "$header_line" ]] && break
+    
+    # Skip any lines that don't look like headers
+    if [[ ! "$header_line" =~ ^[[:alnum:]-]+: ]]; then
+      continue
+    fi
+    
     if [[ "$header_line" =~ ^[Cc]ontent-[Ll]ength:\ ([0-9]+) ]]; then
       content_length=${BASH_REMATCH[1]}
     fi
@@ -205,6 +281,8 @@ handle_connection() {
     header_value=${header_value# }
     if [[ "$header_name" == "x-api-key" ]]; then
       x_api_key="$header_value"
+    elif [[ "$header_name" == "connection" ]]; then
+      connection="${header_value,,}"
     fi
   done
 
@@ -222,15 +300,20 @@ handle_connection() {
   local body=""
   if (( content_length > 0 )); then
     if (( content_length > MAX_BODY )); then
-      respond 400 '{"default":"Payload too large"}'
+      respond 400 '{"detail":"Payload too large"}'
       log "Body rejected: $content_length bytes (too large)"
       return 0
     fi
-    IFS= read -r -N "$content_length" body || true
+    if ! IFS= read -r -N "$content_length" body; then
+      log "Failed to read request body"
+      respond 400 '{"detail":"Failed to read request body"}'
+      return 0
+    fi
     log "Body received: ${#body} bytes"
   fi
 
-    case "$method $path" in
+  # Process the request and send response
+  case "$method $path" in
     "GET /")
       respond 200 '{"status":"ok"}'
       ;;
@@ -247,17 +330,78 @@ handle_connection() {
       respond 404 '{"detail":"Not found"}'
       ;;
   esac
+  
   log "Responded $LAST_STATUS to $method $path"
+  
+  # If connection is keep-alive, wait for next request
+  if [[ "$connection" == "keep-alive" ]]; then
+    log "Keep-alive connection, waiting for next request..."
+    return 0
+  else
+    log "Closing connection as requested"
+    return 1
+  fi
 }
 
-log "Bash REST API listening on https://localhost:${API_PORT}"
-while true; do
-  coproc OPENSSL { openssl s_server -quiet -accept "$API_PORT" -cert "$SSL_CERT_FILE" -key "$SSL_KEY_FILE" -naccept 1; }
-  handle_connection <&"${OPENSSL[0]}" >&"${OPENSSL[1]}" || true
-  exec {OPENSSL[0]}>&-
-  exec {OPENSSL[1]}>&-
-  wait "$OPENSSL_PID" 2>/dev/null || true
-  # Ensure cleanup even if wait fails 
-  kill "$OPENSSL_PID" 2>/dev/null || true 
-  sleep 0.1 # Brief pause to avoid rapid respawn storms
-done
+# Check if we should use socat (recommended) or openssl s_server
+if command -v socat >/dev/null 2>&1; then
+  log "Starting HTTPS server with socat on port $API_PORT..."
+  
+  # For socat, we need to handle the case where we're called as a subprocess
+  if [[ "${1:-}" == "--handle-connection" ]]; then
+    # Keep processing requests on the same connection until client disconnects or sends "close"
+    while handle_connection; do
+      : # Continue processing requests on the same connection
+    done
+    exit 0
+  fi
+  
+  # Determine verify level based on certificate type
+  local verify_level="verify=0"
+  if check_certificate "$SSL_CERT_FILE" && [[ $? -eq 0 ]]; then
+    verify_level="verify=1"
+    log "Enabling client certificate verification (CA-signed certificate detected)"
+  else
+    log "Disabling client certificate verification (self-signed or invalid certificate)"
+  fi
+  
+  exec socat \
+    "OPENSSL-LISTEN:${API_PORT},cert=${SSL_CERT_FILE},key=${SSL_KEY_FILE},${verify_level},reuseaddr,fork" \
+    EXEC:"'$0' --handle-connection"
+else
+  log "socat not available, using openssl s_server"
+  log "Install socat for better performance: sudo apt-get install socat"
+  
+  # Main server loop with openssl s_server
+  log "Bash REST API listening on https://localhost:${API_PORT}"
+  
+  while true; do
+    # Use openssl s_server with stderr redirected
+    if coproc OPENSSL { 
+      openssl s_server \
+        -quiet \
+        -accept "$API_PORT" \
+        -cert "$SSL_CERT_FILE" \
+        -key "$SSL_KEY_FILE" \
+        -ign_eof \
+        2>/dev/null
+    }; then
+      log "OpenSSL server started, waiting for connections..."
+      
+      # Handle connections - keep processing requests on the same connection
+      while handle_connection <&"${OPENSSL[0]}" >&"${OPENSSL[1]}"; do
+        log "Processing next request on same connection..."
+      done
+      
+      # Clean up file descriptors
+      exec {OPENSSL[0]}<&-
+      exec {OPENSSL[1]}>&-
+      wait "${OPENSSL_PID}" 2>/dev/null || true
+      log "Client disconnected, restarting OpenSSL server..."
+    else
+      log "Failed to start openssl s_server, retrying in 5 seconds..."
+      sleep 5
+    fi
+    sleep 1
+  done
+fi
