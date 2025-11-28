@@ -222,7 +222,7 @@ handle_connection() {
   local body=""
   if (( content_length > 0 )); then
     if (( content_length > MAX_BODY )); then
-      respond 400 '{"error":"Payload too large"}'
+      respond 400 '{"default":"Payload too large"}'
       log "Body rejected: $content_length bytes (too large)"
       return 0
     fi
