@@ -290,6 +290,8 @@ validate_san_entry() {
 }
 gen_self_signed_cert() {
     local san_entries=("DNS:localhost" "IP:127.0.0.1")
+    local extra_san=""
+    local user_san_entries=()
     # Add IPv4 if it exists
     if [ -n "$NODE_IP_V4" ]; then
         san_entries+=("IP:$NODE_IP_V4")
@@ -300,44 +302,52 @@ gen_self_signed_cert() {
     fi
     echo "Current SAN entries: ${san_entries[*]}"
     if [ "$AUTO_CONFIRM" = true ]; then
-        extra_san=""
+        :
     else
-        # Temporarily disable exit on error for user input
-        set +e
-        read -rp "Enter additional SAN entries (comma separated, format: DNS:example.com or IP:1.2.3.4), or leave empty to keep current: " extra_san
-        local read_status=$?
-        set -e
-        # Check if read was interrupted (Ctrl+C)
-        if [ $read_status -ne 0 ]; then
-            colorized_echo yellow "Input cancelled, using default SAN entries only"
-            extra_san=""
-        fi
-    fi
-    if [[ -n "$extra_san" ]]; then
-        # Split input by comma and validate each entry
-        IFS=',' read -ra user_entries <<<"$extra_san"
-        local valid_entries=()
-        local invalid_entries=()
-        for entry in "${user_entries[@]}"; do
-            # Trim whitespace
-            entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [ -n "$entry" ]; then
-                if validate_san_entry "$entry"; then
-                    valid_entries+=("$entry")
-                else
-                    invalid_entries+=("$entry")
-                fi
+        while true; do
+            # Temporarily disable exit on error for user input
+            set +e
+            read -rp "Enter additional SAN entries (comma separated, format: DNS:example.com or IP:1.2.3.4), or leave empty to keep current: " extra_san
+            local read_status=$?
+            set -e
+            # Check if read was interrupted (Ctrl+C)
+            if [ $read_status -ne 0 ]; then
+                colorized_echo yellow "Input cancelled, using default SAN entries only"
+                break
             fi
+            if [[ -z "$extra_san" ]]; then
+                break
+            fi
+            # Split input by comma and validate each entry
+            IFS=',' read -ra user_entries <<<"$extra_san"
+            local valid_entries=()
+            local invalid_entries=()
+            for entry in "${user_entries[@]}"; do
+                # Trim whitespace
+                entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                if [ -n "$entry" ]; then
+                    if validate_san_entry "$entry"; then
+                        valid_entries+=("$entry")
+                    else
+                        invalid_entries+=("$entry")
+                    fi
+                fi
+            done
+            if [ ${#invalid_entries[@]} -gt 0 ]; then
+                colorized_echo red "Invalid SAN entries: ${invalid_entries[*]}"
+                colorized_echo yellow "Valid format examples: DNS:example.com, IP:192.168.1.1, IP:2001:db8::1. Please try again."
+                continue
+            fi
+            if [ ${#valid_entries[@]} -gt 0 ]; then
+                user_san_entries=("${valid_entries[@]}")
+                colorized_echo green "Accepted ${#valid_entries[@]} SAN entry/entries"
+            fi
+            break
         done
-        # Show validation results
-        if [ ${#invalid_entries[@]} -gt 0 ]; then
-            colorized_echo yellow "Warning: Invalid SAN entries ignored: ${invalid_entries[*]}"
-            colorized_echo yellow "Valid format examples: DNS:example.com, IP:192.168.1.1, IP:2001:db8::1"
-        fi
-        if [ ${#valid_entries[@]} -gt 0 ]; then
-            san_entries+=("${valid_entries[@]}")
-            colorized_echo green "Added ${#valid_entries[@]} valid SAN entry/entries"
-        fi
+    fi
+    if [ ${#user_san_entries[@]} -gt 0 ]; then
+        san_entries+=("${user_san_entries[@]}")
+        colorized_echo green "Added ${#user_san_entries[@]} valid SAN entry/entries"
     fi
     # Join SAN entries into a comma-separated string and remove duplicates
     local san_string
