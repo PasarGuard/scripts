@@ -236,10 +236,39 @@ install_docker() {
 install_node_script() {
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
-    curl -sSL $SCRIPT_URL -o $TARGET_PATH
-    sed -i "s/^APP_NAME=.*/APP_NAME=\"$APP_NAME\"/" $TARGET_PATH
-    chmod 755 $TARGET_PATH
-    colorized_echo green "node script installed successfully at $TARGET_PATH"
+    TEMP_FILE=$(mktemp)
+    
+    # Download script to temp file first
+    colorized_echo cyan "  Downloading script from GitHub..."
+    if ! curl -sSL "$SCRIPT_URL" -o "$TEMP_FILE"; then
+        colorized_echo red "✗ Failed to download script from $SCRIPT_URL"
+        rm -f "$TEMP_FILE"
+        exit 1
+    fi
+    
+    # Replace APP_NAME in the script - the script has APP_NAME="" on line 5
+    # We need to set it to the current APP_NAME value
+    if grep -q "^APP_NAME=" "$TEMP_FILE"; then
+        sed -i "s|^APP_NAME=.*|APP_NAME=\"$APP_NAME\"|" "$TEMP_FILE"
+    fi
+    
+    # Remove old file if it exists
+    if [ -f "$TARGET_PATH" ]; then
+        colorized_echo cyan "  Replacing existing script at $TARGET_PATH..."
+        rm -f "$TARGET_PATH"
+    fi
+    
+    # Move temp file to target location
+    mv "$TEMP_FILE" "$TARGET_PATH"
+    chmod 755 "$TARGET_PATH"
+    
+    # Verify the installation
+    if [ -f "$TARGET_PATH" ] && [ -x "$TARGET_PATH" ]; then
+        colorized_echo green "✓ node script installed successfully at $TARGET_PATH"
+    else
+        colorized_echo red "✗ Failed to install script - file may not be executable"
+        exit 1
+    fi
 }
 install_node_service_script() {
     set_service_paths
