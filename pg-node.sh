@@ -1662,9 +1662,11 @@ EOF
 install_completion() {
     local completion_dir="/etc/bash_completion.d"
     local completion_file="$completion_dir/$APP_NAME"
+    colorized_echo blue "Installing bash completion for $APP_NAME..."
     mkdir -p "$completion_dir"
     generate_completion >"$completion_file"
-    colorized_echo green "Bash completion installed to $completion_file"
+    chmod 644 "$completion_file"
+    colorized_echo green "✓ Bash completion installed to $completion_file"
 }
 uninstall_completion() {
     local completion_dir="/etc/bash_completion.d"
@@ -1702,14 +1704,14 @@ usage() {
     colorized_echo yellow "  service-status    $(tput sgr0)✓  Show pg-node-service status"
     colorized_echo yellow "  service-logs      $(tput sgr0)✓  View systemd service logs"
     colorized_echo yellow "  service-update    $(tput sgr0)✓  Update pg-node-service script"
-    colorized_echo yellow "  service-start       $(tput sgr0)✓  Start pg-node-service (systemd)"
+    colorized_echo yellow "  service-start     $(tput sgr0)✓  Start pg-node-service (systemd)"
     colorized_echo yellow "  service-stop      $(tput sgr0)✓  Stop pg-node-service"
     colorized_echo yellow "  edit              $(tput sgr0)✓  Edit docker-compose.yml (via nano or vi)"
     colorized_echo yellow "  edit-env          $(tput sgr0)✓  Edit .env file (via nano or vi)"
     colorized_echo yellow "  core-update       $(tput sgr0)✓  Update/Change Xray core"
     colorized_echo yellow "  geofiles          $(tput sgr0)✓  Download geoip and geosite files for specific regions"
     colorized_echo yellow "  renew-cert        $(tput sgr0)✓  Regenerate SSL/TLS certificate"
-    colorized_echo yellow "  completion        $(tput sgr0)✓  Generate shell completion script"
+    colorized_echo yellow "  completion        $(tput sgr0)✓  Install bash tab completion"
     echo
     colorized_echo cyan "Restart Options:"
     colorized_echo yellow "  -n, --no-logs           $(tput sgr0)✓  Do not follow logs after restart"
@@ -1940,7 +1942,12 @@ edit-env)
     edit_env_command
     ;;
 completion)
-    generate_completion
+    check_running_as_root
+    install_completion
+    colorized_echo cyan ""
+    colorized_echo yellow "To activate completion in this session, run:"
+    colorized_echo cyan "  source /etc/bash_completion.d/$APP_NAME"
+    colorized_echo yellow "Or simply restart your terminal."
     ;;
 *)
     usage
