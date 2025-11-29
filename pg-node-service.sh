@@ -357,7 +357,7 @@ if command -v socat >/dev/null 2>&1; then
   fi
   
   # Determine verify level based on certificate type
-  local verify_level="verify=0"
+  verify_level="verify=0"
   if check_certificate "$SSL_CERT_FILE" && [[ $? -eq 0 ]]; then
     verify_level="verify=1"
     log "Enabling client certificate verification (CA-signed certificate detected)"

@@ -1207,7 +1207,9 @@ identify_the_operating_system_and_architecture() {
 get_xray_core() {
     local requested_version="${1:-}"
     identify_the_operating_system_and_architecture
-    clear
+    # Systemd/non-TTY environments may not have TERM set; ignore clear failures to avoid exiting under set -e
+    safe_clear() { clear 2>/dev/null || true; }
+    safe_clear
     validate_version() {
         local version="$1"
         local response=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases/tags/$version")
@@ -1218,7 +1220,7 @@ get_xray_core() {
         fi
     }
     print_menu() {
-        clear
+        safe_clear
         echo -e "\033[1;32m==============================\033[0m"
         echo -e "\033[1;32m      Xray-core Installer     \033[0m"
         echo -e "\033[1;32m==============================\033[0m"
