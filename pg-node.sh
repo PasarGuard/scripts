@@ -275,14 +275,71 @@ is_port_occupied() {
         return 1
     fi
 }
+# Function to detect if a string is an IP address (IPv4 or IPv6)
+is_ip_address() {
+    local input="$1"
+    # Check for IPv4 (e.g., 192.168.1.1)
+    if [[ "$input" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        # Validate each octet is 0-255
+        IFS='.' read -ra octets <<< "$input"
+        for octet in "${octets[@]}"; do
+            if [[ $octet -lt 0 || $octet -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    # Check for IPv6 (simplified check - contains colons and hex digits)
+    if [[ "$input" =~ ^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$ ]] || [[ "$input" =~ ^:: ]] || [[ "$input" =~ :: ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Function to normalize SAN entry (add DNS: or IP: prefix if missing)
+normalize_san_entry() {
+    local entry="$1"
+    local normalized=""
+    
+    # Remove leading/trailing whitespace
+    entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # If already has prefix, return as-is
+    if [[ "$entry" =~ ^DNS:.+ ]]; then
+        echo "$entry"
+        return 0
+    elif [[ "$entry" =~ ^IP:.+ ]]; then
+        echo "$entry"
+        return 0
+    fi
+    
+    # Auto-detect and add prefix
+    if is_ip_address "$entry"; then
+        normalized="IP:$entry"
+    else
+        # Assume it's a domain name
+        normalized="DNS:$entry"
+    fi
+    
+    echo "$normalized"
+}
+
 validate_san_entry() {
     local entry="$1"
     # Remove leading/trailing whitespace
     entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    # Check if entry is in format DNS:value or IP:value
-    if [[ "$entry" =~ ^DNS:.+ ]]; then
-        return 0
-    elif [[ "$entry" =~ ^IP:.+ ]]; then
+    
+    # Empty entry is invalid
+    if [ -z "$entry" ]; then
+        return 1
+    fi
+    
+    # Normalize the entry (add prefix if missing)
+    local normalized
+    normalized=$(normalize_san_entry "$entry")
+    
+    # Check if normalized entry is valid
+    if [[ "$normalized" =~ ^DNS:.+ ]] || [[ "$normalized" =~ ^IP:.+ ]]; then
         return 0
     else
         return 1
@@ -300,14 +357,23 @@ gen_self_signed_cert() {
     if [ -n "$NODE_IP_V6" ]; then
         san_entries+=("IP:$NODE_IP_V6")
     fi
-    echo "Current SAN entries: ${san_entries[*]}"
+    colorized_echo cyan "================================"
+    colorized_echo cyan "Current SAN (Subject Alternative Name) entries:"
+    for entry in "${san_entries[@]}"; do
+        if [[ "$entry" =~ ^DNS: ]]; then
+            colorized_echo green "  ✓ DNS: ${entry#DNS:}"
+        elif [[ "$entry" =~ ^IP: ]]; then
+            colorized_echo green "  ✓ IP: ${entry#IP:}"
+        fi
+    done
+    colorized_echo cyan "================================"
     if [ "$AUTO_CONFIRM" = true ]; then
         :
     else
         while true; do
             # Temporarily disable exit on error for user input
             set +e
-            read -rp "Enter additional SAN entries (comma separated, format: DNS:example.com or IP:1.2.3.4), or leave empty to keep current: " extra_san
+            read -rp "Enter additional SAN entries (comma separated, e.g., 82.2.2.2, test.com, *.example.com), or leave empty to keep current: " extra_san
             local read_status=$?
             set -e
             # Check if read was interrupted (Ctrl+C)
@@ -322,32 +388,66 @@ gen_self_signed_cert() {
             IFS=',' read -ra user_entries <<<"$extra_san"
             local valid_entries=()
             local invalid_entries=()
+            local skipped_entries=()
+            
+            colorized_echo cyan "Validating SAN entries..."
             for entry in "${user_entries[@]}"; do
                 # Trim whitespace
                 entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                if [ -n "$entry" ]; then
-                    if validate_san_entry "$entry"; then
-                        valid_entries+=("$entry")
-                    else
-                        invalid_entries+=("$entry")
+                if [ -z "$entry" ]; then
+                    skipped_entries+=("(empty)")
+                    continue
+                fi
+                if validate_san_entry "$entry"; then
+                    # Normalize the entry to get the proper format
+                    local normalized
+                    normalized=$(normalize_san_entry "$entry")
+                    valid_entries+=("$normalized")
+                    if [[ "$normalized" =~ ^DNS: ]]; then
+                        colorized_echo green "  ✓ Valid: ${normalized#DNS:} (detected as DNS)"
+                    elif [[ "$normalized" =~ ^IP: ]]; then
+                        colorized_echo green "  ✓ Valid: ${normalized#IP:} (detected as IP)"
                     fi
+                else
+                    invalid_entries+=("$entry")
+                    colorized_echo red "  ✗ Invalid: '$entry'"
+                    colorized_echo yellow "    → Please enter a valid IP address (e.g., 82.2.2.2) or domain name (e.g., test.com)"
                 fi
             done
+            
+            if [ ${#skipped_entries[@]} -gt 0 ]; then
+                colorized_echo yellow "  ⚠ Skipped ${#skipped_entries[@]} empty entry/entries"
+            fi
+            
             if [ ${#invalid_entries[@]} -gt 0 ]; then
-                colorized_echo red "Invalid SAN entries: ${invalid_entries[*]}"
-                colorized_echo yellow "Valid format examples: DNS:example.com, IP:192.168.1.1, IP:2001:db8::1. Please try again."
+                colorized_echo red ""
+                colorized_echo red "ERROR: ${#invalid_entries[@]} invalid SAN entry/entries found:"
+                for invalid in "${invalid_entries[@]}"; do
+                    colorized_echo red "  • '$invalid'"
+                done
+                colorized_echo yellow ""
+                colorized_echo yellow "Valid format examples:"
+                colorized_echo yellow "  • 82.2.2.2 (IP address)"
+                colorized_echo yellow "  • test.com (domain name)"
+                colorized_echo yellow "  • *.example.com (wildcard domain)"
+                colorized_echo yellow "  • 2001:db8::1 (IPv6 address)"
+                colorized_echo yellow ""
+                colorized_echo yellow "Note: You can enter IPs and domains directly without prefixes."
+                colorized_echo yellow "The script will automatically detect the type."
+                colorized_echo yellow ""
+                colorized_echo yellow "Please correct the invalid entries and try again."
                 continue
             fi
             if [ ${#valid_entries[@]} -gt 0 ]; then
                 user_san_entries=("${valid_entries[@]}")
-                colorized_echo green "Accepted ${#valid_entries[@]} SAN entry/entries"
+                colorized_echo green ""
+                colorized_echo green "✓ Successfully accepted ${#valid_entries[@]} SAN entry/entries"
             fi
             break
         done
     fi
     if [ ${#user_san_entries[@]} -gt 0 ]; then
         san_entries+=("${user_san_entries[@]}")
-        colorized_echo green "Added ${#user_san_entries[@]} valid SAN entry/entries"
     fi
     # Join SAN entries into a comma-separated string and remove duplicates
     local san_string
@@ -357,14 +457,31 @@ gen_self_signed_cert() {
         colorized_echo red "Error: Failed to process SAN entries"
         exit 1
     fi
+    # Display final SAN entries
+    colorized_echo cyan ""
+    colorized_echo cyan "Final SAN entries that will be used:"
+    IFS=',' read -ra final_entries <<<"$san_string"
+    for entry in "${final_entries[@]}"; do
+        if [[ "$entry" =~ ^DNS: ]]; then
+            colorized_echo green "  • DNS: ${entry#DNS:}"
+        elif [[ "$entry" =~ ^IP: ]]; then
+            colorized_echo green "  • IP: ${entry#IP:}"
+        fi
+    done
+    colorized_echo cyan ""
     # Generate certificate
+    colorized_echo blue "Generating self-signed certificate..."
+    colorized_echo cyan "  Command: openssl req -x509 -newkey rsa:4096 ..."
     if openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY_FILE" \
         -out "$SSL_CERT_FILE" -days 36500 -nodes \
         -subj "/CN=$NODE_IP" \
         -addext "subjectAltName = $san_string" >/dev/null 2>&1; then
-        colorized_echo green "Certificate generated successfully with SAN: $san_string"
+        colorized_echo green "✓ Certificate generated successfully!"
+        colorized_echo green "  Certificate: $SSL_CERT_FILE"
+        colorized_echo green "  Private Key: $SSL_KEY_FILE"
     else
-        colorized_echo red "Error: Failed to generate certificate"
+        colorized_echo red "✗ Error: Failed to generate certificate"
+        colorized_echo red "  Please check that openssl is installed and you have write permissions."
         exit 1
     fi
 }
@@ -377,12 +494,13 @@ read_and_save_file() {
     if [ -f "$output_file" ]; then
         : >"$output_file"
     fi
-    echo -e "$prompt_message"
-    echo "Press ENTER on a new line when finished: "
+    colorized_echo cyan "$prompt_message"
+    colorized_echo yellow "Press ENTER on a new line when finished: "
     while IFS= read -r line; do
         [[ -z $line ]] && break
         if [[ "$first_line_read" -eq 0 && "$allow_file_input" -eq 1 && -f "$line" ]]; then
             first_line_read=1
+            colorized_echo cyan "  Detected file path, copying: $line"
             cp "$line" "$output_file"
             break
         fi
@@ -393,10 +511,14 @@ install_node() {
     local node_version=$1
     FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/node/main"
     COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/scripts/main"
+    colorized_echo blue "Creating directories..."
+    colorized_echo cyan "  Command: mkdir -p $DATA_DIR $DATA_DIR/certs $APP_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$DATA_DIR/certs"
     mkdir -p "$APP_DIR"
-    echo "A self-signed certificate will be generated by default."
+    colorized_echo green "  ✓ Directories created"
+    colorized_echo cyan ""
+    colorized_echo yellow "A self-signed certificate will be generated by default."
     if [ "$AUTO_CONFIRM" = true ]; then
         use_public_cert=""
     else
@@ -458,10 +580,20 @@ install_node() {
         done
     fi
     colorized_echo blue "Fetching .env and compose file"
-    curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"
-    curl -sL "$COMPOSE_FILES_URL_PREFIX/node.yml" -o "$APP_DIR/docker-compose.yml"
-    colorized_echo green "File saved in $APP_DIR/.env"
-    colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
+    colorized_echo cyan "  Command: curl -sL $FILES_URL_PREFIX/.env.example -o $APP_DIR/.env"
+    if curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"; then
+        colorized_echo green "  ✓ File saved: $APP_DIR/.env"
+    else
+        colorized_echo red "  ✗ Failed to download .env.example"
+        exit 1
+    fi
+    colorized_echo cyan "  Command: curl -sL $COMPOSE_FILES_URL_PREFIX/node.yml -o $APP_DIR/docker-compose.yml"
+    if curl -sL "$COMPOSE_FILES_URL_PREFIX/node.yml" -o "$APP_DIR/docker-compose.yml"; then
+        colorized_echo green "  ✓ File saved: $APP_DIR/docker-compose.yml"
+    else
+        colorized_echo red "  ✗ Failed to download node.yml"
+        exit 1
+    fi
     # Modifying .env file
     sed -i "s/^SERVICE_PORT *= *.*/SERVICE_PORT= ${SERVICE_PORT}/" "$APP_DIR/.env"
     sed -i "s/^API_KEY *= *.*/API_KEY= ${API_KEY}/" "$APP_DIR/.env"
@@ -472,12 +604,18 @@ install_node() {
     fi
     colorized_echo green ".env file modified successfully"
     # Modifying compose file
+    colorized_echo blue "Modifying docker-compose.yml..."
     service_name="node"
     if [ "$APP_NAME" != "pg-node" ]; then
-        yq eval ".services[\"$service_name\"].container_name = \"$APP_NAME\"" -i "$APP_DIR/docker-compose.yml"
+        colorized_echo cyan "  Command: yq eval ...container_name = \"$APP_NAME\"..."
+        if yq eval ".services[\"$service_name\"].container_name = \"$APP_NAME\"" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
+            colorized_echo green "  ✓ Container name set to: $APP_NAME"
+        else
+            colorized_echo yellow "  ⚠ Failed to set container name (may not be critical)"
+        fi
     fi
     # Keep the container mount path but point the host path at DATA_DIR
-    existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml")
+    existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml" 2>/dev/null)
     if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
         # Extract container path (everything after the colon)
         if [[ "$existing_volume" == *:* ]]; then
@@ -486,12 +624,22 @@ install_node() {
             # If no colon found, use the existing volume as container path
             container_path="$existing_volume"
         fi
-        yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml"
+        colorized_echo cyan "  Command: yq eval ...volumes[0] = \"${DATA_DIR}:${container_path}\"..."
+        if yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
+            colorized_echo green "  ✓ Volume path configured: ${DATA_DIR}:${container_path}"
+        else
+            colorized_echo yellow "  ⚠ Failed to configure volume (may not be critical)"
+        fi
     fi
     if [ "$node_version" != "latest" ]; then
-        yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml"
+        colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
+        if yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
+            colorized_echo green "  ✓ Docker image version set to: ${node_version}"
+        else
+            colorized_echo yellow "  ⚠ Failed to set image version (may not be critical)"
+        fi
     fi
-    colorized_echo green "compose file modified successfully"
+    colorized_echo green "✓ docker-compose.yml modified successfully"
 }
 uninstall_node_script() {
     if [ -f "/usr/local/bin/$APP_NAME" ]; then
@@ -671,14 +819,18 @@ install_command() {
     # Check if the version is valid and exists
     if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if check_version_exists "$node_version"; then
+            colorized_echo cyan "================================"
+            colorized_echo cyan "Installing PasarGuard Node"
+            colorized_echo cyan "Version: $node_version"
+            colorized_echo cyan "================================"
             install_node "$node_version"
-            echo "Installing $node_version version"
+            colorized_echo green "✓ Node installation completed for version: $node_version"
         else
-            echo "Version $node_version does not exist. Please enter a valid version (e.g. v0.1.2)"
+            colorized_echo red "✗ Version $node_version does not exist. Please enter a valid version (e.g. v0.1.2)"
             exit 1
         fi
     else
-        echo "Invalid version format. Please enter a valid version (e.g. v1.0.0)"
+        colorized_echo red "✗ Invalid version format. Please enter a valid version (e.g. v1.0.0)"
         exit 1
     fi
     install_node_script
@@ -1499,7 +1651,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1556,6 +1708,7 @@ usage() {
     colorized_echo yellow "  edit-env          $(tput sgr0)✓  Edit .env file (via nano or vi)"
     colorized_echo yellow "  core-update       $(tput sgr0)✓  Update/Change Xray core"
     colorized_echo yellow "  geofiles          $(tput sgr0)✓  Download geoip and geosite files for specific regions"
+    colorized_echo yellow "  renew-cert        $(tput sgr0)✓  Regenerate SSL/TLS certificate"
     colorized_echo yellow "  completion        $(tput sgr0)✓  Generate shell completion script"
     echo
     colorized_echo cyan "Restart Options:"
@@ -1658,6 +1811,54 @@ geofiles_command() {
     fi
 }
 
+renew_cert_command() {
+    check_running_as_root
+    # Check if node is installed
+    if ! is_node_installed; then
+        colorized_echo red "✗ Node is not installed. Please install node first."
+        exit 1
+    fi
+    colorized_echo cyan "================================"
+    colorized_echo cyan "Renewing SSL/TLS Certificate"
+    colorized_echo cyan "================================"
+    colorized_echo yellow "This will create a new SSL/TLS certificate for your node."
+    colorized_echo yellow "The old certificate will be backed up automatically."
+    
+    # Backup existing certificates
+    if [ -f "$SSL_CERT_FILE" ]; then
+        local backup_cert="${SSL_CERT_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        local backup_key="${SSL_KEY_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+        colorized_echo blue "Backing up existing certificates..."
+        cp "$SSL_CERT_FILE" "$backup_cert" 2>/dev/null || true
+        if [ -f "$SSL_KEY_FILE" ]; then
+            cp "$SSL_KEY_FILE" "$backup_key" 2>/dev/null || true
+        fi
+        colorized_echo green "  ✓ Backup created: $backup_cert"
+        if [ -f "$backup_key" ]; then
+            colorized_echo green "  ✓ Backup created: $backup_key"
+        fi
+    fi
+    
+    # Generate new certificate
+    gen_self_signed_cert
+    
+    # Restart the service if it's running
+    if docker ps --format '{{.Names}}' | grep -q "^$APP_NAME$"; then
+        colorized_echo blue ""
+        colorized_echo blue "Restarting node to apply new certificate..."
+        restart_command -n --no-restart-service
+        colorized_echo green "✓ Node restarted with new certificate"
+    fi
+    
+    colorized_echo cyan ""
+    colorized_echo cyan "================================"
+    colorized_echo green "✓ Certificate renewal completed!"
+    colorized_echo cyan "================================"
+    colorized_echo magenta "New certificate location: $SSL_CERT_FILE"
+    colorized_echo magenta "Please update the certificate in your pasarguard Panel."
+    colorized_echo cyan "================================"
+}
+
 # Main command router
 case "$1" in
 install)
@@ -1696,6 +1897,10 @@ core-update)
 geofiles)
     shift
     geofiles_command "$@"
+    ;;
+renew-cert)
+    shift
+    renew_cert_command "$@"
     ;;
 install-script)
     install_node_script
