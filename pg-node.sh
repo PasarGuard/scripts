@@ -1892,20 +1892,32 @@ renew_cert_command() {
     # Generate new certificate
     gen_self_signed_cert
     
-    # Restart the service if it's running
+    # Ask user if they want to restart the node
     if docker ps --format '{{.Names}}' | grep -q "^$APP_NAME$"; then
-        colorized_echo blue ""
-        colorized_echo blue "Restarting node to apply new certificate..."
-        restart_command -n --no-restart-service
-        colorized_echo green "✓ Node restarted with new certificate"
+        colorized_echo cyan ""
+        colorized_echo yellow "The node needs to be restarted to apply the new certificate."
+        local restart_choice=""
+        if [ "$AUTO_CONFIRM" = true ]; then
+            restart_choice="n"
+        else
+            read -p "Do you want to restart the node now? (y/N): " restart_choice
+        fi
+        if [[ "$restart_choice" =~ ^[Yy]$ ]]; then
+            colorized_echo blue "Restarting node to apply new certificate..."
+            restart_command -n --no-restart-service
+            colorized_echo green "✓ Node restarted with new certificate"
+        else
+            colorized_echo yellow "Skipped restart. Please restart the node manually to apply the new certificate."
+            colorized_echo yellow "You can restart it later with: $APP_NAME restart"
+        fi
     fi
     
     colorized_echo cyan ""
     colorized_echo cyan "================================"
     colorized_echo green "✓ Certificate renewal completed!"
     colorized_echo cyan "================================"
-    colorized_echo magenta "New certificate location: $SSL_CERT_FILE"
-    colorized_echo magenta "Please update the certificate in your pasarguard Panel."
+    colorized_echo magenta "Please use the following Certificate in pasarguard Panel (it's located in ${DATA_DIR}/certs):"
+    cat "$SSL_CERT_FILE"
     colorized_echo cyan "================================"
 }
 
