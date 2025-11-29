@@ -1212,7 +1212,21 @@ get_xray_core() {
     safe_clear
     validate_version() {
         local version="$1"
-        local response=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases/tags/$version")
+        local response
+        local curl_exit_code
+        
+        # Use curl with timeout and error handling
+        response=$(curl -s --max-time 10 --connect-timeout 5 "https://api.github.com/repos/XTLS/Xray-core/releases/tags/$version" 2>&1)
+        curl_exit_code=$?
+        
+        # Check if curl failed (network error, timeout, etc.)
+        if [ $curl_exit_code -ne 0 ] || [ -z "$response" ]; then
+            echo -e "\033[1;31mError: Failed to validate version. Network error or GitHub API unavailable.\033[0m" >&2
+            echo "network_error"
+            return
+        fi
+        
+        # Check if version exists
         if echo "$response" | grep -q '"message": "Not Found"'; then
             echo "invalid"
         else
@@ -1245,11 +1259,18 @@ get_xray_core() {
     if [[ -n "$requested_version" ]]; then
         if [[ "$requested_version" == "latest" ]]; then
             selected_version=${versions[0]}
-        elif [ "$(validate_version "$requested_version")" == "valid" ]; then
-            selected_version="$requested_version"
         else
-            echo -e "\033[1;31mInvalid version or version does not exist. Please try again.\033[0m"
-            exit 1
+            local validation_result
+            validation_result=$(validate_version "$requested_version")
+            if [ "$validation_result" == "valid" ]; then
+                selected_version="$requested_version"
+            elif [ "$validation_result" == "network_error" ]; then
+                echo -e "\033[1;31mError: Failed to validate version due to network error. Please check your internet connection and try again.\033[0m" >&2
+                exit 1
+            else
+                echo -e "\033[1;31mInvalid version or version does not exist: $requested_version. Please try again.\033[0m" >&2
+                exit 1
+            fi
         fi
     elif [ "$AUTO_CONFIRM" = true ]; then
         selected_version=${versions[0]}

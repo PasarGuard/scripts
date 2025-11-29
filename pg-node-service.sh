@@ -184,11 +184,21 @@ handle_node_core_update(){
 
     if [[ -n "$core_version" ]]; then
       log "Executing $APP_NAME core-update with version: $core_version"
-      if $APP_NAME core-update --version "$core_version" >/dev/null 2>&1; then
+      local error_output
+      error_output=$($APP_NAME core-update --version "$core_version" 2>&1)
+      local exit_code=$?
+      if [ $exit_code -eq 0 ]; then
         respond 200 "{\"detail\":\"node core updated successfully\"}"
       else
-        log "core-update failed for version: $core_version"
-        respond 404 "{\"detail\":\"core-update failed for version $(json_escape "$core_version")\"}"
+        log "core-update failed for version: $core_version (exit code: $exit_code)"
+        log "Error output: $error_output"
+        # Extract the actual error message, removing ANSI color codes
+        local clean_error=$(echo "$error_output" | sed 's/\x1b\[[0-9;]*m//g' | head -n 1)
+        if [[ -n "$clean_error" ]]; then
+          respond 404 "{\"detail\":\"core-update failed for version $(json_escape "$core_version"): $(json_escape "$clean_error")\"}"
+        else
+          respond 404 "{\"detail\":\"core-update failed for version $(json_escape "$core_version"). Version may not exist or network error occurred.\"}"
+        fi
       fi
     fi
 }
