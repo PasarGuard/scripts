@@ -373,7 +373,15 @@ gen_self_signed_cert() {
         while true; do
             # Temporarily disable exit on error for user input
             set +e
-            read -rp "Enter additional SAN entries (comma separated, e.g., 82.2.2.2, test.com, *.example.com), or leave empty to keep current: " extra_san
+            colorized_echo cyan ""
+            colorized_echo yellow "You can add additional SAN entries (IP addresses or domain names)."
+            colorized_echo yellow "Examples:"
+            colorized_echo cyan "  • IP addresses: 192.168.1.100, 203.0.113.45"
+            colorized_echo cyan "  • Domain names: node.example.com, vpn.mydomain.com"
+            colorized_echo cyan "  • Wildcard domains: *.example.com"
+            colorized_echo cyan "  • IPv6: 2001:db8::1"
+            colorized_echo yellow ""
+            read -rp "Enter additional SAN entries (comma separated), or press ENTER to keep current: " extra_san
             local read_status=$?
             set -e
             # Check if read was interrupted (Ctrl+C)
@@ -411,7 +419,7 @@ gen_self_signed_cert() {
                 else
                     invalid_entries+=("$entry")
                     colorized_echo red "  ✗ Invalid: '$entry'"
-                    colorized_echo yellow "    → Please enter a valid IP address (e.g., 82.2.2.2) or domain name (e.g., test.com)"
+                    colorized_echo yellow "    → Please enter a valid IP address (e.g., 192.168.1.100) or domain name (e.g., node.example.com)"
                 fi
             done
             
@@ -427,12 +435,12 @@ gen_self_signed_cert() {
                 done
                 colorized_echo yellow ""
                 colorized_echo yellow "Valid format examples:"
-                colorized_echo yellow "  • 82.2.2.2 (IP address)"
-                colorized_echo yellow "  • test.com (domain name)"
-                colorized_echo yellow "  • *.example.com (wildcard domain)"
-                colorized_echo yellow "  • 2001:db8::1 (IPv6 address)"
+                colorized_echo cyan "  • IP addresses: 192.168.1.100, 203.0.113.45"
+                colorized_echo cyan "  • Domain names: node.example.com, vpn.mydomain.com"
+                colorized_echo cyan "  • Wildcard domains: *.example.com"
+                colorized_echo cyan "  • IPv6 addresses: 2001:db8::1, ::1"
                 colorized_echo yellow ""
-                colorized_echo yellow "Note: You can enter IPs and domains directly without prefixes."
+                colorized_echo yellow "Note: Enter IPs and domains directly (no DNS: or IP: prefix needed)."
                 colorized_echo yellow "The script will automatically detect the type."
                 colorized_echo yellow ""
                 colorized_echo yellow "Please correct the invalid entries and try again."
