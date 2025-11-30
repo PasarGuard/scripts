@@ -2009,7 +2009,7 @@ backup_command() {
                                 fi
                                 
                                 colorized_echo blue "Backing up all $db_type_name databases from container: $container_name (using root user)"
-                                databases=$(docker exec "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$")
+                                databases=$(docker exec "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$" || true)
                         if [ -z "$databases" ]; then
                             colorized_echo yellow "No user databases found, falling back to specific database backup"
                             # Fallback to SQL URL credentials
