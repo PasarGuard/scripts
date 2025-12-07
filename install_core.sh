@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -e
 
 # Download Xray latest
 
@@ -198,3 +199,4 @@ place_xray
 
 rm -rf "$TMP_DIRECTORY"
 echo "Installation complete!"
+exit 0
