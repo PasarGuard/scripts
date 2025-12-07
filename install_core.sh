@@ -3,10 +3,46 @@
 # Download Xray latest
 
 RELEASE_TAG="latest"
+TARGET_OS=""
+TARGET_ARCH=""
 
-if [[ "$1" ]]; then
-    RELEASE_TAG="$1"
-fi
+usage() {
+    cat <<'EOF'
+Usage: install_core.sh [--tag <release-tag>] [--os <linux>] [--arch <arch>]
+
+Options:
+  --tag    Xray release tag (default: latest)
+  --os     Target OS (default: autodetect; supported: linux)
+  --arch   Target arch (default: autodetect; supported: 32,64,arm32-v5,arm32-v6,arm32-v7a,arm64-v8a,mips32,mips32le,mips64,mips64le,ppc64,ppc64le,riscv64,s390x)
+  -h, --help  Show this help
+
+Examples:
+  install_core.sh --arch arm64-v8a
+  install_core.sh --tag v1.8.10 --arch mips32le
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tag)
+                RELEASE_TAG="$2"; shift 2;;
+            --os)
+                TARGET_OS="$2"; shift 2;;
+            --arch)
+                TARGET_ARCH="$2"; shift 2;;
+            -h|--help)
+                usage; exit 0;;
+            *)
+                echo "error: unknown option $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
+parse_args "$@"
 
 check_if_running_as_root() {
     # If you want to run as another user, please modify $EUID to be owned by this user
@@ -17,6 +53,17 @@ check_if_running_as_root() {
 }
 
 identify_the_operating_system_and_architecture() {
+    if [[ -n "$TARGET_OS" && "$TARGET_OS" != "linux" ]]; then
+        echo "error: This operating system is not supported (supported: linux)."
+        exit 1
+    fi
+
+    # If arch explicitly provided, trust it after minimal validation
+    if [[ -n "$TARGET_ARCH" ]]; then
+        ARCH="$TARGET_ARCH"
+        return
+    fi
+    
     if [[ "$(uname)" == 'Linux' ]]; then
         case "$(uname -m)" in
             'i386' | 'i686')
@@ -76,10 +123,12 @@ identify_the_operating_system_and_architecture() {
 }
 
 download_xray() {
+    TARGET_OS_VALUE="${TARGET_OS:-linux}"
+
     if [[ "$RELEASE_TAG" == "latest" ]]; then
-        DOWNLOAD_LINK="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$ARCH.zip"
+        DOWNLOAD_LINK="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-${TARGET_OS_VALUE}-$ARCH.zip"
     else
-        DOWNLOAD_LINK="https://github.com/XTLS/Xray-core/releases/download/$RELEASE_TAG/Xray-linux-$ARCH.zip"
+        DOWNLOAD_LINK="https://github.com/XTLS/Xray-core/releases/download/$RELEASE_TAG/Xray-${TARGET_OS_VALUE}-$ARCH.zip"
     fi
     
     echo "Downloading Xray archive: $DOWNLOAD_LINK"
