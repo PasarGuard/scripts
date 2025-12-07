@@ -134,25 +134,55 @@ download_xray() {
     echo "Downloading Xray archive: $DOWNLOAD_LINK"
     if ! curl -RL -H 'Cache-Control: no-cache' -o "$ZIP_FILE" "$DOWNLOAD_LINK"; then
         echo 'error: Download failed! Please check your network or try again.'
-        return 1
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
     fi
 }
 
 extract_xray() {
     if ! unzip -q "$ZIP_FILE" -d "$TMP_DIRECTORY"; then
         echo 'error: Xray decompression failed.'
-        "rm" -rf "$TMP_DIRECTORY"
+        rm -rf "$TMP_DIRECTORY"
         echo "removed: $TMP_DIRECTORY"
         exit 1
     fi
     echo "Extracted Xray archive to $TMP_DIRECTORY"
+    
+    # Validate required files exist
+    if [[ ! -f "${TMP_DIRECTORY}/xray" ]]; then
+        echo 'error: xray binary not found in archive.'
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
+    fi
+    if [[ ! -f "${TMP_DIRECTORY}/geoip.dat" ]]; then
+        echo 'error: geoip.dat not found in archive.'
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
+    fi
+    if [[ ! -f "${TMP_DIRECTORY}/geosite.dat" ]]; then
+        echo 'error: geosite.dat not found in archive.'
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
+    fi
 }
 
 place_xray() {
-    install -m 755 "${TMP_DIRECTORY}/xray" "/usr/local/bin/xray"
+    if ! install -m 755 "${TMP_DIRECTORY}/xray" "/usr/local/bin/xray"; then
+        echo 'error: Failed to install xray binary.'
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
+    fi
     install -d "/usr/local/share/xray/"
-    install -m 644 "${TMP_DIRECTORY}/geoip.dat" "/usr/local/share/xray/geoip.dat"
-    install -m 644 "${TMP_DIRECTORY}/geosite.dat" "/usr/local/share/xray/geosite.dat"
+    if ! install -m 644 "${TMP_DIRECTORY}/geoip.dat" "/usr/local/share/xray/geoip.dat"; then
+        echo 'error: Failed to install geoip.dat.'
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
+    fi
+    if ! install -m 644 "${TMP_DIRECTORY}/geosite.dat" "/usr/local/share/xray/geosite.dat"; then
+        echo 'error: Failed to install geosite.dat.'
+        rm -rf "$TMP_DIRECTORY"
+        exit 1
+    fi
     echo "Xray files installed"
 }
 
@@ -166,4 +196,5 @@ download_xray
 extract_xray
 place_xray
 
-"rm" -rf "$TMP_DIRECTORY"
+rm -rf "$TMP_DIRECTORY"
+echo "Installation complete!"
