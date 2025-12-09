@@ -1948,6 +1948,7 @@ renew_cert_command() {
     colorized_echo magenta "Please use the following Certificate in pasarguard Panel (it's located in ${DATA_DIR}/certs):"
     cat "$SSL_CERT_FILE"
     colorized_echo cyan "================================"
+    restart_command
 }
 
 # Main command router
