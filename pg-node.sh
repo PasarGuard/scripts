@@ -70,7 +70,9 @@ SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
 FETCH_REPO="PasarGuard/scripts"
 SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node.sh"
-SERVICE_SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node-service.sh"
+NODE_SERVICE_REPO="PasarGuard/node-serviced"
+NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
+NODE_SERVICE_BINARY_NAME="node-serviced"
 colorized_echo() {
     local color=$1
     local text=$2
@@ -107,7 +109,7 @@ check_running_as_root() {
 }
 set_service_paths() {
     SERVICE_NAME="${APP_NAME}-service"
-    SERVICE_SCRIPT_PATH="/usr/local/bin/${SERVICE_NAME}.sh"
+    SERVICE_BINARY_PATH="/usr/local/bin/${SERVICE_NAME}"
     SERVICE_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 }
 require_systemd() {
@@ -149,6 +151,34 @@ update_service_if_installed() {
     systemctl daemon-reload
     systemctl restart "$SERVICE_NAME"
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
+}
+detect_node_serviced_platform() {
+    local arch os platform
+    os=$(uname -s 2>/dev/null || echo "")
+    if [ "$os" != "Linux" ]; then
+        colorized_echo red "Unsupported OS for node-serviced: $os"
+        exit 1
+    fi
+    arch=$(uname -m 2>/dev/null || echo "")
+    case "$arch" in
+    x86_64 | amd64)
+        platform="Linux_x86_64"
+        ;;
+    aarch64 | arm64 | armv8* )
+        platform="Linux_arm64"
+        ;;
+    armv7l | armv7)
+        platform="Linux_armv7"
+        ;;
+    armv6l | armv6)
+        platform="Linux_armv6"
+        ;;
+    *)
+        colorized_echo red "Unsupported architecture for node-serviced: $arch"
+        exit 1
+        ;;
+    esac
+    echo "$platform"
 }
 configure_firewall_for_port() {
     local port="$1"
@@ -272,11 +302,46 @@ install_node_script() {
 }
 install_node_service_script() {
     set_service_paths
-    colorized_echo blue "Installing node service script"
-    curl -sSL $SERVICE_SCRIPT_URL -o "$SERVICE_SCRIPT_PATH"
-    sed -i "s/^APP_NAME=.*/APP_NAME=\"$APP_NAME\"/" "$SERVICE_SCRIPT_PATH"
-    chmod 755 "$SERVICE_SCRIPT_PATH"
-    colorized_echo green "node service script installed successfully at $SERVICE_SCRIPT_PATH"
+    if ! command -v jq >/dev/null 2>&1; then
+        detect_os
+        install_package jq
+    fi
+    colorized_echo blue "Installing node-serviced binary"
+    local platform release_json latest_tag latest_version asset_name asset_url tmp_dir archive_path
+    platform=$(detect_node_serviced_platform)
+    if ! release_json=$(curl -fsSL "$NODE_SERVICE_RELEASE_API"); then
+        colorized_echo red "Failed to query latest node-serviced release from $NODE_SERVICE_RELEASE_API"
+        exit 1
+    fi
+    latest_tag=$(echo "$release_json" | jq -r '.tag_name // empty')
+    latest_version="${latest_tag#v}"
+    if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
+        colorized_echo red "Failed to resolve latest node-serviced version from $NODE_SERVICE_RELEASE_API"
+        exit 1
+    fi
+    asset_name="${NODE_SERVICE_BINARY_NAME}_${latest_version}_${platform}.tar.gz"
+    asset_url=$(echo "$release_json" | jq -r --arg name "$asset_name" '.assets[]? | select(.name==$name) | .browser_download_url' | head -n 1)
+    if [ -z "$asset_url" ] || [ "$asset_url" = "null" ]; then
+        colorized_echo red "node-serviced asset not found for platform $platform (expected $asset_name)"
+        exit 1
+    fi
+    tmp_dir=$(mktemp -d)
+    archive_path="${tmp_dir}/${asset_name}"
+    colorized_echo cyan "  Downloading ${asset_name}..."
+    if ! curl -sSL "$asset_url" -o "$archive_path"; then
+        colorized_echo red "Failed to download node-serviced from $asset_url"
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+    colorized_echo cyan "  Extracting node-serviced..."
+    if ! tar -xzf "$archive_path" -C "$tmp_dir" "$NODE_SERVICE_BINARY_NAME" 2>/dev/null; then
+        colorized_echo red "Failed to extract node-serviced binary from archive."
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+    install -m 755 "${tmp_dir}/${NODE_SERVICE_BINARY_NAME}" "$SERVICE_BINARY_PATH"
+    rm -rf "$tmp_dir"
+    colorized_echo green "node-serviced installed successfully at $SERVICE_BINARY_PATH (v${latest_version})"
 }
 # Get a list of occupied ports
 get_occupied_ports() {
@@ -686,9 +751,9 @@ uninstall_node_script() {
 }
 uninstall_node_service_script() {
     set_service_paths
-    if [ -f "$SERVICE_SCRIPT_PATH" ]; then
-        colorized_echo yellow "Removing node service script"
-        rm "$SERVICE_SCRIPT_PATH"
+    if [ -f "$SERVICE_BINARY_PATH" ]; then
+        colorized_echo yellow "Removing node-serviced binary"
+        rm "$SERVICE_BINARY_PATH"
     fi
 }
 uninstall_node() {
@@ -1106,7 +1171,7 @@ After=network-online.target docker.service
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=$SERVICE_SCRIPT_PATH
+ExecStart=$SERVICE_BINARY_PATH
 WorkingDirectory=$APP_DIR
 Restart=on-failure
 RestartSec=5
@@ -1115,6 +1180,8 @@ StartLimitBurst=3
 TimeoutStartSec=30
 TimeoutStopSec=10
 Environment="ENV_FILE=$ENV_FILE"
+Environment="APP_NAME=$APP_NAME"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 [Install]
 WantedBy=multi-user.target
 EOF
