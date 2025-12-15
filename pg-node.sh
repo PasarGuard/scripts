@@ -57,8 +57,6 @@ fi
 INSTALL_DIR="/opt"
 if [ -d "$INSTALL_DIR/$APP_NAME" ]; then
     APP_DIR="$INSTALL_DIR/$APP_NAME"
-elif [ -d "$INSTALL_DIR/node" ]; then
-    APP_DIR="$INSTALL_DIR/node"
 else
     APP_DIR="$INSTALL_DIR/$APP_NAME"
 fi
@@ -716,7 +714,7 @@ install_node() {
             colorized_echo yellow "  ⚠ Failed to set container name (may not be critical)"
         fi
     fi
-    # Keep the container mount path but point the host path at DATA_DIR
+    container_path=""
     existing_volume=$(yq eval -r ".services[\"$service_name\"].volumes[0]" "$APP_DIR/docker-compose.yml" 2>/dev/null)
     if [ -n "$existing_volume" ] && [ "$existing_volume" != "null" ]; then
         # Extract container path (everything after the colon)
@@ -726,13 +724,22 @@ install_node() {
             # If no colon found, use the existing volume as container path
             container_path="$existing_volume"
         fi
-        colorized_echo cyan "  Command: yq eval ...volumes[0] = \"${DATA_DIR}:${container_path}\"..."
-        if yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
-            colorized_echo green "  ✓ Volume path configured: ${DATA_DIR}:${container_path}"
-        else
-            colorized_echo yellow "  ⚠ Failed to configure volume (may not be critical)"
-        fi
     fi
+    # For custom names, keep host/container paths aligned to the APP_NAME data dir
+    if [ "$APP_NAME" != "pg-node" ] || [ -z "$container_path" ]; then
+        container_path="$DATA_DIR"
+    fi
+    colorized_echo cyan "  Command: yq eval ...volumes[0] = \"${DATA_DIR}:${container_path}\"..."
+    if yq eval ".services[\"$service_name\"].volumes[0] = \"${DATA_DIR}:${container_path}\"" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
+        colorized_echo green "  ✓ Volume path configured: ${DATA_DIR}:${container_path}"
+    else
+        colorized_echo yellow "  ⚠ Failed to configure volume (may not be critical)"
+    fi
+    # Keep SSL paths in .env aligned with the mapped volume (important for node-serviced on host)
+    ssl_cert_env="${container_path}/certs/ssl_cert.pem"
+    ssl_key_env="${container_path}/certs/ssl_key.pem"
+    sed -i "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|" "$APP_DIR/.env"
+    sed -i "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|" "$APP_DIR/.env"
     if [ "$node_version" != "latest" ]; then
         colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
         if yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
@@ -1706,9 +1713,10 @@ update_core_command() {
         sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray|" "$APP_DIR/.env"
         grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${container_path}/xray-core/xray" >>"$APP_DIR/.env"
     else
-        # Fallback to default if no volume found
-        sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray|" "$APP_DIR/.env"
-        grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= /var/lib/pg-node/xray-core/xray" >>"$APP_DIR/.env"
+        # Fallback to APP_NAME-based path if no volume mapping is detected
+        local fallback_path="${DATA_DIR}/xray-core/xray"
+        sed -i "s|^# *XRAY_EXECUTABLE_PATH *=.*|XRAY_EXECUTABLE_PATH= ${fallback_path}|" "$APP_DIR/.env"
+        grep -q '^XRAY_EXECUTABLE_PATH=' "$APP_DIR/.env" || echo "XRAY_EXECUTABLE_PATH= ${fallback_path}" >>"$APP_DIR/.env"
     fi
     # Restart node
     colorized_echo red "Restarting node..."
