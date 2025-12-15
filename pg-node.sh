@@ -748,6 +748,8 @@ install_node() {
             colorized_echo yellow "  ⚠ Failed to set image version (may not be critical)"
         fi
     fi
+    # Final sync to ensure env has the correct SSL paths for custom names
+    sync_env_ssl_paths
     colorized_echo green "✓ docker-compose.yml modified successfully"
 }
 uninstall_node_script() {
@@ -817,6 +819,33 @@ ensure_env_exists() {
     if [ ! -f "$ENV_FILE" ]; then
         colorized_echo red "Environment file not found at $ENV_FILE. Please install the node first."
         exit 1
+    fi
+}
+sync_env_ssl_paths() {
+    # Adjust SSL_CERT_FILE/SSL_KEY_FILE in .env if a custom APP_NAME still points to the default pg-node path
+    if [ "$APP_NAME" = "pg-node" ]; then
+        return
+    fi
+    if [ ! -f "$ENV_FILE" ]; then
+        return
+    fi
+    local desired_cert="${DATA_DIR}/certs/ssl_cert.pem"
+    local desired_key="${DATA_DIR}/certs/ssl_key.pem"
+    local current_cert current_key updated=false
+    current_cert=$(grep -E '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_CERT_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
+    current_key=$(grep -E '^[[:space:]]*SSL_KEY_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_KEY_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
+    if [[ -z "$current_cert" || "$current_cert" =~ /var/lib/pg-node/ ]]; then
+        sed -i "s|^[[:space:]]*SSL_CERT_FILE[[:space:]]*=.*|SSL_CERT_FILE= ${desired_cert}|" "$ENV_FILE"
+        grep -q '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" || echo "SSL_CERT_FILE= ${desired_cert}" >>"$ENV_FILE"
+        updated=true
+    fi
+    if [[ -z "$current_key" || "$current_key" =~ /var/lib/pg-node/ ]]; then
+        sed -i "s|^[[:space:]]*SSL_KEY_FILE[[:space:]]*=.*|SSL_KEY_FILE= ${desired_key}|" "$ENV_FILE"
+        grep -q '^[[:space:]]*SSL_KEY_FILE[[:space:]]*=' "$ENV_FILE" || echo "SSL_KEY_FILE= ${desired_key}" >>"$ENV_FILE"
+        updated=true
+    fi
+    if [ "$updated" = true ]; then
+        colorized_echo cyan "Updated SSL file paths in $ENV_FILE to match APP_NAME ($APP_NAME)."
     fi
 }
 is_node_up() {
@@ -1121,6 +1150,7 @@ install_service_command() {
         exit 1
     fi
     ensure_env_exists
+    sync_env_ssl_paths
     get_occupied_ports
     local api_port existing_api_port=""
     local default_api_port=62051
@@ -2026,6 +2056,8 @@ renew_cert_command() {
     restart_command
 }
 
+# Bring existing env SSL paths in line with the current APP_NAME (safe no-op if not installed/default)
+sync_env_ssl_paths
 # Main command router
 case "$1" in
 install)
