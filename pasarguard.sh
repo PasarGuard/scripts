@@ -1089,6 +1089,38 @@ restore_command() {
         exit 1
     fi
 
+    local current_db_user=""
+    local current_db_password=""
+    local current_db_name=""
+    local current_sqlalchemy_url=""
+
+    if [ -f "$ENV_FILE" ]; then
+        set +e
+        while IFS='=' read -r key value || [ -n "$key" ]; do
+            if [[ -z "$key" || "$key" =~ ^# ]]; then
+                continue
+            fi
+            key=$(echo "$key" | xargs 2>/dev/null || echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            value=$(echo "$value" | xargs 2>/dev/null || echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            value=$(echo "$value" | sed -E 's/^["'"'"'](.*)["'"'"']$/\1/' 2>/dev/null || echo "$value")
+            case "$key" in
+            DB_USER)
+                current_db_user="$value"
+                ;;
+            DB_PASSWORD)
+                current_db_password="$value"
+                ;;
+            DB_NAME)
+                current_db_name="$value"
+                ;;
+            SQLALCHEMY_DATABASE_URL)
+                current_sqlalchemy_url="$value"
+                ;;
+            esac
+        done <"$ENV_FILE"
+        set -e
+    fi
+
     local backup_dir="$APP_DIR/backup"
     local temp_restore_dir="/tmp/pasarguard_restore"
     local log_file="/var/log/pasarguard_restore_error.log"
@@ -1695,12 +1727,57 @@ restore_command() {
         ;;
     esac
 
+    # Restore data directory if included in backup
+    colorized_echo blue "Restoring data directory..."
+    local extracted_data_dir="$temp_restore_dir/pasarguard_data"
+    if [ -d "$extracted_data_dir" ]; then
+        if ! command -v rsync >/dev/null 2>&1; then
+            detect_os
+            install_package rsync
+        fi
+        mkdir -p "$DATA_DIR"
+        if ! rsync -a "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
+            colorized_echo red "Failed to restore data directory."
+            echo "Failed to restore data directory from $extracted_data_dir to $DATA_DIR" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        colorized_echo green "Data directory restored to $DATA_DIR."
+    else
+        colorized_echo yellow "No pasarguard_data directory found in backup. Skipping data restore."
+    fi
+
     # Restore configuration files if needed
     colorized_echo blue "Restoring configuration files..."
     if [ -f "$temp_restore_dir/.env" ]; then
         cp "$temp_restore_dir/.env" "$APP_DIR/.env.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
         cp "$temp_restore_dir/.env" "$APP_DIR/.env" 2>>"$log_file"
         colorized_echo green "Environment file restored."
+        local preserve_db_credentials=false
+        if [[ "$db_type" != "sqlite" ]]; then
+            if [ -n "$current_db_user" ] && [ -n "${DB_USER:-}" ] && [ "$current_db_user" != "$DB_USER" ]; then
+                preserve_db_credentials=true
+            elif [ -n "$current_db_name" ] && [ -n "${DB_NAME:-}" ] && [ "$current_db_name" != "$DB_NAME" ]; then
+                preserve_db_credentials=true
+            elif [ -n "$current_db_password" ] && [ -n "${DB_PASSWORD:-}" ] && [ "$current_db_password" != "$DB_PASSWORD" ]; then
+                preserve_db_credentials=true
+            fi
+        fi
+        if [ "$preserve_db_credentials" = true ]; then
+            colorized_echo yellow "Database credentials in backup differ from current installation; preserving current database credentials."
+            if [ -n "$current_db_user" ]; then
+                replace_or_append_env_var "DB_USER" "$current_db_user" false "$ENV_FILE"
+            fi
+            if [ -n "$current_db_name" ]; then
+                replace_or_append_env_var "DB_NAME" "$current_db_name" false "$ENV_FILE"
+            fi
+            if [ -n "$current_db_password" ]; then
+                replace_or_append_env_var "DB_PASSWORD" "$current_db_password" false "$ENV_FILE"
+            fi
+            if [ -n "$current_sqlalchemy_url" ]; then
+                replace_or_append_env_var "SQLALCHEMY_DATABASE_URL" "$current_sqlalchemy_url" true "$ENV_FILE"
+            fi
+        fi
     fi
 
     if [ -f "$temp_restore_dir/docker-compose.yml" ]; then
