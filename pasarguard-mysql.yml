@@ -25,8 +25,6 @@ services:
       - --bind-address=127.0.0.1 # Restricts access to localhost for increased security
       - --character_set_server=utf8mb4 # Sets UTF-8 character set for full Unicode support
       - --collation_server=utf8mb4_unicode_ci # Defines collation for Unicode
-      - --log-bin=mysql-bin # Enables binary logging for point-in-time recovery
-      - --binlog_expire_logs_seconds=1209600 # Sets binary log expiration to 14 days
       - --host-cache-size=0 # Disables host cache to prevent DNS issues
       - --innodb-open-files=1024 # Sets the limit for InnoDB open files
       - --innodb-buffer-pool-size=256M # Allocates buffer pool size for InnoDB
