@@ -180,6 +180,153 @@ detect_compose() {
     fi
 }
 
+compose_service_exists() {
+    local service_name="$1"
+    [ -z "$service_name" ] && return 1
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>/dev/null | grep -Fxq "$service_name"
+}
+
+list_pasarguard_app_services() {
+    local detected_services=""
+    detected_services=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config 2>/dev/null | awk '
+        BEGIN { in_services = 0; service = ""; is_app = 0 }
+        function flush_service() {
+            if (service != "" && is_app) {
+                print service
+            }
+        }
+        /^services:[[:space:]]*$/ {
+            in_services = 1
+            next
+        }
+        in_services && /^[^[:space:]]/ {
+            flush_service()
+            in_services = 0
+            service = ""
+            is_app = 0
+            next
+        }
+        !in_services {
+            next
+        }
+        /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            flush_service()
+            service = $0
+            sub(/^  /, "", service)
+            sub(/:[[:space:]]*$/, "", service)
+            is_app = 0
+            next
+        }
+        /^[[:space:]]+image:[[:space:]]*pasarguard\/panel([:@].*)?$/ {
+            is_app = 1
+            next
+        }
+        /^[[:space:]]+ROLE:[[:space:]]*(backend|node|scheduler)([[:space:]]|$)/ {
+            is_app = 1
+            next
+        }
+        /^[[:space:]]+-[[:space:]]*ROLE=(backend|node|scheduler)([[:space:]]|$)/ {
+            is_app = 1
+            next
+        }
+        END {
+            flush_service()
+        }
+    ' 2>/dev/null || true)
+
+    if [ -n "$detected_services" ]; then
+        echo "$detected_services"
+        return 0
+    fi
+
+    for candidate in panel pasarguard node-worker scheduler; do
+        if compose_service_exists "$candidate"; then
+            echo "$candidate"
+        fi
+    done
+}
+
+detect_pasarguard_backend_service() {
+    local service_name=""
+
+    for candidate in panel pasarguard; do
+        if compose_service_exists "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    service_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config 2>/dev/null | awk '
+        BEGIN { in_services = 0; service = ""; is_backend = 0 }
+        function flush_service() {
+            if (service != "" && is_backend) {
+                print service
+                exit
+            }
+        }
+        /^services:[[:space:]]*$/ {
+            in_services = 1
+            next
+        }
+        in_services && /^[^[:space:]]/ {
+            flush_service()
+            in_services = 0
+            next
+        }
+        !in_services {
+            next
+        }
+        /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            flush_service()
+            service = $0
+            sub(/^  /, "", service)
+            sub(/:[[:space:]]*$/, "", service)
+            is_backend = 0
+            next
+        }
+        /^[[:space:]]+ROLE:[[:space:]]*backend([[:space:]]|$)/ {
+            is_backend = 1
+            next
+        }
+        /^[[:space:]]+-[[:space:]]*ROLE=backend([[:space:]]|$)/ {
+            is_backend = 1
+            next
+        }
+        END {
+            if (service != "" && is_backend) {
+                print service
+            }
+        }
+    ' | head -n 1)
+
+    if [ -n "$service_name" ]; then
+        echo "$service_name"
+        return 0
+    fi
+
+    service_name=$(list_pasarguard_app_services | head -n 1)
+    if [ -n "$service_name" ]; then
+        echo "$service_name"
+        return 0
+    fi
+
+    return 1
+}
+
+stop_pasarguard_app_services() {
+    local services
+    services=$(list_pasarguard_app_services | xargs)
+    [ -z "$services" ] && services="pasarguard"
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" stop $services 2>/dev/null || true
+}
+
+start_pasarguard_app_services() {
+    local services
+    services=$(list_pasarguard_app_services | xargs)
+    [ -z "$services" ] && services="pasarguard"
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start $services 2>/dev/null || true
+}
+
 find_container() {
     local db_type=$1
     local container_name=""
@@ -1537,9 +1684,9 @@ restore_command() {
         # For SQLite, stop all services since we need to restore files
         down_pasarguard
     else
-        # For containerized databases, just stop the pasarguard app container
+        # For containerized databases, stop only application services
         # Keep database containers running for restore via docker exec
-        $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" stop pasarguard 2>/dev/null || true
+        stop_pasarguard_app_services
     fi
 
     # Perform restore
@@ -1795,8 +1942,8 @@ restore_command() {
         # For SQLite, restart all services
         up_pasarguard
     else
-        # For containerized databases, just restart the pasarguard app container
-        $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" start pasarguard 2>/dev/null || true
+        # For containerized databases, restart only application services
+        start_pasarguard_app_services
     fi
 
     colorized_echo green "Restore completed successfully!"
@@ -2408,6 +2555,35 @@ backup_command() {
     fi
 }
 
+set_pasarguard_panel_image() {
+    local target_image="$1"
+    local service_name=""
+    local image_name=""
+    local updated_any=false
+
+    while IFS= read -r service_name; do
+        [ -z "$service_name" ] && continue
+        image_name=$(yq eval -r ".services.\"${service_name}\".image // \"\"" "$COMPOSE_FILE" 2>/dev/null)
+        if [[ "$image_name" =~ ^pasarguard/panel([:@].*)?$ ]]; then
+            yq -i ".services.\"${service_name}\".image = \"${target_image}\"" "$COMPOSE_FILE"
+            updated_any=true
+        fi
+    done < <(yq eval -r '.services | keys | .[]' "$COMPOSE_FILE" 2>/dev/null || true)
+
+    if [ "$updated_any" = false ]; then
+        for service_name in panel pasarguard node-worker scheduler; do
+            if yq eval -e ".services.\"${service_name}\"" "$COMPOSE_FILE" >/dev/null 2>&1; then
+                yq -i ".services.\"${service_name}\".image = \"${target_image}\"" "$COMPOSE_FILE"
+                updated_any=true
+            fi
+        done
+    fi
+
+    if [ "$updated_any" = false ]; then
+        yq -i ".services.pasarguard.image = \"${target_image}\"" "$COMPOSE_FILE"
+    fi
+}
+
 install_pasarguard() {
     local pasarguard_version=$1
     local major_version=$2
@@ -2498,11 +2674,11 @@ install_pasarguard() {
     fi
 
     # Install requested version
+    local target_image="pasarguard/panel:${pasarguard_version}"
     if [ "$pasarguard_version" == "latest" ]; then
-        yq -i '.services.pasarguard.image = "pasarguard/panel:latest"' "$COMPOSE_FILE"
-    else
-        yq -i ".services.pasarguard.image = \"pasarguard/panel:${pasarguard_version}\"" "$COMPOSE_FILE"
+        target_image="pasarguard/panel:latest"
     fi
+    set_pasarguard_panel_image "$target_image"
     colorized_echo green "File saved in $APP_DIR/docker-compose.yml"
 
     colorized_echo green "pasarguard installed successfully"
@@ -2939,11 +3115,23 @@ follow_pasarguard_logs() {
 }
 
 pasarguard_cli() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e CLI_PROG_NAME="pasarguard cli" pasarguard pasarguard-cli "$@"
+    local backend_service=""
+    backend_service=$(detect_pasarguard_backend_service)
+    if [ -z "$backend_service" ]; then
+        colorized_echo red "Could not detect PasarGuard backend service in docker-compose."
+        return 1
+    fi
+    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e CLI_PROG_NAME="pasarguard cli" "$backend_service" pasarguard-cli "$@"
 }
 
 pasarguard_tui() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e TUI_PROG_NAME="pasarguard tui" pasarguard pasarguard-tui "$@"
+    local backend_service=""
+    backend_service=$(detect_pasarguard_backend_service)
+    if [ -z "$backend_service" ]; then
+        colorized_echo red "Could not detect PasarGuard backend service in docker-compose."
+        return 1
+    fi
+    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e TUI_PROG_NAME="pasarguard tui" "$backend_service" pasarguard-tui "$@"
 }
 
 
