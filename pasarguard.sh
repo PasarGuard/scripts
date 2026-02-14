@@ -2645,7 +2645,7 @@ install_pasarguard() {
         if [ "$major_version" -eq 1 ]; then
             db_driver_scheme="$([[ "$database_type" =~ ^(mysql|mariadb)$ ]] && echo 'mysql+asyncmy' || echo 'postgresql+asyncpg')"
         else
-            db_driver_scheme="mysql+pymysql"
+            db_driver_scheme="mysql+asyncmy"
         fi
 
         SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}"
