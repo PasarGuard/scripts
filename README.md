@@ -8,12 +8,14 @@
 | `--version <vX.Y.Z>` | Install a specific version, including pre-releases (e.g., `v0.5.2`, `v1.0.0-beta.1`)       |
 | `--dev`              | Install the latest development version (only for versions **before v1.0.0**)               |
 | `--pre-release`      | Install the latest pre-release version (only for versions **v1.0.0 and later**)            |
+| `--ssl`              | Enable SSL setup prompt during install (Domain/IP/Custom certificate).                      |
 | `--no-ssl`           | Skip SSL setup during install (dashboard will bind to localhost only).                      |
-| `--ssl-domain`       | Issue SSL cert non-interactively for a domain (example: `--ssl-domain panel.example.com`). |
+| `--ssl-domain`       | Issue SSL cert directly for domain mode (example: `--ssl-domain panel.example.com`).        |
 | `--ssl-http-port`    | ACME HTTP challenge port for SSL issuance (default: `80`).                                   |
 
 > ℹ️ `postgres` and `timescaledb` are only supported in versions **v1.0.0 and later**.  
 > ℹ️ Pre-release versions (e.g., `v1.0.0-beta.1`) can also be installed using `--version`.
+> ℹ️ During install, SSL menu supports: Let's Encrypt Domain, Let's Encrypt IP (short-lived), Custom cert/key path, or No SSL.
 
 ---
 

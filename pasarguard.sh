@@ -192,6 +192,50 @@ is_domain() {
     [[ "$1" =~ ^([A-Za-z0-9](-*[A-Za-z0-9])*\.)+(xn--[a-z0-9]{2,}|[A-Za-z]{2,})$ ]] && return 0 || return 1
 }
 
+is_ipv4() {
+    local ip="$1"
+    local IFS='.'
+    local octets=()
+
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    read -r -a octets <<<"$ip"
+    [ "${#octets[@]}" -eq 4 ] || return 1
+
+    for octet in "${octets[@]}"; do
+        if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+is_ipv6() {
+    [[ "$1" =~ : ]] && return 0 || return 1
+}
+
+get_public_ipv4() {
+    local urls=(
+        "https://api4.ipify.org"
+        "https://ipv4.icanhazip.com"
+        "https://v4.ident.me"
+        "https://ipv4.myexternalip.com/raw"
+        "https://ifconfig.me/ip"
+    )
+    local server_ip=""
+    local url=""
+
+    for url in "${urls[@]}"; do
+        server_ip=$(curl -4 -fsS --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)
+        if is_ipv4 "$server_ip"; then
+            echo "$server_ip"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 is_port_in_use() {
     local port="$1"
 
@@ -322,6 +366,117 @@ setup_ssl_certificate() {
     return 0
 }
 
+setup_ip_ssl_certificate() {
+    local ipv4="$1"
+    local ipv6="$2"
+    local http_port="${3:-80}"
+    local acme_bin=""
+    local cert_dir="$DATA_DIR/certs/ip"
+    local reload_cmd=""
+    local domain_args=()
+
+    if ! is_ipv4 "$ipv4"; then
+        colorized_echo red "Invalid IPv4 address: ${ipv4}"
+        return 1
+    fi
+
+    if [ -n "$ipv6" ] && ! is_ipv6 "$ipv6"; then
+        colorized_echo red "Invalid IPv6 address: ${ipv6}"
+        return 1
+    fi
+
+    if ! [[ "$http_port" =~ ^[0-9]+$ ]] || [ "$http_port" -lt 1 ] || [ "$http_port" -gt 65535 ]; then
+        colorized_echo red "Invalid HTTP challenge port: ${http_port}"
+        return 1
+    fi
+
+    ensure_acme_dependencies
+
+    if ! acme_bin=$(get_acme_sh_binary); then
+        install_acme || return 1
+        acme_bin=$(get_acme_sh_binary) || {
+            colorized_echo red "acme.sh binary not found after installation."
+            return 1
+        }
+    fi
+
+    if is_port_in_use "$http_port"; then
+        colorized_echo yellow "Port ${http_port} is already in use. SSL issuance may fail unless that service is stopped."
+    fi
+
+    mkdir -p "$cert_dir"
+    reload_cmd=$(build_pasarguard_ssl_reload_command)
+    domain_args=(-d "$ipv4")
+    if [ -n "$ipv6" ]; then
+        domain_args+=(-d "$ipv6")
+    fi
+
+    colorized_echo blue "Issuing Let's Encrypt IP certificate for ${ipv4}..."
+    "$acme_bin" --set-default-ca --server letsencrypt --force >/dev/null 2>&1 || true
+    if ! "$acme_bin" --issue \
+        "${domain_args[@]}" \
+        --standalone \
+        --server letsencrypt \
+        --certificate-profile shortlived \
+        --days 6 \
+        --httpport "$http_port" \
+        --force; then
+        colorized_echo red "Failed to issue IP certificate."
+        rm -rf "${HOME}/.acme.sh/${ipv4}" "$cert_dir" 2>/dev/null || true
+        [ -n "$ipv6" ] && rm -rf "${HOME}/.acme.sh/${ipv6}" 2>/dev/null || true
+        return 1
+    fi
+
+    # acme.sh may return non-zero if reloadcmd fails; verify files directly.
+    "$acme_bin" --installcert -d "$ipv4" \
+        --key-file "${cert_dir}/privkey.pem" \
+        --fullchain-file "${cert_dir}/fullchain.pem" \
+        --reloadcmd "$reload_cmd" >/dev/null 2>&1 || true
+
+    if [ ! -f "${cert_dir}/fullchain.pem" ] || [ ! -f "${cert_dir}/privkey.pem" ]; then
+        colorized_echo red "Failed to install IP certificate files."
+        rm -rf "$cert_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    "$acme_bin" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+    chmod 600 "${cert_dir}/privkey.pem" 2>/dev/null || true
+    chmod 644 "${cert_dir}/fullchain.pem" 2>/dev/null || true
+
+    colorized_echo green "IP certificate installed successfully."
+    colorized_echo green "Certificate: ${cert_dir}/fullchain.pem"
+    colorized_echo green "Private key: ${cert_dir}/privkey.pem"
+    return 0
+}
+
+configure_custom_ssl_certificate() {
+    local cert_source="$1"
+    local key_source="$2"
+    local ca_type="${3:-public}"
+    local cert_dir="$DATA_DIR/certs/custom"
+    local target_cert="${cert_dir}/fullchain.pem"
+    local target_key="${cert_dir}/privkey.pem"
+
+    if [ ! -f "$cert_source" ] || [ ! -r "$cert_source" ] || [ ! -s "$cert_source" ]; then
+        colorized_echo red "Certificate file is missing or unreadable: $cert_source"
+        return 1
+    fi
+    if [ ! -f "$key_source" ] || [ ! -r "$key_source" ] || [ ! -s "$key_source" ]; then
+        colorized_echo red "Key file is missing or unreadable: $key_source"
+        return 1
+    fi
+
+    mkdir -p "$cert_dir"
+    cp "$cert_source" "$target_cert"
+    cp "$key_source" "$target_key"
+    chmod 644 "$target_cert" 2>/dev/null || true
+    chmod 600 "$target_key" 2>/dev/null || true
+
+    enable_pasarguard_ssl_env "$target_cert" "$target_key" "$ca_type"
+    colorized_echo green "Custom SSL certificate configured successfully."
+    return 0
+}
+
 enable_pasarguard_ssl_env() {
     local cert_file="$1"
     local key_file="$2"
@@ -343,7 +498,14 @@ setup_pasarguard_ssl_during_install() {
     local ssl_mode="$1"
     local ssl_domain="$2"
     local ssl_http_port="$3"
-    local issue_ssl_choice=""
+    local ssl_choice=""
+    local detected_ipv4=""
+    local input_ipv4=""
+    local input_ipv6=""
+    local custom_cert=""
+    local custom_key=""
+    local custom_ca_choice=""
+    local custom_ca_type="public"
 
     if [ "$ssl_mode" = "disabled" ]; then
         disable_pasarguard_ssl_env
@@ -351,45 +513,121 @@ setup_pasarguard_ssl_during_install() {
         return 0
     fi
 
-    if [ "$ssl_mode" = "enabled" ]; then
-        issue_ssl_choice="y"
-    else
-        colorized_echo cyan "PasarGuard can issue a free Let's Encrypt certificate now."
-        colorized_echo yellow "Requirement: your domain must point to this server and port 80 should be reachable."
-        read -p "Do you want to issue SSL certificate now? [Y/n]: " issue_ssl_choice
-    fi
-
-    if [[ -n "$issue_ssl_choice" && ! "$issue_ssl_choice" =~ ^[Yy]$ ]]; then
-        disable_pasarguard_ssl_env
-        colorized_echo yellow "Continuing without SSL. Dashboard access will be limited to localhost/SSH tunnel."
-        return 0
-    fi
-
-    while [ -z "$ssl_domain" ]; do
-        read -p "Enter domain for SSL certificate (example: panel.example.com): " ssl_domain
-        ssl_domain="${ssl_domain// /}"
-
-        if [ -z "$ssl_domain" ]; then
-            colorized_echo red "Domain cannot be empty."
-            continue
-        fi
-
-        if ! is_domain "$ssl_domain"; then
-            colorized_echo red "Invalid domain format: ${ssl_domain}"
-            ssl_domain=""
-        fi
-    done
-
     if ! [[ "$ssl_http_port" =~ ^[0-9]+$ ]] || [ "$ssl_http_port" -lt 1 ] || [ "$ssl_http_port" -gt 65535 ]; then
         colorized_echo red "Invalid SSL HTTP challenge port: ${ssl_http_port}"
         return 1
     fi
 
-    if setup_ssl_certificate "$ssl_domain" "$ssl_http_port"; then
-        enable_pasarguard_ssl_env "${DATA_DIR}/certs/${ssl_domain}/fullchain.pem" "${DATA_DIR}/certs/${ssl_domain}/privkey.pem" "public"
-        colorized_echo green "SSL enabled for https://${ssl_domain}:8000/dashboard/"
-        return 0
+    if [ "$ssl_mode" = "domain" ] && [ -n "$ssl_domain" ]; then
+        ssl_choice="1"
+    else
+        colorized_echo cyan "Choose SSL setup method for panel installation:"
+        colorized_echo green "  1) Let's Encrypt Domain certificate"
+        colorized_echo green "  2) Let's Encrypt IP certificate (short-lived)"
+        colorized_echo green "  3) Custom certificate + key paths"
+        colorized_echo yellow "  4) No SSL"
+        colorized_echo yellow "Port 80 (or configured --ssl-http-port) must be reachable for Let's Encrypt."
+        read -p "Select SSL option [1-4] (default: 1): " ssl_choice
+        ssl_choice="${ssl_choice// /}"
+        [ -z "$ssl_choice" ] && ssl_choice="1"
     fi
+
+    case "$ssl_choice" in
+    1)
+        while [ -z "$ssl_domain" ]; do
+            read -p "Enter domain for SSL certificate (example: panel.example.com): " ssl_domain
+            ssl_domain="${ssl_domain// /}"
+
+            if [ -z "$ssl_domain" ]; then
+                colorized_echo red "Domain cannot be empty."
+                continue
+            fi
+
+            if ! is_domain "$ssl_domain"; then
+                colorized_echo red "Invalid domain format: ${ssl_domain}"
+                ssl_domain=""
+            fi
+        done
+
+        if setup_ssl_certificate "$ssl_domain" "$ssl_http_port"; then
+            enable_pasarguard_ssl_env "${DATA_DIR}/certs/${ssl_domain}/fullchain.pem" "${DATA_DIR}/certs/${ssl_domain}/privkey.pem" "public"
+            colorized_echo green "SSL enabled for https://${ssl_domain}:8000/dashboard/"
+            return 0
+        fi
+        ;;
+    2)
+        detected_ipv4=$(get_public_ipv4 || true)
+        if [ -n "$detected_ipv4" ]; then
+            read -p "Enter IPv4 for SSL certificate (default: ${detected_ipv4}): " input_ipv4
+            input_ipv4="${input_ipv4// /}"
+            [ -z "$input_ipv4" ] && input_ipv4="$detected_ipv4"
+        else
+            read -p "Enter IPv4 for SSL certificate: " input_ipv4
+            input_ipv4="${input_ipv4// /}"
+        fi
+
+        if ! is_ipv4 "$input_ipv4"; then
+            colorized_echo red "Invalid IPv4 address: ${input_ipv4}"
+            disable_pasarguard_ssl_env
+            colorized_echo yellow "Continuing without SSL."
+            return 0
+        fi
+
+        read -p "Enter IPv6 for SSL certificate (optional, press Enter to skip): " input_ipv6
+        input_ipv6="${input_ipv6// /}"
+        if [ -n "$input_ipv6" ] && ! is_ipv6 "$input_ipv6"; then
+            colorized_echo red "Invalid IPv6 address: ${input_ipv6}"
+            disable_pasarguard_ssl_env
+            colorized_echo yellow "Continuing without SSL."
+            return 0
+        fi
+
+        if setup_ip_ssl_certificate "$input_ipv4" "$input_ipv6" "$ssl_http_port"; then
+            enable_pasarguard_ssl_env "${DATA_DIR}/certs/ip/fullchain.pem" "${DATA_DIR}/certs/ip/privkey.pem" "public"
+            colorized_echo green "SSL enabled for https://${input_ipv4}:8000/dashboard/"
+            return 0
+        fi
+        ;;
+    3)
+        while true; do
+            read -p "Enter full path to certificate file (crt/pem/fullchain): " custom_cert
+            custom_cert=$(echo "$custom_cert" | tr -d '"' | tr -d "'" | xargs)
+            if [ -f "$custom_cert" ] && [ -r "$custom_cert" ] && [ -s "$custom_cert" ]; then
+                break
+            fi
+            colorized_echo red "Certificate file not found/readable: $custom_cert"
+        done
+
+        while true; do
+            read -p "Enter full path to private key file (key/pem): " custom_key
+            custom_key=$(echo "$custom_key" | tr -d '"' | tr -d "'" | xargs)
+            if [ -f "$custom_key" ] && [ -r "$custom_key" ] && [ -s "$custom_key" ]; then
+                break
+            fi
+            colorized_echo red "Private key file not found/readable: $custom_key"
+        done
+
+        read -p "Is this certificate from a public CA? [Y/n]: " custom_ca_choice
+        if [[ -n "$custom_ca_choice" && ! "$custom_ca_choice" =~ ^[Yy]$ ]]; then
+            custom_ca_type="private"
+        fi
+
+        if configure_custom_ssl_certificate "$custom_cert" "$custom_key" "$custom_ca_type"; then
+            colorized_echo green "SSL enabled from custom certificate files."
+            return 0
+        fi
+        ;;
+    4)
+        disable_pasarguard_ssl_env
+        colorized_echo yellow "Continuing without SSL."
+        return 0
+        ;;
+    *)
+        disable_pasarguard_ssl_env
+        colorized_echo yellow "Invalid SSL option. Continuing without SSL."
+        return 0
+        ;;
+    esac
 
     disable_pasarguard_ssl_env
     colorized_echo yellow "SSL setup failed. Continuing without SSL. You can configure SSL later in ${ENV_FILE}."
@@ -3158,7 +3396,7 @@ install_command() {
                 colorized_echo red "Invalid domain format for --ssl-domain: $ssl_domain"
                 exit 1
             fi
-            ssl_mode="enabled"
+            ssl_mode="domain"
             shift 2
             ;;
         --ssl-http-port | --ssl-port)
