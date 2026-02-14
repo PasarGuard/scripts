@@ -2642,8 +2642,13 @@ install_pasarguard() {
             echo "MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD" >>"$ENV_FILE"
         fi
 
-        if [ "$major_version" -eq 1 ]; then
-            db_driver_scheme="$([[ "$database_type" =~ ^(mysql|mariadb)$ ]] && echo 'mysql+asyncmy' || echo 'postgresql+asyncpg')"
+        if [[ "$database_type" =~ ^(postgresql|timescaledb)$ ]]; then
+            if [ "$major_version" -lt 1 ]; then
+                colorized_echo red "Error: --database $database_type is only supported in v1.0.0 and later."
+                colorized_echo yellow "Use --pre-release or --version v1.x.y, or choose mysql/mariadb/sqlite for v0.x."
+                exit 1
+            fi
+            db_driver_scheme="postgresql+asyncpg"
         else
             db_driver_scheme="mysql+asyncmy"
         fi
@@ -2993,6 +2998,11 @@ install_command() {
     # Check if the version is valid and exists
     if [[ "$pasarguard_version" == "latest" || "$pasarguard_version" == "dev" || "$pasarguard_version" == "pre-release" || "$pasarguard_version" =~ $semver_regex ]]; then
         if check_version_exists "$pasarguard_version"; then
+            if [[ "$database_type" =~ ^(postgresql|timescaledb)$ ]] && [ "$major_version" -lt 1 ]; then
+                colorized_echo red "Error: --database $database_type requires v1.0.0 or newer."
+                colorized_echo yellow "Try: --pre-release or --version v1.x.y"
+                exit 1
+            fi
             check_existing_database_volumes "$database_type"
             install_pasarguard "$pasarguard_version" "$major_version" "$database_type"
             echo "Installing $pasarguard_version version"
