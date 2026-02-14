@@ -39,6 +39,14 @@ replace_or_append_env_var() {
     fi
 }
 
+delete_env_var() {
+    local key="$1"
+    local target_file="${2:-$ENV_FILE}"
+
+    [ -f "$target_file" ] || return 0
+    sed -i "/^[[:space:]]*${key}[[:space:]]*=/d" "$target_file"
+}
+
 is_valid_proxy_url() {
     local proxy_url="$1"
     [[ -z "$proxy_url" ]] && return 1
@@ -178,6 +186,214 @@ detect_compose() {
         colorized_echo red "docker compose not found"
         exit 1
     fi
+}
+
+is_domain() {
+    [[ "$1" =~ ^([A-Za-z0-9](-*[A-Za-z0-9])*\.)+(xn--[a-z0-9]{2,}|[A-Za-z]{2,})$ ]] && return 0 || return 1
+}
+
+is_port_in_use() {
+    local port="$1"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v p=":${port}$" '$4 ~ p {exit 0} END {exit 1}'
+        return
+    fi
+
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -lnt 2>/dev/null | awk -v p=":${port} " '$4 ~ p {exit 0} END {exit 1}'
+        return
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    fi
+
+    return 1
+}
+
+ensure_acme_dependencies() {
+    command -v socat >/dev/null 2>&1 || install_package socat
+    command -v openssl >/dev/null 2>&1 || install_package openssl
+}
+
+install_acme() {
+    colorized_echo blue "Installing acme.sh for SSL certificate management..."
+    if curl -s https://get.acme.sh | sh >/dev/null 2>&1; then
+        colorized_echo green "acme.sh installed successfully"
+        return 0
+    fi
+    colorized_echo red "Failed to install acme.sh"
+    return 1
+}
+
+get_acme_sh_binary() {
+    if [ -x "${HOME}/.acme.sh/acme.sh" ]; then
+        echo "${HOME}/.acme.sh/acme.sh"
+        return 0
+    fi
+
+    if [ -x "/root/.acme.sh/acme.sh" ]; then
+        echo "/root/.acme.sh/acme.sh"
+        return 0
+    fi
+
+    if command -v acme.sh >/dev/null 2>&1; then
+        command -v acme.sh
+        return 0
+    fi
+
+    return 1
+}
+
+build_pasarguard_ssl_reload_command() {
+    local backend_service=""
+    backend_service=$(detect_pasarguard_backend_service 2>/dev/null || true)
+
+    if [ -n "$backend_service" ]; then
+        echo "docker compose -f ${COMPOSE_FILE} -p ${APP_NAME} restart ${backend_service} >/dev/null 2>&1 || docker-compose -f ${COMPOSE_FILE} -p ${APP_NAME} restart ${backend_service} >/dev/null 2>&1 || docker compose -f ${COMPOSE_FILE} -p ${APP_NAME} restart >/dev/null 2>&1 || docker-compose -f ${COMPOSE_FILE} -p ${APP_NAME} restart >/dev/null 2>&1 || true"
+    else
+        echo "docker compose -f ${COMPOSE_FILE} -p ${APP_NAME} restart >/dev/null 2>&1 || docker-compose -f ${COMPOSE_FILE} -p ${APP_NAME} restart >/dev/null 2>&1 || true"
+    fi
+}
+
+setup_ssl_certificate() {
+    local domain="$1"
+    local http_port="${2:-80}"
+    local acme_bin=""
+    local cert_dir="$DATA_DIR/certs/${domain}"
+    local reload_cmd=""
+
+    if [ -z "$domain" ]; then
+        colorized_echo red "Domain is required for SSL certificate issuance."
+        return 1
+    fi
+
+    if ! is_domain "$domain"; then
+        colorized_echo red "Invalid domain format: ${domain}"
+        return 1
+    fi
+
+    if ! [[ "$http_port" =~ ^[0-9]+$ ]] || [ "$http_port" -lt 1 ] || [ "$http_port" -gt 65535 ]; then
+        colorized_echo red "Invalid HTTP challenge port: ${http_port}"
+        return 1
+    fi
+
+    ensure_acme_dependencies
+
+    if ! acme_bin=$(get_acme_sh_binary); then
+        install_acme || return 1
+        acme_bin=$(get_acme_sh_binary) || {
+            colorized_echo red "acme.sh binary not found after installation."
+            return 1
+        }
+    fi
+
+    if is_port_in_use "$http_port"; then
+        colorized_echo yellow "Port ${http_port} is already in use. SSL issuance may fail unless that service is stopped."
+    fi
+
+    mkdir -p "$cert_dir"
+    reload_cmd=$(build_pasarguard_ssl_reload_command)
+
+    colorized_echo blue "Issuing Let's Encrypt certificate for ${domain}..."
+    "$acme_bin" --set-default-ca --server letsencrypt --force >/dev/null 2>&1 || true
+    if ! "$acme_bin" --issue -d "$domain" --standalone --httpport "$http_port" --force; then
+        colorized_echo red "Failed to issue certificate for ${domain}."
+        rm -rf "${HOME}/.acme.sh/${domain}" "$cert_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    if ! "$acme_bin" --installcert -d "$domain" \
+        --key-file "${cert_dir}/privkey.pem" \
+        --fullchain-file "${cert_dir}/fullchain.pem" \
+        --reloadcmd "$reload_cmd"; then
+        colorized_echo red "Failed to install certificate for ${domain}."
+        return 1
+    fi
+
+    "$acme_bin" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+    chmod 600 "${cert_dir}/privkey.pem" 2>/dev/null || true
+    chmod 644 "${cert_dir}/fullchain.pem" 2>/dev/null || true
+
+    colorized_echo green "SSL certificate installed successfully."
+    colorized_echo green "Certificate: ${cert_dir}/fullchain.pem"
+    colorized_echo green "Private key: ${cert_dir}/privkey.pem"
+    return 0
+}
+
+enable_pasarguard_ssl_env() {
+    local cert_file="$1"
+    local key_file="$2"
+    local ca_type="${3:-public}"
+
+    disable_pasarguard_ssl_env
+    replace_or_append_env_var "UVICORN_SSL_CERTFILE" "$cert_file" true "$ENV_FILE"
+    replace_or_append_env_var "UVICORN_SSL_KEYFILE" "$key_file" true "$ENV_FILE"
+    replace_or_append_env_var "UVICORN_SSL_CA_TYPE" "$ca_type" true "$ENV_FILE"
+}
+
+disable_pasarguard_ssl_env() {
+    delete_env_var "UVICORN_SSL_CERTFILE" "$ENV_FILE"
+    delete_env_var "UVICORN_SSL_KEYFILE" "$ENV_FILE"
+    delete_env_var "UVICORN_SSL_CA_TYPE" "$ENV_FILE"
+}
+
+setup_pasarguard_ssl_during_install() {
+    local ssl_mode="$1"
+    local ssl_domain="$2"
+    local ssl_http_port="$3"
+    local issue_ssl_choice=""
+
+    if [ "$ssl_mode" = "disabled" ]; then
+        disable_pasarguard_ssl_env
+        colorized_echo yellow "Skipping SSL setup (--no-ssl). PasarGuard will bind to localhost only."
+        return 0
+    fi
+
+    if [ "$ssl_mode" = "enabled" ]; then
+        issue_ssl_choice="y"
+    else
+        colorized_echo cyan "PasarGuard can issue a free Let's Encrypt certificate now."
+        colorized_echo yellow "Requirement: your domain must point to this server and port 80 should be reachable."
+        read -p "Do you want to issue SSL certificate now? [Y/n]: " issue_ssl_choice
+    fi
+
+    if [[ -n "$issue_ssl_choice" && ! "$issue_ssl_choice" =~ ^[Yy]$ ]]; then
+        disable_pasarguard_ssl_env
+        colorized_echo yellow "Continuing without SSL. Dashboard access will be limited to localhost/SSH tunnel."
+        return 0
+    fi
+
+    while [ -z "$ssl_domain" ]; do
+        read -p "Enter domain for SSL certificate (example: panel.example.com): " ssl_domain
+        ssl_domain="${ssl_domain// /}"
+
+        if [ -z "$ssl_domain" ]; then
+            colorized_echo red "Domain cannot be empty."
+            continue
+        fi
+
+        if ! is_domain "$ssl_domain"; then
+            colorized_echo red "Invalid domain format: ${ssl_domain}"
+            ssl_domain=""
+        fi
+    done
+
+    if ! [[ "$ssl_http_port" =~ ^[0-9]+$ ]] || [ "$ssl_http_port" -lt 1 ] || [ "$ssl_http_port" -gt 65535 ]; then
+        colorized_echo red "Invalid SSL HTTP challenge port: ${ssl_http_port}"
+        return 1
+    fi
+
+    if setup_ssl_certificate "$ssl_domain" "$ssl_http_port"; then
+        enable_pasarguard_ssl_env "${DATA_DIR}/certs/${ssl_domain}/fullchain.pem" "${DATA_DIR}/certs/${ssl_domain}/privkey.pem" "public"
+        colorized_echo green "SSL enabled for https://${ssl_domain}:8000/dashboard/"
+        return 0
+    fi
+
+    disable_pasarguard_ssl_env
+    colorized_echo yellow "SSL setup failed. Continuing without SSL. You can configure SSL later in ${ENV_FILE}."
+    return 0
 }
 
 compose_service_exists() {
@@ -2869,6 +3085,9 @@ install_command() {
     major_version=1
     pasarguard_version_set="false"
     database_type="sqlite"
+    ssl_mode="auto"
+    ssl_domain=""
+    ssl_http_port="80"
 
     # Parse options
     while [[ $# -gt 0 ]]; do
@@ -2907,6 +3126,51 @@ install_command() {
             fi
             pasarguard_version="$2"
             pasarguard_version_set="true"
+            shift 2
+            ;;
+        --ssl)
+            if [[ "$ssl_mode" == "disabled" ]]; then
+                colorized_echo red "Error: Cannot use --ssl and --no-ssl together."
+                exit 1
+            fi
+            ssl_mode="enabled"
+            shift
+            ;;
+        --no-ssl)
+            if [[ "$ssl_mode" == "enabled" || -n "$ssl_domain" ]]; then
+                colorized_echo red "Error: Cannot use --no-ssl with --ssl or --ssl-domain."
+                exit 1
+            fi
+            ssl_mode="disabled"
+            shift
+            ;;
+        --ssl-domain)
+            if [ -z "${2:-}" ]; then
+                colorized_echo red "Error: --ssl-domain requires a value."
+                exit 1
+            fi
+            if [[ "$ssl_mode" == "disabled" ]]; then
+                colorized_echo red "Error: Cannot use --ssl-domain with --no-ssl."
+                exit 1
+            fi
+            ssl_domain="${2// /}"
+            if ! is_domain "$ssl_domain"; then
+                colorized_echo red "Invalid domain format for --ssl-domain: $ssl_domain"
+                exit 1
+            fi
+            ssl_mode="enabled"
+            shift 2
+            ;;
+        --ssl-http-port | --ssl-port)
+            if [ -z "${2:-}" ]; then
+                colorized_echo red "Error: $1 requires a value."
+                exit 1
+            fi
+            ssl_http_port="$2"
+            if ! [[ "$ssl_http_port" =~ ^[0-9]+$ ]] || [ "$ssl_http_port" -lt 1 ] || [ "$ssl_http_port" -gt 65535 ]; then
+                colorized_echo red "Invalid SSL HTTP challenge port: $ssl_http_port"
+                exit 1
+            fi
             shift 2
             ;;
         *)
@@ -2995,6 +3259,7 @@ install_command() {
         if check_version_exists "$pasarguard_version"; then
             check_existing_database_volumes "$database_type"
             install_pasarguard "$pasarguard_version" "$major_version" "$database_type"
+            setup_pasarguard_ssl_during_install "$ssl_mode" "$ssl_domain" "$ssl_http_port"
             echo "Installing $pasarguard_version version"
         else
             echo "Version $pasarguard_version does not exist. Please enter a valid version (e.g. v0.5.2)"
