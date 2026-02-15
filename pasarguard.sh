@@ -2670,6 +2670,9 @@ install_pasarguard() {
 
         if [ "$major_version" -eq 1 ]; then
             db_driver_scheme="sqlite+aiosqlite"
+        elif grep -Eq '^[#[:space:]]*SQLALCHEMY_DATABASE_URL[[:space:]]*=[[:space:]]*"sqlite\+aiosqlite' "$APP_DIR/.env"; then
+            # Keep v1 check strict; use template hint for newer versions (e.g., v2+).
+            db_driver_scheme="sqlite+aiosqlite"
         else
             db_driver_scheme="sqlite"
         fi
@@ -2976,10 +2979,9 @@ install_command() {
                 local chosen_version=$(printf "%s\n" "$latest_stable_tag" "$latest_pre_release_tag" | sort -V | tail -n 1)
                 pasarguard_version=$chosen_version
             fi
-            # Determine major_version for the chosen version
-            if [[ "$pasarguard_version" =~ ^v1 ]]; then
-                major_version=1
-            else
+            # Determine major_version for the chosen version (supports v1+)
+            major_version=$(echo "$pasarguard_version" | sed 's/^v//' | sed 's/[^0-9]*\([0-9]*\)\..*/\1/')
+            if [[ -z "$major_version" ]]; then
                 major_version=0
             fi
             return 0
