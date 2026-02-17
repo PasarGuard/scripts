@@ -39,6 +39,71 @@ replace_or_append_env_var() {
     fi
 }
 
+set_or_uncomment_env_var() {
+    local key="$1"
+    local value="$2"
+    local quote_value="${3:-false}"
+    local target_file="${4:-$ENV_FILE}"
+    local formatted_value="$value"
+    local tmp_file=""
+
+    if [ "$quote_value" = "true" ]; then
+        local sanitized_value="${value//\"/\\\"}"
+        formatted_value="\"$sanitized_value\""
+    fi
+
+    [ -f "$target_file" ] || touch "$target_file"
+    tmp_file=$(mktemp)
+
+    awk -v env_key="$key" -v env_line="${key} = ${formatted_value}" '
+        BEGIN { replaced = 0 }
+        {
+            if ($0 ~ "^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=") {
+                if (replaced == 0) {
+                    print env_line
+                    replaced = 1
+                }
+                next
+            }
+            print
+        }
+        END {
+            if (replaced == 0) {
+                print env_line
+            }
+        }
+    ' "$target_file" >"$tmp_file"
+
+    mv "$tmp_file" "$target_file"
+}
+
+comment_out_env_var() {
+    local key="$1"
+    local target_file="${2:-$ENV_FILE}"
+    local tmp_file=""
+
+    [ -f "$target_file" ] || return 0
+    tmp_file=$(mktemp)
+
+    awk -v env_key="$key" '
+        BEGIN { done = 0 }
+        {
+            if ($0 ~ "^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=") {
+                if (done == 0) {
+                    line = $0
+                    sub("^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=[[:space:]]*", "", line)
+                    print "# " env_key " = " line
+                    done = 1
+                }
+                next
+            }
+            print
+        }
+    ' "$target_file" >"$tmp_file"
+
+    mv "$tmp_file" "$target_file"
+}
+
 delete_env_var() {
     local key="$1"
     local target_file="${2:-$ENV_FILE}"
@@ -290,6 +355,14 @@ get_acme_sh_binary() {
     return 1
 }
 
+ensure_acme_auto_renew() {
+    local acme_bin="$1"
+
+    [ -n "$acme_bin" ] || return 0
+    "$acme_bin" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+    "$acme_bin" --install-cronjob >/dev/null 2>&1 || true
+}
+
 build_pasarguard_ssl_reload_command() {
     local backend_service=""
     backend_service=$(detect_pasarguard_backend_service 2>/dev/null || true)
@@ -356,7 +429,7 @@ setup_ssl_certificate() {
         return 1
     fi
 
-    "$acme_bin" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+    ensure_acme_auto_renew "$acme_bin"
     chmod 600 "${cert_dir}/privkey.pem" 2>/dev/null || true
     chmod 644 "${cert_dir}/fullchain.pem" 2>/dev/null || true
 
@@ -439,7 +512,7 @@ setup_ip_ssl_certificate() {
         return 1
     fi
 
-    "$acme_bin" --upgrade --auto-upgrade >/dev/null 2>&1 || true
+    ensure_acme_auto_renew "$acme_bin"
     chmod 600 "${cert_dir}/privkey.pem" 2>/dev/null || true
     chmod 644 "${cert_dir}/fullchain.pem" 2>/dev/null || true
 
@@ -482,16 +555,15 @@ enable_pasarguard_ssl_env() {
     local key_file="$2"
     local ca_type="${3:-public}"
 
-    disable_pasarguard_ssl_env
-    replace_or_append_env_var "UVICORN_SSL_CERTFILE" "$cert_file" true "$ENV_FILE"
-    replace_or_append_env_var "UVICORN_SSL_KEYFILE" "$key_file" true "$ENV_FILE"
-    replace_or_append_env_var "UVICORN_SSL_CA_TYPE" "$ca_type" true "$ENV_FILE"
+    set_or_uncomment_env_var "UVICORN_SSL_CERTFILE" "$cert_file" true "$ENV_FILE"
+    set_or_uncomment_env_var "UVICORN_SSL_KEYFILE" "$key_file" true "$ENV_FILE"
+    set_or_uncomment_env_var "UVICORN_SSL_CA_TYPE" "$ca_type" true "$ENV_FILE"
 }
 
 disable_pasarguard_ssl_env() {
-    delete_env_var "UVICORN_SSL_CERTFILE" "$ENV_FILE"
-    delete_env_var "UVICORN_SSL_KEYFILE" "$ENV_FILE"
-    delete_env_var "UVICORN_SSL_CA_TYPE" "$ENV_FILE"
+    comment_out_env_var "UVICORN_SSL_CERTFILE" "$ENV_FILE"
+    comment_out_env_var "UVICORN_SSL_KEYFILE" "$ENV_FILE"
+    comment_out_env_var "UVICORN_SSL_CA_TYPE" "$ENV_FILE"
 }
 
 setup_pasarguard_ssl_during_install() {
