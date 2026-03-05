@@ -2024,6 +2024,55 @@ restore_command() {
         colorized_echo green "✓ Combined $part_count part(s)"
     elif [[ "$selected_filename" =~ \.zip$ ]]; then
         archive_format="zip"
+        local base_name="${selected_filename%.zip}"
+        local zip_split_parts=()
+        while IFS= read -r part_file; do
+            [ -n "$part_file" ] && zip_split_parts+=("$part_file")
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.z[0-9][0-9]" | sort)
+
+        if [ ${#zip_split_parts[@]} -gt 0 ]; then
+            colorized_echo yellow "Detected split zip backup (.zXX + .zip). Rebuilding archive..."
+            local expected_part=1
+            for part_file in "${zip_split_parts[@]}"; do
+                local expected_name
+                expected_name=$(printf "%s.z%02d" "$base_name" "$expected_part")
+                if [ "$(basename "$part_file")" != "$expected_name" ]; then
+                    colorized_echo red "Missing split part $expected_name. Cannot restore split backup."
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+                expected_part=$((expected_part + 1))
+            done
+
+            local concatenated_file="$temp_restore_dir/${base_name}_combined.zip"
+            if command -v zip >/dev/null 2>&1 && zip -s 0 "$selected_file" --out "$concatenated_file" >>"$log_file" 2>&1; then
+                archive_to_extract="$concatenated_file"
+                colorized_echo green "✓ Rebuilt split zip archive with zip utility"
+            else
+                if command -v zip >/dev/null 2>&1; then
+                    colorized_echo yellow "zip rebuild failed. Falling back to direct concatenation..."
+                else
+                    colorized_echo yellow "zip utility not found. Falling back to direct concatenation..."
+                fi
+                >"$concatenated_file"
+                local part_count=0
+                for part_file in "${zip_split_parts[@]}"; do
+                    if ! cat "$part_file" >>"$concatenated_file"; then
+                        colorized_echo red "Failed to read split part: $(basename "$part_file")"
+                        rm -rf "$temp_restore_dir"
+                        exit 1
+                    fi
+                    part_count=$((part_count + 1))
+                done
+                if ! cat "$selected_file" >>"$concatenated_file"; then
+                    colorized_echo red "Failed to read main zip file: $selected_filename"
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+                archive_to_extract="$concatenated_file"
+                colorized_echo green "✓ Combined $((part_count + 1)) split part(s)"
+            fi
+        fi
     else
         archive_format="tar"
     fi
