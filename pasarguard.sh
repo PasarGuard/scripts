@@ -3743,6 +3743,45 @@ install_command() {
         exit 1
     fi
     install_completion
+
+    # --- Port conflict detection ---
+    # Read the configured UVICORN_PORT from .env (default: 8000)
+    local configured_port
+    configured_port=$(grep -E '^\s*UVICORN_PORT\s*=' "$ENV_FILE" 2>/dev/null \
+        | head -1 | sed 's/^[^=]*=\s*//' | tr -d '[:space:]"' || true)
+    configured_port="${configured_port:-8000}"
+
+    if is_port_in_use "$configured_port"; then
+        colorized_echo yellow "Port ${configured_port} is already in use by another service."
+        colorized_echo yellow "PasarGuard will fail to start unless a free port is used."
+        echo
+
+        while true; do
+            read -p "Enter a different port for PasarGuard (1-65535) or 'q' to abort: " new_port
+            if [[ "$new_port" == "q" || "$new_port" == "Q" ]]; then
+                colorized_echo red "Installation aborted by user."
+                exit 1
+            fi
+            if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+                colorized_echo red "Invalid port number. Please enter a value between 1 and 65535."
+                continue
+            fi
+            if is_port_in_use "$new_port"; then
+                colorized_echo red "Port ${new_port} is also in use. Please choose another port."
+                continue
+            fi
+            break
+        done
+
+        set_or_uncomment_env_var "UVICORN_PORT" "$new_port" false "$ENV_FILE"
+        colorized_echo green "UVICORN_PORT updated to ${new_port} in ${ENV_FILE}"
+
+        # Update ALLOWED_ORIGINS to reflect the new port
+        if grep -qE '^\s*ALLOWED_ORIGINS\s*=' "$ENV_FILE"; then
+            sed -i "s|localhost:${configured_port}|localhost:${new_port}|g" "$ENV_FILE"
+        fi
+    fi
+
     up_pasarguard
 
     echo
