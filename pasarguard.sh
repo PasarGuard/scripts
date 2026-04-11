@@ -2546,7 +2546,7 @@ restore_command() {
                 # pg_dump --clean --if-exists generates DROP EXTENSION / CREATE EXTENSION
                 # lines that would undo the pre_restore() setup above.
                 colorized_echo blue "Preparing dump (filtering extension statements)..."
-                grep -v -E '^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb' \
+                grep -v -E '^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b' \
                     "$temp_restore_dir/db_backup.sql" > "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"
 
                 # Restore the filtered dump with ON_ERROR_STOP so psql exits non-zero on SQL errors
