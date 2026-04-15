@@ -4,6 +4,7 @@ services:
     image: pasarguard/node:latest
     restart: always
     network_mode: host
+    privileged: true
     cap_add:
       - NET_ADMIN
     env_file: .env
