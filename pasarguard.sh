@@ -321,9 +321,25 @@ is_port_in_use() {
     return 1
 }
 
+get_cron_package_name() {
+    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
+        echo "cron"
+    elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]] || [ "$OS" == "Fedora"* ] || [ "$OS" == "Arch Linux" ]; then
+        echo "cronie"
+    else
+        return 1
+    fi
+}
+
 ensure_acme_dependencies() {
     command -v socat >/dev/null 2>&1 || install_package socat
     command -v openssl >/dev/null 2>&1 || install_package openssl
+
+    local cron_pkg
+    if ! command -v crontab >/dev/null 2>&1; then
+        cron_pkg="$(get_cron_package_name)"
+        install_package "$cron_pkg"
+    fi
 }
 
 install_acme() {
