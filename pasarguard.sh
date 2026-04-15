@@ -345,8 +345,12 @@ ensure_acme_dependencies() {
 install_acme() {
     colorized_echo blue "Installing acme.sh for SSL certificate management..."
     if curl -s https://get.acme.sh | sh >/dev/null 2>&1; then
-        colorized_echo green "acme.sh installed successfully"
-        return 0
+        local acme_bin=""
+        acme_bin="$(get_acme_sh_binary)" || true
+        if [ -n "$acme_bin" ] && [ -x "$acme_bin" ]; then
+            colorized_echo green "acme.sh installed successfully"
+            return 0
+        fi
     fi
     colorized_echo red "Failed to install acme.sh"
     return 1
