@@ -772,15 +772,30 @@ uninstall_node() {
     fi
 }
 uninstall_node_docker_images() {
-    images=$(docker images | grep node | awk '{print $3}')
-    if [ -n "$images" ]; then
-        colorized_echo yellow "Removing Docker images of node"
-        for image in $images; do
-            if docker rmi "$image" >/dev/null 2>&1; then
-                colorized_echo yellow "Image $image removed"
-            fi
-        done
+    local images
+    images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^pasarguard\/node(:|$)/ {print $2}' | sort -u)
+
+    if [ -z "$images" ]; then
+        colorized_echo yellow "pasarguard/node images not found"
+        return 0
     fi
+
+    colorized_echo yellow "Checking pasarguard/node images for removal..."
+
+    for image in $images; do
+        if docker ps -a --filter "ancestor=$image" -q | grep -q .; then
+		    local container
+            container=$(docker ps -a --filter "ancestor=$image" --format '{{.Names}}' | tr '\n' ' ')
+            colorized_echo yellow "Skipping image $image (still used by: $container)"
+            continue
+        fi
+
+        if docker rmi "$image" >/dev/null 2>&1; then
+            colorized_echo yellow "Image $image removed"
+        else
+            colorized_echo yellow "Failed to remove image $image"
+        fi
+    done
 }
 uninstall_node_data_files() {
     if [ -d "$DATA_DIR" ]; then
