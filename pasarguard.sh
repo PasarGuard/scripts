@@ -917,7 +917,7 @@ find_container() {
     local db_type=$1
     local container_name=""
     detect_compose
-    
+
     case $db_type in
     mariadb)
         container_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q mariadb 2>/dev/null || true)
@@ -947,7 +947,7 @@ check_container() {
     local container_name=$1
     local db_type=$2
     local actual_container=""
-    
+
     if docker inspect "$container_name" >/dev/null 2>&1; then
         actual_container="$container_name"
     else
@@ -968,7 +968,7 @@ check_container() {
             ;;
         esac
     fi
-    
+
     [ -z "$actual_container" ] && { echo ""; return 1; }
     container_name="$actual_container"
     docker ps --filter "id=${container_name}" --format '{{.ID}}' 2>/dev/null | grep -q . || \
@@ -983,7 +983,7 @@ verify_and_start_container() {
     local container_name=$1
     local db_type=$2
     local actual_container=""
-    
+
     if docker inspect "$container_name" >/dev/null 2>&1; then
         actual_container="$container_name"
     else
@@ -1004,7 +1004,7 @@ verify_and_start_container() {
             ;;
         esac
     fi
-    
+
     [ -z "$actual_container" ] && { echo ""; return 1; }
     container_name="$actual_container"
     local container_running=false
@@ -1012,7 +1012,7 @@ verify_and_start_container() {
     docker ps --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null | grep -q . && container_running=true || \
     docker ps --format '{{.Names}}' 2>/dev/null | grep -qE "^${container_name}$|/${container_name}$" && container_running=true || \
     docker ps --format '{{.ID}}' 2>/dev/null | grep -q "^${container_name}" && container_running=true
-    
+
     if [ "$container_running" = false ]; then
         colorized_echo yellow "Database container '$container_name' is not running. Attempting to start it..."
         docker start "$container_name" >/dev/null 2>&1 || \
@@ -1021,7 +1021,7 @@ verify_and_start_container() {
         docker ps --filter "id=${container_name}" --format '{{.ID}}' 2>/dev/null | grep -q . && container_running=true || \
         docker ps --filter "name=${container_name}" --format '{{.Names}}' 2>/dev/null | grep -q . && container_running=true
     fi
-    
+
     [ "$container_running" = true ] && { echo "$container_name"; return 0; } || { echo ""; return 1; }
 }
 
@@ -1233,10 +1233,10 @@ send_backup_to_telegram() {
             -F caption="$(printf '%b' "$caption")" \
             -F parse_mode="MarkdownV2" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
-        
+
         local http_code=$(echo "$response" | tail -n1)
         local response_body=$(echo "$response" | sed '$d')
-        
+
         if [ "$http_code" == "200" ]; then
             # Check if response contains "ok":true
             if echo "$response_body" | grep -q '"ok":true'; then
@@ -1533,7 +1533,7 @@ backup_service() {
     add_cron_job "$cron_schedule" "$backup_command"
 
     colorized_echo green "Backup service successfully configured."
-    
+
     # Run initial backup
     colorized_echo blue "Running initial backup..."
     backup_command
@@ -1697,7 +1697,7 @@ edit_backup_service() {
             fi
 
             sed -i "s|^BACKUP_CRON_SCHEDULE=.*|BACKUP_CRON_SCHEDULE=\"$new_cron_schedule\"|" "$ENV_FILE"
-            
+
             # Use full path to the script for cron job
             local script_path="/usr/local/bin/$APP_NAME"
             if [ ! -f "$script_path" ]; then
@@ -2465,24 +2465,24 @@ restore_command() {
             exit 1
         fi
         ;;
- 
+
     postgresql|timescaledb)
         if [ ! -f "$temp_restore_dir/db_backup.sql" ]; then
             colorized_echo red "Database backup file not found in backup archive."
             rm -rf "$temp_restore_dir"
             exit 1
         fi
- 
+
         # Verify backup file is not empty and is readable
         if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
             colorized_echo red "Database backup file is empty or unreadable."
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
- 
+
         local backup_size=$(du -h "$temp_restore_dir/db_backup.sql" | cut -f1)
         colorized_echo blue "Backup file size: $backup_size"
- 
+
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
             local verified_container=$(verify_and_start_container "$container_name" "$db_type")
             if [ -z "$verified_container" ]; then
@@ -2491,52 +2491,116 @@ restore_command() {
                 exit 1
             fi
             container_name="$verified_container"
- 
+
             colorized_echo blue "Restoring $db_type database from container: $container_name"
- 
+
             # Prepare restore credentials
                 local restore_user="${db_user:-${DB_USER:-postgres}}"
                 local restore_password="${db_password:-${DB_PASSWORD:-}}"
- 
+
                 if [ -z "$restore_password" ]; then
                     colorized_echo red "No database password found for restore."
                     rm -rf "$temp_restore_dir"
                     exit 1
                 fi
- 
-            # Try to restore using app user credentials first (most common case)
-            # This works because pg_dump backups can be restored by the user who created them
-            colorized_echo blue "Attempting restore using app user '$restore_user' to database '$db_name'..."
-                export PGPASSWORD="$restore_password"
+
+            export PGPASSWORD="$restore_password"
             local restore_success=false
-            
-            # First try restoring to the specific database with app user
-                if docker exec -i "$container_name" psql -U "$restore_user" -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                    colorized_echo green "$db_type database restored successfully."
-                restore_success=true
-                else
-                # If that fails, try using postgres superuser
-                # In standard postgres Docker images, POSTGRES_PASSWORD also sets the postgres superuser password
-                colorized_echo yellow "Trying with postgres superuser..."
-                if docker exec -i "$container_name" psql -U postgres -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                    colorized_echo green "$db_type database restored successfully."
+
+            if [ "$db_type" = "timescaledb" ]; then
+                # TimescaleDB requires special restore procedure to handle version mismatches.
+                # A plain psql restore fails when the backup was taken with a different
+                # TimescaleDB version because DROP EXTENSION / CREATE EXTENSION cycles
+                # break when the shared library is already loaded with the new version.
+                # The fix: drop & recreate the database, then use the official
+                # timescaledb_pre_restore() / timescaledb_post_restore() wrapper.
+                # See: https://docs.timescale.com/self-hosted/latest/backup-and-restore/
+                colorized_echo blue "Using TimescaleDB-safe restore procedure..."
+
+                # Use target installation's identity when available, falling back to backup values.
+                # This ensures cross-server restores work correctly when the local DB user/name
+                # differs from the backup source.
+                local target_db_name="${current_db_name:-$db_name}"
+                local target_db_owner="${current_db_user:-$restore_user}"
+
+                # Drop and recreate the target database for a clean slate
+                colorized_echo blue "Dropping and recreating database '$target_db_name'..."
+                docker exec "$container_name" psql -U postgres -d postgres \
+                    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$target_db_name' AND pid <> pg_backend_pid();" \
+                    >>"$log_file" 2>&1
+                docker exec "$container_name" psql -U postgres -d postgres \
+                    -c "DROP DATABASE IF EXISTS \"$target_db_name\";" >>"$log_file" 2>&1
+                docker exec "$container_name" psql -U postgres -d postgres \
+                    -c "CREATE DATABASE \"$target_db_name\" OWNER \"$target_db_owner\";" >>"$log_file" 2>&1
+
+                # Create the timescaledb extension in the fresh database
+                docker exec "$container_name" psql -U postgres -d "$target_db_name" \
+                    -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >>"$log_file" 2>&1
+
+                # Call pre_restore to put TimescaleDB into restore mode
+                colorized_echo blue "Calling timescaledb_pre_restore()..."
+                docker exec "$container_name" psql -U postgres -d "$target_db_name" \
+                    -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1
+
+                # Filter out extension DROP/CREATE statements from the dump.
+                # pg_dump --clean --if-exists generates DROP EXTENSION / CREATE EXTENSION
+                # lines that would undo the pre_restore() setup above.
+                colorized_echo blue "Preparing dump (filtering extension statements)..."
+                grep -v -E '^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b' \
+                    "$temp_restore_dir/db_backup.sql" > "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"
+
+                # Restore the filtered dump with ON_ERROR_STOP so psql exits non-zero on SQL errors
+                colorized_echo blue "Restoring database dump..."
+                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
                     restore_success=true
                 else
-                    # Try restoring to postgres database (for pg_dumpall backups)
-                    if docker exec -i "$container_name" psql -U postgres -d postgres < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                        colorized_echo green "$db_type database restored successfully."
+                    # Fallback: try with postgres superuser
+                    colorized_echo yellow "Trying with postgres superuser..."
+                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d "$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
                         restore_success=true
                     fi
                 fi
+
+                # Clean up filtered dump
+                rm -f "$temp_restore_dir/db_backup_filtered.sql"
+
+                # Call post_restore regardless of outcome to leave DB in a usable state
+                colorized_echo blue "Calling timescaledb_post_restore()..."
+                docker exec "$container_name" psql -U postgres -d "$target_db_name" \
+                    -c "SELECT timescaledb_post_restore();" >>"$log_file" 2>&1
+
+                if [ "$restore_success" = true ]; then
+                    colorized_echo green "TimescaleDB database restored successfully."
+                fi
+            else
+                # Plain PostgreSQL restore with ON_ERROR_STOP so psql exits non-zero on SQL errors
+                colorized_echo blue "Attempting restore using app user '$restore_user' to database '$db_name'..."
+                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    colorized_echo green "$db_type database restored successfully."
+                    restore_success=true
+                else
+                    # If that fails, try using postgres superuser
+                    colorized_echo yellow "Trying with postgres superuser..."
+                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                        colorized_echo green "$db_type database restored successfully."
+                        restore_success=true
+                    else
+                        # Try restoring to postgres database (for pg_dumpall backups)
+                        if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo green "$db_type database restored successfully."
+                            restore_success=true
+                        fi
+                    fi
+                fi
             fi
-            
-                    unset PGPASSWORD
-            
+
+            unset PGPASSWORD
+
             if [ "$restore_success" = false ]; then
                 colorized_echo red "Failed to restore $db_type database."
                 colorized_echo yellow "Check log file for details: $log_file"
-                    rm -rf "$temp_restore_dir"
-                    exit 1
+                rm -rf "$temp_restore_dir"
+                exit 1
             fi
         else
             colorized_echo red "Remote $db_type restore not supported yet."
@@ -2629,13 +2693,13 @@ restore_command() {
 
 backup_command() {
     colorized_echo blue "Starting backup process..."
-    
+
     # Check if pasarguard is installed
     if ! is_pasarguard_installed; then
         colorized_echo red "pasarguard is not installed!"
         return 1
     fi
-    
+
     local backup_dir="$APP_DIR/backup"
     local temp_dir="/tmp/pasarguard_backup"
     local timestamp=$(date +"%Y%m%d%H%M%S")
@@ -2646,7 +2710,7 @@ backup_command() {
     local split_size_arg="47m" # keep Telegram chunks under 50MB
     >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
-    
+
     colorized_echo blue "Reading environment configuration..."
 
     if ! command -v rsync >/dev/null 2>&1; then
@@ -2664,7 +2728,7 @@ backup_command() {
     rm -f "$backup_dir"/backup_*.zip
     rm -f "$backup_dir"/backup_*.z[0-9][0-9] 2>/dev/null || true
     mkdir -p "$backup_dir"
-    
+
     # Clean up temp directory completely before starting
     rm -rf "$temp_dir"
     mkdir -p "$temp_dir"
@@ -2703,7 +2767,7 @@ backup_command() {
     # SQLALCHEMY_DATABASE_URL should already be loaded from .env above
     # Just log what we have
     echo "SQLALCHEMY_DATABASE_URL from environment: ${SQLALCHEMY_DATABASE_URL:-not set}" >>"$log_file"
-    
+
     if [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
         colorized_echo red "Error: SQLALCHEMY_DATABASE_URL not found in .env file or not set"
         echo "Please check $ENV_FILE for SQLALCHEMY_DATABASE_URL" >>"$log_file"
@@ -2714,7 +2778,7 @@ backup_command() {
 
     if [ -n "$SQLALCHEMY_DATABASE_URL" ]; then
         echo "Parsing SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL%%@*}" >>"$log_file"
-        
+
         # Extract database type from scheme
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
         db_type="sqlite"
@@ -2723,7 +2787,7 @@ backup_command() {
             local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
             sqlite_url_part="${sqlite_url_part%%\?*}"
             sqlite_url_part="${sqlite_url_part%%#*}"
-            
+
             # SQLite URL format:
             # sqlite:////absolute/path (4 slashes = absolute path /path)
             # After removing 'sqlite://', //absolute/path remains, convert to /absolute/path
@@ -2759,12 +2823,12 @@ backup_command() {
             # Remove query parameters if present
             url_part="${url_part%%\?*}"
             url_part="${url_part%%#*}"
-            
+
             # Extract auth part (user:password@)
             if [[ "$url_part" =~ ^([^@]+)@(.+)$ ]]; then
                 local auth_part="${BASH_REMATCH[1]}"
                 url_part="${BASH_REMATCH[2]}"
-                
+
                 # Extract username and password
                 if [[ "$auth_part" =~ ^([^:]+):(.+)$ ]]; then
                     db_user="${BASH_REMATCH[1]}"
@@ -2773,17 +2837,17 @@ backup_command() {
                     db_user="$auth_part"
                 fi
             fi
-            
+
             # Extract host, port, and database
             if [[ "$url_part" =~ ^([^:/]+)(:([0-9]+))?/(.+)$ ]]; then
                 db_host="${BASH_REMATCH[1]}"
                 db_port="${BASH_REMATCH[3]:-}"
                 db_name="${BASH_REMATCH[4]}"
-                
+
                 # Remove query parameters from database name if any
                 db_name="${db_name%%\?*}"
                 db_name="${db_name%%#*}"
-                
+
                 # Set default ports if not specified
                 if [ -z "$db_port" ]; then
                     if [[ "$db_type" =~ ^(mysql|mariadb)$ ]]; then
@@ -2833,7 +2897,7 @@ backup_command() {
                         colorized_echo yellow "Root backup failed, falling back to app user for specific database"
                         local backup_user="${db_user:-${DB_USER:-}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                        
+
                         if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
                             colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
                             error_messages+=("MariaDB backup failed - root backup failed and fallback credentials incomplete.")
@@ -2851,7 +2915,7 @@ backup_command() {
                     # No MYSQL_ROOT_PASSWORD, use SQL URL credentials for specific database
                     local backup_user="${db_user:-${DB_USER:-}}"
                     local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                    
+
                     if [ -z "$backup_password" ]; then
                         colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
                         error_messages+=("MariaDB password not found.")
@@ -2895,7 +2959,7 @@ backup_command() {
                             if docker exec "$container_name" mariadb-dump --version >/dev/null 2>&1; then
                                 is_mariadb=true
                             fi
-                            
+
                     # Local Docker container
                     # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
                     if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
@@ -2908,7 +2972,7 @@ backup_command() {
                                     dump_cmd="mariadb-dump"
                                     db_type_name="MariaDB"
                                 fi
-                                
+
                                 colorized_echo blue "Backing up all $db_type_name databases from container: $container_name (using root user)"
                                 databases=$(docker exec "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$" || true)
                         if [ -z "$databases" ]; then
@@ -2916,7 +2980,7 @@ backup_command() {
                             # Fallback to SQL URL credentials
                             local backup_user="${db_user:-${DB_USER:-}}"
                             local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                            
+
                             if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
                                 colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
                                 error_messages+=("MySQL backup failed - no databases found and fallback credentials incomplete.")
@@ -2934,7 +2998,7 @@ backup_command() {
                             colorized_echo yellow "Root backup failed, falling back to app user for specific database"
                             local backup_user="${db_user:-${DB_USER:-}}"
                             local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                            
+
                             if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
                                 colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
                                 error_messages+=("MySQL backup failed - root backup failed and fallback credentials incomplete.")
@@ -2960,7 +3024,7 @@ backup_command() {
                                     dump_cmd="mariadb-dump"
                                     db_type_name="MariaDB"
                                 fi
-                        
+
                         if [ -z "$backup_password" ]; then
                             colorized_echo red "Error: Database password not found. Check MYSQL_ROOT_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
                             error_messages+=("MySQL password not found.")
@@ -3013,7 +3077,7 @@ backup_command() {
                         colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
                         local backup_user="${db_user:-${DB_USER:-postgres}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                        
+
                         if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
                             colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
                             error_messages+=("PostgreSQL backup failed - pg_dumpall failed and fallback credentials incomplete.")
@@ -3033,7 +3097,7 @@ backup_command() {
                     # No DB_PASSWORD, use SQL URL credentials for pg_dump
                     local backup_user="${db_user:-${DB_USER:-postgres}}"
                     local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                    
+
                     if [ -z "$backup_password" ]; then
                         colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
                         error_messages+=("PostgreSQL password not found.")
@@ -3091,7 +3155,7 @@ backup_command() {
                             fi
                         fi
                     fi
-                    
+
                     if [ -z "$actual_container" ]; then
                         colorized_echo red "Error: TimescaleDB container not found. Is the container running?"
                         echo "Container not found. Tried: $container_name and various patterns" >>"$log_file"
@@ -3102,7 +3166,7 @@ backup_command() {
                         # Use SQL URL credentials directly for pg_dump (more reliable than pg_dumpall)
                         local backup_user="${db_user:-${DB_USER:-postgres}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
-                        
+
                         if [ -z "$backup_password" ]; then
                             colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
                             error_messages+=("TimescaleDB password not found.")
@@ -3153,7 +3217,7 @@ backup_command() {
         error_messages+=("Failed to copy docker-compose.yml file.")
         echo "Failed to copy docker-compose.yml file" >>"$log_file"
     fi
-    
+
     colorized_echo blue "Copying data directory..."
     # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
     if [ -d "$DATA_DIR" ]; then
@@ -3213,12 +3277,12 @@ backup_command() {
         fi
         return 1
     fi
-    
+
     if [ ${#final_backup_paths[@]} -eq 0 ]; then
         colorized_echo red "Backup file was not created. Check log file: $log_file"
         return 1
     fi
-    
+
     if [ ${#final_backup_paths[@]} -eq 1 ]; then
         colorized_echo green "Backup completed successfully: ${final_backup_paths[0]}"
     else
@@ -3449,11 +3513,11 @@ check_existing_database_volumes() {
     local db_type=$1
     local found_paths=()
     local found_named_volumes=()
-    
+
     if [[ "$db_type" == "sqlite" ]]; then
         return 0
     fi
-    
+
     case "$db_type" in
     mariadb|mysql)
         found_paths=("/var/lib/mysql/pasarguard")
@@ -3463,14 +3527,14 @@ check_existing_database_volumes() {
         found_named_volumes=("pgadmin")
         ;;
     esac
-    
+
     local existing_paths=()
     for path in "${found_paths[@]}"; do
         if [ -d "$path" ] && [ -n "$(ls -A "$path" 2>/dev/null)" ]; then
             existing_paths+=("$path")
         fi
     done
-    
+
     local existing_named_volumes=()
     if [ ${#found_named_volumes[@]} -gt 0 ] && command -v docker >/dev/null 2>&1; then
         for vol_name in "${found_named_volumes[@]}"; do
@@ -3480,18 +3544,18 @@ check_existing_database_volumes() {
             fi
         done
     fi
-    
+
     if [ ${#existing_paths[@]} -eq 0 ] && [ ${#existing_named_volumes[@]} -eq 0 ]; then
         return 0
     fi
-    
+
     colorized_echo yellow "⚠️  WARNING: Found existing volumes/directories that may conflict with the installation:"
-    
+
     for path in "${existing_paths[@]}"; do
         local dir_size=$(du -sh "$path" 2>/dev/null | cut -f1 || echo "unknown size")
         colorized_echo yellow "  - Directory: $path (Size: $dir_size)"
     done
-    
+
     for vol_name in "${existing_named_volumes[@]}"; do
         local vol_size="unknown size"
         local prefixed_vol="${APP_NAME}_${vol_name}"
@@ -3506,7 +3570,7 @@ check_existing_database_volumes() {
             colorized_echo yellow "  - Docker volume: $vol_name"
         fi
     done
-    
+
     echo
     colorized_echo red "⚠️  DANGER: These volumes may contain data from a previous pasarguard installation."
     colorized_echo yellow "If you proceed without deleting them, there may be conflicts or data corruption."
@@ -3514,10 +3578,10 @@ check_existing_database_volumes() {
     colorized_echo cyan "Do you want to delete these volumes? (default: no)"
     colorized_echo yellow "WARNING: This will PERMANENTLY delete all data in these volumes!"
     read -p "Delete volumes? [y/N]: " delete_volumes
-    
+
     if [[ "$delete_volumes" =~ ^[Yy]$ ]]; then
         colorized_echo yellow "Deleting volumes..."
-        
+
         for path in "${existing_paths[@]}"; do
             if rm -rf "$path" 2>/dev/null; then
                 colorized_echo green "✓ Deleted directory: $path"
@@ -3525,7 +3589,7 @@ check_existing_database_volumes() {
                 colorized_echo red "✗ Failed to delete directory: $path (may be in use or permission denied)"
             fi
         done
-        
+
         for vol_name in "${existing_named_volumes[@]}"; do
             local prefixed_vol="${APP_NAME}_${vol_name}"
             local actual_vol=$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${prefixed_vol}$|^${vol_name}$" | head -n1)
@@ -3537,7 +3601,7 @@ check_existing_database_volumes() {
                 fi
             fi
         done
-        
+
         colorized_echo green "Volume cleanup completed."
     else
         colorized_echo yellow "Keeping existing volumes. Proceeding with installation..."
