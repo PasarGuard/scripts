@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
+if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
+    SHARED_LIB_DIR="/usr/local/lib/pasarguard-scripts/lib"
+fi
+
+if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
+    printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/common.sh" >&2
+    exit 1
+fi
+
+# shellcheck source=lib/common.sh
+source "$SHARED_LIB_DIR/common.sh"
+# shellcheck source=lib/env.sh
+source "$SHARED_LIB_DIR/env.sh"
+
 # Handle @ symbol if used in installation (skip it)
 if [ "$1" == "@" ]; then
     shift
@@ -16,101 +32,6 @@ THEMES_DIR="$APP_DIR/themes"
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
 LAST_XRAY_CORES=10
-
-replace_or_append_env_var() {
-    local key="$1"
-    local value="$2"
-    local quote_value="${3:-false}"
-    local target_file="${4:-$ENV_FILE}"
-    local formatted_value="$value"
-
-    if [ "$quote_value" = "true" ]; then
-        local sanitized_value="${value//\"/\\\"}"
-        formatted_value="\"$sanitized_value\""
-    fi
-
-    local escaped_value
-    escaped_value=$(printf '%s' "$formatted_value" | sed -e 's/[&|\\]/\\&/g')
-
-    if grep -q "^$key=" "$target_file"; then
-        sed -i "s|^$key=.*|$key=$escaped_value|" "$target_file"
-    else
-        printf '%s=%s\n' "$key" "$formatted_value" >>"$target_file"
-    fi
-}
-
-set_or_uncomment_env_var() {
-    local key="$1"
-    local value="$2"
-    local quote_value="${3:-false}"
-    local target_file="${4:-$ENV_FILE}"
-    local formatted_value="$value"
-    local tmp_file=""
-
-    if [ "$quote_value" = "true" ]; then
-        local sanitized_value="${value//\"/\\\"}"
-        formatted_value="\"$sanitized_value\""
-    fi
-
-    [ -f "$target_file" ] || touch "$target_file"
-    tmp_file=$(mktemp)
-
-    awk -v env_key="$key" -v env_line="${key} = ${formatted_value}" '
-        BEGIN { replaced = 0 }
-        {
-            if ($0 ~ "^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=") {
-                if (replaced == 0) {
-                    print env_line
-                    replaced = 1
-                }
-                next
-            }
-            print
-        }
-        END {
-            if (replaced == 0) {
-                print env_line
-            }
-        }
-    ' "$target_file" >"$tmp_file"
-
-    mv "$tmp_file" "$target_file"
-}
-
-comment_out_env_var() {
-    local key="$1"
-    local target_file="${2:-$ENV_FILE}"
-    local tmp_file=""
-
-    [ -f "$target_file" ] || return 0
-    tmp_file=$(mktemp)
-
-    awk -v env_key="$key" '
-        BEGIN { done = 0 }
-        {
-            if ($0 ~ "^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=") {
-                if (done == 0) {
-                    line = $0
-                    sub("^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=[[:space:]]*", "", line)
-                    print "# " env_key " = " line
-                    done = 1
-                }
-                next
-            }
-            print
-        }
-    ' "$target_file" >"$tmp_file"
-
-    mv "$tmp_file" "$target_file"
-}
-
-delete_env_var() {
-    local key="$1"
-    local target_file="${2:-$ENV_FILE}"
-
-    [ -f "$target_file" ] || return 0
-    sed -i "/^[[:space:]]*${key}[[:space:]]*=/d" "$target_file"
-}
 
 is_valid_proxy_url() {
     local proxy_url="$1"
@@ -135,122 +56,6 @@ get_backup_proxy_url() {
 
     printf '%s\n' "$proxy_value"
     return 0
-}
-
-colorized_echo() {
-    local color=$1
-    local text=$2
-
-    case $color in
-    "red")
-        printf "\e[91m${text}\e[0m\n"
-        ;;
-    "green")
-        printf "\e[92m${text}\e[0m\n"
-        ;;
-    "yellow")
-        printf "\e[93m${text}\e[0m\n"
-        ;;
-    "blue")
-        printf "\e[94m${text}\e[0m\n"
-        ;;
-    "magenta")
-        printf "\e[95m${text}\e[0m\n"
-        ;;
-    "cyan")
-        printf "\e[96m${text}\e[0m\n"
-        ;;
-    *)
-        echo "${text}"
-        ;;
-    esac
-}
-
-check_running_as_root() {
-    if [ "$(id -u)" != "0" ]; then
-        colorized_echo red "This command must be run as root."
-        exit 1
-    fi
-}
-
-detect_os() {
-    # Detect the operating system
-    if [ -f /etc/lsb-release ]; then
-        OS=$(lsb_release -si)
-    elif [ -f /etc/os-release ]; then
-        OS=$(awk -F= '/^NAME/{print $2}' /etc/os-release | tr -d '"')
-    elif [ -f /etc/redhat-release ]; then
-        OS=$(cat /etc/redhat-release | awk '{print $1}')
-    elif [ -f /etc/arch-release ]; then
-        OS="Arch Linux"
-    else
-        colorized_echo red "Unsupported operating system"
-        exit 1
-    fi
-}
-
-detect_and_update_package_manager() {
-    colorized_echo blue "Updating package manager"
-    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
-        PKG_MANAGER="apt-get"
-        $PKG_MANAGER update
-    elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]]; then
-        PKG_MANAGER="yum"
-        $PKG_MANAGER update -y
-        $PKG_MANAGER install -y epel-release
-    elif [ "$OS" == "Fedora"* ]; then
-        PKG_MANAGER="dnf"
-        $PKG_MANAGER update
-    elif [ "$OS" == "Arch Linux" ]; then
-        PKG_MANAGER="pacman"
-        $PKG_MANAGER -Sy
-    elif [[ "$OS" == "openSUSE"* ]]; then
-        PKG_MANAGER="zypper"
-        $PKG_MANAGER refresh
-    else
-        colorized_echo red "Unsupported operating system"
-        exit 1
-    fi
-}
-
-install_package() {
-    if [ -z $PKG_MANAGER ]; then
-        detect_and_update_package_manager
-    fi
-
-    PACKAGE=$1
-    colorized_echo blue "Installing $PACKAGE"
-    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
-        $PKG_MANAGER -y install "$PACKAGE"
-    elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]]; then
-        $PKG_MANAGER install -y "$PACKAGE"
-    elif [ "$OS" == "Fedora"* ]; then
-        $PKG_MANAGER install -y "$PACKAGE"
-    elif [ "$OS" == "Arch Linux" ]; then
-        $PKG_MANAGER -S --noconfirm "$PACKAGE"
-    else
-        colorized_echo red "Unsupported operating system"
-        exit 1
-    fi
-}
-
-install_docker() {
-    # Install Docker and Docker Compose using the official installation script
-    colorized_echo blue "Installing Docker"
-    curl -fsSL https://get.docker.com | sh
-    colorized_echo green "Docker installed successfully"
-}
-
-detect_compose() {
-    # Check if docker compose command exists
-    if docker compose version >/dev/null 2>&1; then
-        COMPOSE='docker compose'
-    elif docker-compose version >/dev/null 2>&1; then
-        COMPOSE='docker-compose'
-    else
-        colorized_echo red "docker compose not found"
-        exit 1
-    fi
 }
 
 is_domain() {
@@ -1029,6 +834,7 @@ install_pasarguard_script() {
     FETCH_REPO="PasarGuard/scripts"
     SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pasarguard.sh"
     colorized_echo blue "Installing pasarguard script"
+    install_shared_libs_from_repo "$FETCH_REPO"
     curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/pasarguard
     colorized_echo green "pasarguard script installed successfully"
 }
@@ -1038,65 +844,6 @@ is_pasarguard_installed() {
         return 0
     else
         return 1
-    fi
-}
-
-identify_the_operating_system_and_architecture() {
-    if [[ "$(uname)" == 'Linux' ]]; then
-        case "$(uname -m)" in
-        'i386' | 'i686')
-            ARCH='32'
-            ;;
-        'amd64' | 'x86_64')
-            ARCH='64'
-            ;;
-        'armv5tel')
-            ARCH='arm32-v5'
-            ;;
-        'armv6l')
-            ARCH='arm32-v6'
-            grep Features /proc/cpuinfo | grep -qw 'vfp' || ARCH='arm32-v5'
-            ;;
-        'armv7' | 'armv7l')
-            ARCH='arm32-v7a'
-            grep Features /proc/cpuinfo | grep -qw 'vfp' || ARCH='arm32-v5'
-            ;;
-        'armv8' | 'aarch64')
-            ARCH='arm64-v8a'
-            ;;
-        'mips')
-            ARCH='mips32'
-            ;;
-        'mipsle')
-            ARCH='mips32le'
-            ;;
-        'mips64')
-            ARCH='mips64'
-            lscpu | grep -q "Little Endian" && ARCH='mips64le'
-            ;;
-        'mips64le')
-            ARCH='mips64le'
-            ;;
-        'ppc64')
-            ARCH='ppc64'
-            ;;
-        'ppc64le')
-            ARCH='ppc64le'
-            ;;
-        'riscv64')
-            ARCH='riscv64'
-            ;;
-        's390x')
-            ARCH='s390x'
-            ;;
-        *)
-            echo "error: The architecture is not supported."
-            exit 1
-            ;;
-        esac
-    else
-        echo "error: This operating system is not supported."
-        exit 1
     fi
 }
 
@@ -3827,83 +3574,6 @@ install_command() {
     follow_pasarguard_logs
 }
 
-install_yq() {
-    if command -v yq &>/dev/null; then
-        colorized_echo green "yq is already installed."
-        return
-    fi
-
-    identify_the_operating_system_and_architecture
-
-    local base_url="https://github.com/mikefarah/yq/releases/latest/download"
-    local yq_binary=""
-
-    case "$ARCH" in
-    '64' | 'x86_64')
-        yq_binary="yq_linux_amd64"
-        ;;
-    'arm32-v7a' | 'arm32-v6' | 'arm32-v5' | 'armv7l')
-        yq_binary="yq_linux_arm"
-        ;;
-    'arm64-v8a' | 'aarch64')
-        yq_binary="yq_linux_arm64"
-        ;;
-    '32' | 'i386' | 'i686')
-        yq_binary="yq_linux_386"
-        ;;
-    *)
-        colorized_echo red "Unsupported architecture: $ARCH"
-        exit 1
-        ;;
-    esac
-
-    local yq_url="${base_url}/${yq_binary}"
-    colorized_echo blue "Downloading yq from ${yq_url}..."
-
-    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
-        colorized_echo yellow "Neither curl nor wget is installed. Attempting to install curl."
-        install_package curl || {
-            colorized_echo red "Failed to install curl. Please install curl or wget manually."
-            exit 1
-        }
-    fi
-
-    if command -v curl &>/dev/null; then
-        if curl -L "$yq_url" -o /usr/local/bin/yq; then
-            chmod +x /usr/local/bin/yq
-            colorized_echo green "yq installed successfully!"
-        else
-            colorized_echo red "Failed to download yq using curl. Please check your internet connection."
-            exit 1
-        fi
-    elif command -v wget &>/dev/null; then
-        if wget -O /usr/local/bin/yq "$yq_url"; then
-            chmod +x /usr/local/bin/yq
-            colorized_echo green "yq installed successfully!"
-        else
-            colorized_echo red "Failed to download yq using wget. Please check your internet connection."
-            exit 1
-        fi
-    fi
-
-    if ! echo "$PATH" | grep -q "/usr/local/bin"; then
-        export PATH="/usr/local/bin:$PATH"
-    fi
-
-    hash -r
-
-    if command -v yq &>/dev/null; then
-        colorized_echo green "yq is ready to use."
-    elif [ -x "/usr/local/bin/yq" ]; then
-
-        colorized_echo yellow "yq is installed at /usr/local/bin/yq but not found in PATH."
-        colorized_echo yellow "You can add /usr/local/bin to your PATH environment variable."
-    else
-        colorized_echo red "yq installation failed. Please try again or install manually."
-        exit 1
-    fi
-}
-
 down_pasarguard() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" down
 }
@@ -4239,29 +3909,16 @@ update_command() {
 }
 
 update_pasarguard_script() {
-    FETCH_REPO="pasarguard/scripts"
+    FETCH_REPO="PasarGuard/scripts"
     SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pasarguard.sh"
     colorized_echo blue "Updating pasarguard script"
+    install_shared_libs_from_repo "$FETCH_REPO"
     curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/pasarguard
     colorized_echo green "pasarguard script updated successfully"
 }
 
 update_pasarguard() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
-}
-
-check_editor() {
-    if [ -z "$EDITOR" ]; then
-        if command -v nano >/dev/null 2>&1; then
-            EDITOR="nano"
-        elif command -v vi >/dev/null 2>&1; then
-            EDITOR="vi"
-        else
-            detect_os
-            install_package nano
-            EDITOR="nano"
-        fi
-    fi
 }
 
 edit_command() {
