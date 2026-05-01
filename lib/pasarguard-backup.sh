@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 
 send_backup_to_telegram() {
     if [ -f "$ENV_FILE" ]; then
@@ -58,6 +58,7 @@ send_backup_to_telegram() {
     fi
 
     local backup_paths=()
+    local uploaded_files=()
     local cleanup_dir=""
 
     local telegram_split_bytes=$((49 * 1000 * 1000))
@@ -140,6 +141,7 @@ send_backup_to_telegram() {
         if [ "$http_code" == "200" ]; then
             # Check if response contains "ok":true
             if echo "$response_body" | grep -q '"ok":true'; then
+                uploaded_files+=("$custom_filename")
                 colorized_echo green "Backup part $custom_filename successfully sent to Telegram."
             else
                 # Extract error message from Telegram response
@@ -691,7 +693,7 @@ remove_backup_service() {
     sed -i '/BACKUP_PROXY_URL/d' "$ENV_FILE"
 
     local temp_cron=$(mktemp)
-    crontab -l 2>/dev/null >"$temp_cron"
+    crontab -l 2>/dev/null >"$temp_cron" || true
 
     sed -i '/# pasarguard-backup-service/d' "$temp_cron"
 
@@ -779,10 +781,13 @@ backup_command() {
     local db_password=""
     local db_name=""
     local container_name=""
+    local safe_sqlalchemy_url=""
+
+    safe_sqlalchemy_url=$(printf '%s' "${SQLALCHEMY_DATABASE_URL:-not set}" | sed -E 's#^([^:]+://)([^@/]+)@#\1REDACTED@#')
 
     # SQLALCHEMY_DATABASE_URL should already be loaded from .env above
     # Just log what we have
-    echo "SQLALCHEMY_DATABASE_URL from environment: ${SQLALCHEMY_DATABASE_URL:-not set}" >>"$log_file"
+    echo "SQLALCHEMY_DATABASE_URL from environment: ${safe_sqlalchemy_url}" >>"$log_file"
 
     if [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
         colorized_echo red "Error: SQLALCHEMY_DATABASE_URL not found in .env file or not set"
@@ -793,7 +798,7 @@ backup_command() {
     fi
 
     if [ -n "$SQLALCHEMY_DATABASE_URL" ]; then
-        echo "Parsing SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL%%@*}" >>"$log_file"
+        echo "Parsing SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
 
         # Extract database type from scheme
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
@@ -1221,7 +1226,7 @@ backup_command() {
     else
         colorized_echo yellow "Warning: No database type detected. Skipping database backup."
         echo "Warning: No database type detected." >>"$log_file"
-        echo "SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:-not set}" >>"$log_file"
+        echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
     fi
 
     colorized_echo blue "Copying configuration files..."

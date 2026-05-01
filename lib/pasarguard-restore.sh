@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 
 restore_command() {
     colorized_echo blue "Starting restore process..."
@@ -720,20 +720,23 @@ restore_command() {
                 # Drop and recreate the target database for a clean slate
                 colorized_echo blue "Dropping and recreating database '$target_db_name'..."
                 docker exec "$container_name" psql -U postgres -d postgres \
-                    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$target_db_name' AND pid <> pg_backend_pid();" \
+                    -v db_name="$target_db_name" \
+                    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'db_name' AND pid <> pg_backend_pid();" \
                     >>"$log_file" 2>&1
                 docker exec "$container_name" psql -U postgres -d postgres \
-                    -c "DROP DATABASE IF EXISTS \"$target_db_name\";" >>"$log_file" 2>&1
+                    -v db_name="$target_db_name" \
+                    -c "DROP DATABASE IF EXISTS :\"db_name\";" >>"$log_file" 2>&1
                 docker exec "$container_name" psql -U postgres -d postgres \
-                    -c "CREATE DATABASE \"$target_db_name\" OWNER \"$target_db_owner\";" >>"$log_file" 2>&1
+                    -v db_name="$target_db_name" -v db_owner="$target_db_owner" \
+                    -c "CREATE DATABASE :\"db_name\" OWNER :\"db_owner\";" >>"$log_file" 2>&1
 
                 # Create the timescaledb extension in the fresh database
-                docker exec "$container_name" psql -U postgres -d "$target_db_name" \
+                docker exec "$container_name" psql -U postgres --dbname="$target_db_name" \
                     -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >>"$log_file" 2>&1
 
                 # Call pre_restore to put TimescaleDB into restore mode
                 colorized_echo blue "Calling timescaledb_pre_restore()..."
-                docker exec "$container_name" psql -U postgres -d "$target_db_name" \
+                docker exec "$container_name" psql -U postgres --dbname="$target_db_name" \
                     -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1
 
                 # Filter out extension DROP/CREATE statements from the dump.
@@ -745,12 +748,12 @@ restore_command() {
 
                 # Restore the filtered dump with ON_ERROR_STOP so psql exits non-zero on SQL errors
                 colorized_echo blue "Restoring database dump..."
-                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
+                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
                     restore_success=true
                 else
                     # Fallback: try with postgres superuser
                     colorized_echo yellow "Trying with postgres superuser..."
-                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d "$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
+                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres --dbname="$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
                         restore_success=true
                     fi
                 fi
@@ -760,7 +763,7 @@ restore_command() {
 
                 # Call post_restore regardless of outcome to leave DB in a usable state
                 colorized_echo blue "Calling timescaledb_post_restore()..."
-                docker exec "$container_name" psql -U postgres -d "$target_db_name" \
+                docker exec "$container_name" psql -U postgres --dbname="$target_db_name" \
                     -c "SELECT timescaledb_post_restore();" >>"$log_file" 2>&1
 
                 if [ "$restore_success" = true ]; then
@@ -832,7 +835,9 @@ restore_command() {
     # Restore configuration files if needed
     colorized_echo blue "Restoring configuration files..."
     if [ -f "$temp_restore_dir/.env" ]; then
-        cp "$temp_restore_dir/.env" "$APP_DIR/.env.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+        if [ -f "$APP_DIR/.env" ]; then
+            cp "$APP_DIR/.env" "$APP_DIR/.env.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+        fi
         cp "$temp_restore_dir/.env" "$APP_DIR/.env" 2>>"$log_file"
         colorized_echo green "Environment file restored."
         local preserve_db_credentials=false
@@ -863,7 +868,9 @@ restore_command() {
     fi
 
     if [ -f "$temp_restore_dir/docker-compose.yml" ]; then
-        cp "$temp_restore_dir/docker-compose.yml" "$APP_DIR/docker-compose.yml.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+        if [ -f "$APP_DIR/docker-compose.yml" ]; then
+            cp "$APP_DIR/docker-compose.yml" "$APP_DIR/docker-compose.yml.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+        fi
         cp "$temp_restore_dir/docker-compose.yml" "$APP_DIR/docker-compose.yml" 2>>"$log_file"
         colorized_echo green "Docker Compose file restored."
     fi

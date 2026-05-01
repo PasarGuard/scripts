@@ -7,7 +7,7 @@ check_running_as_root() {
 }
 
 detect_os() {
-    if [ -f /etc/lsb-release ]; then
+    if [ -f /etc/lsb-release ] && command -v lsb_release >/dev/null 2>&1; then
         OS=$(lsb_release -si)
     elif [ -f /etc/os-release ]; then
         OS=$(awk -F= '/^NAME/{print $2}' /etc/os-release | tr -d '"')
@@ -150,6 +150,11 @@ install_yq() {
     local base_url="https://github.com/mikefarah/yq/releases/latest/download"
     local yq_binary=""
     local yq_url=""
+    local checksum_url="${base_url}/checksums"
+    local binary_tmp=""
+    local checksum_tmp=""
+    local expected_checksum=""
+    local actual_checksum=""
 
     if command -v yq >/dev/null 2>&1; then
         colorized_echo green "yq is already installed."
@@ -184,16 +189,38 @@ install_yq() {
         install_package curl || die "Failed to install curl. Please install curl or wget manually."
     fi
 
+    binary_tmp=$(create_temp_file "yq" ".bin")
+    checksum_tmp=$(create_temp_file "yq" ".checksums")
+
     if command -v curl >/dev/null 2>&1; then
-        curl -L "$yq_url" -o /usr/local/bin/yq || die "Failed to download yq using curl. Please check your internet connection."
+        curl -fsSL "$yq_url" -o "$binary_tmp" || die "Failed to download yq using curl. Please check your internet connection."
+        curl -fsSL "$checksum_url" -o "$checksum_tmp" || die "Failed to download yq checksums using curl."
     elif command -v wget >/dev/null 2>&1; then
-        wget -O /usr/local/bin/yq "$yq_url" || die "Failed to download yq using wget. Please check your internet connection."
+        wget -q -O "$binary_tmp" "$yq_url" || die "Failed to download yq using wget. Please check your internet connection."
+        wget -q -O "$checksum_tmp" "$checksum_url" || die "Failed to download yq checksums using wget."
     fi
 
-    chmod +x /usr/local/bin/yq
+    expected_checksum=$(awk -v name="$yq_binary" '$2 == name { print $1; exit }' "$checksum_tmp")
+    [ -n "$expected_checksum" ] || die "Failed to resolve published checksum for $yq_binary."
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_checksum=$(sha256sum "$binary_tmp" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual_checksum=$(shasum -a 256 "$binary_tmp" | awk '{print $1}')
+    elif command -v openssl >/dev/null 2>&1; then
+        actual_checksum=$(openssl dgst -sha256 "$binary_tmp" | awk '{print $NF}')
+    else
+        die "No SHA-256 tool available to verify yq download."
+    fi
+
+    [ "$actual_checksum" = "$expected_checksum" ] || die "Downloaded yq checksum mismatch."
+
+    install -m 755 "$binary_tmp" /usr/local/bin/yq
     colorized_echo green "yq installed successfully!"
 
     if ! echo "$PATH" | grep -q "/usr/local/bin"; then
         export PATH="/usr/local/bin:$PATH"
     fi
+
+    rm -f "$binary_tmp" "$checksum_tmp"
 }
