@@ -191,7 +191,7 @@ install_node_script() {
         sed -i "s|^APP_NAME=.*|APP_NAME=\"$APP_NAME\"|" "$TEMP_FILE"
     fi
 
-    install_shared_libs_from_repo "$FETCH_REPO"
+    install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh
     
     # Remove old file if it exists
     if [ -f "$TARGET_PATH" ]; then
@@ -730,7 +730,7 @@ follow_node_logs() {
 }
 update_node_script() {
     colorized_echo blue "Updating node script"
-    install_shared_libs_from_repo "$FETCH_REPO"
+    install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh
     github_install_script_from_repo "$FETCH_REPO" "pg-node.sh" "$APP_NAME"
     colorized_echo green "node script updated successfully"
 }
