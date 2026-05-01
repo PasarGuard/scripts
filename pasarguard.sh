@@ -7,13 +7,21 @@ if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
     SHARED_LIB_DIR="/usr/local/lib/pasarguard-scripts/lib"
 fi
 
-if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
-    printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/common.sh" >&2
-    exit 1
-fi
+for shared_lib in common.sh system.sh docker.sh github.sh env.sh; do
+    if [ ! -f "$SHARED_LIB_DIR/$shared_lib" ]; then
+        printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/$shared_lib" >&2
+        exit 1
+    fi
+done
 
 # shellcheck source=lib/common.sh
 source "$SHARED_LIB_DIR/common.sh"
+# shellcheck source=lib/system.sh
+source "$SHARED_LIB_DIR/system.sh"
+# shellcheck source=lib/docker.sh
+source "$SHARED_LIB_DIR/docker.sh"
+# shellcheck source=lib/github.sh
+source "$SHARED_LIB_DIR/github.sh"
 # shellcheck source=lib/env.sh
 source "$SHARED_LIB_DIR/env.sh"
 
@@ -832,10 +840,9 @@ verify_and_start_container() {
 
 install_pasarguard_script() {
     FETCH_REPO="PasarGuard/scripts"
-    SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pasarguard.sh"
     colorized_echo blue "Installing pasarguard script"
     install_shared_libs_from_repo "$FETCH_REPO"
-    curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/pasarguard
+    github_install_script_from_repo "$FETCH_REPO" "pasarguard.sh" "pasarguard"
     colorized_echo green "pasarguard script installed successfully"
 }
 
@@ -3181,11 +3188,7 @@ install_pasarguard() {
 }
 
 up_pasarguard() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" up -d --remove-orphans
-}
-
-follow_pasarguard_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
+    compose_up
 }
 
 status_command() {
@@ -3575,15 +3578,15 @@ install_command() {
 }
 
 down_pasarguard() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" down
+    compose_down
 }
 
 show_pasarguard_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs
+    compose_logs
 }
 
 follow_pasarguard_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
+    compose_logs_follow
 }
 
 pasarguard_cli() {
@@ -3910,10 +3913,9 @@ update_command() {
 
 update_pasarguard_script() {
     FETCH_REPO="PasarGuard/scripts"
-    SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pasarguard.sh"
     colorized_echo blue "Updating pasarguard script"
     install_shared_libs_from_repo "$FETCH_REPO"
-    curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/pasarguard
+    github_install_script_from_repo "$FETCH_REPO" "pasarguard.sh" "pasarguard"
     colorized_echo green "pasarguard script updated successfully"
 }
 

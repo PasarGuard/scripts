@@ -7,13 +7,21 @@ if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
     SHARED_LIB_DIR="/usr/local/lib/pasarguard-scripts/lib"
 fi
 
-if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
-    printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/common.sh" >&2
-    exit 1
-fi
+for shared_lib in common.sh system.sh docker.sh github.sh; do
+    if [ ! -f "$SHARED_LIB_DIR/$shared_lib" ]; then
+        printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/$shared_lib" >&2
+        exit 1
+    fi
+done
 
 # shellcheck source=lib/common.sh
 source "$SHARED_LIB_DIR/common.sh"
+# shellcheck source=lib/system.sh
+source "$SHARED_LIB_DIR/system.sh"
+# shellcheck source=lib/docker.sh
+source "$SHARED_LIB_DIR/docker.sh"
+# shellcheck source=lib/github.sh
+source "$SHARED_LIB_DIR/github.sh"
 
 # Handle global options
 AUTO_CONFIRM=false
@@ -82,7 +90,6 @@ SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
 SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
 FETCH_REPO="PasarGuard/scripts"
-SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node.sh"
 NODE_SERVICE_REPO="PasarGuard/node-serviced"
 NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
 NODE_SERVICE_BINARY_NAME="node-serviced"
@@ -172,8 +179,8 @@ install_node_script() {
     
     # Download script to temp file first
     colorized_echo cyan "  Downloading script from GitHub..."
-    if ! curl -sSL "$SCRIPT_URL" -o "$TEMP_FILE"; then
-        colorized_echo red "✗ Failed to download script from $SCRIPT_URL"
+    if ! github_download_file "$(github_raw_url "$FETCH_REPO" "pg-node.sh")" "$TEMP_FILE"; then
+        colorized_echo red "✗ Failed to download script from $(github_raw_url "$FETCH_REPO" "pg-node.sh")"
         rm -f "$TEMP_FILE"
         exit 1
     fi
@@ -710,21 +717,21 @@ uninstall_node_data_files() {
     fi
 }
 up_node() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" up -d --remove-orphans
+    compose_up
 }
 down_node() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" down
+    compose_down
 }
 show_node_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs
+    compose_logs
 }
 follow_node_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
+    compose_logs_follow
 }
 update_node_script() {
     colorized_echo blue "Updating node script"
     install_shared_libs_from_repo "$FETCH_REPO"
-    curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/$APP_NAME
+    github_install_script_from_repo "$FETCH_REPO" "pg-node.sh" "$APP_NAME"
     colorized_echo green "node script updated successfully"
 }
 update_node() {
