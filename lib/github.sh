@@ -41,7 +41,7 @@ install_shared_libs_from_repo() {
     local tmp_dir=""
     local lib_name=""
 
-    tmp_dir=$(mktemp -d)
+    tmp_dir=$(create_temp_dir "shared-libs")
     mkdir -p "$SHARED_LIB_INSTALL_DIR"
 
     for lib_name in common.sh system.sh docker.sh github.sh env.sh; do

@@ -34,3 +34,68 @@ die() {
     colorized_echo red "$*"
     exit 1
 }
+
+temp_root_dir() {
+    local root=""
+
+    if [ -n "${APP_TMP_DIR:-}" ]; then
+        root="$APP_TMP_DIR"
+    elif [ -n "${DATA_DIR:-}" ]; then
+        root="$DATA_DIR/tmp"
+    elif [ -n "${APP_NAME:-}" ]; then
+        root="/var/lib/$APP_NAME/tmp"
+    else
+        root="/var/lib/pasarguard-scripts/tmp"
+    fi
+
+    mkdir -p "$root"
+    printf '%s\n' "$root"
+}
+
+create_temp_dir() {
+    local prefix="${1:-tmpdir}"
+    local root=""
+    local candidate=""
+    local attempt=0
+
+    root=$(temp_root_dir)
+    while [ "$attempt" -lt 20 ]; do
+        candidate="${root}/${prefix}-$$-${RANDOM}-${attempt}"
+        if mkdir "$candidate" 2>/dev/null; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    die "Failed to create temporary directory in $root"
+}
+
+create_temp_file() {
+    local prefix="${1:-tmpfile}"
+    local suffix="${2:-}"
+    local root=""
+
+    root=$(temp_root_dir)
+    create_temp_file_in_dir "$root" "$prefix" "$suffix"
+}
+
+create_temp_file_in_dir() {
+    local dir="$1"
+    local prefix="${2:-tmpfile}"
+    local suffix="${3:-}"
+    local candidate=""
+    local attempt=0
+
+    mkdir -p "$dir"
+    while [ "$attempt" -lt 20 ]; do
+        candidate="${dir}/${prefix}-$$-${RANDOM}-${attempt}${suffix}"
+        if (set -C; : >"$candidate") 2>/dev/null; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    die "Failed to create temporary file in $dir"
+}

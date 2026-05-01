@@ -29,6 +29,7 @@ set_or_uncomment_env_var() {
     local target_file="${4:-$ENV_FILE}"
     local formatted_value="$value"
     local tmp_file=""
+    local target_dir=""
 
     if [ "$quote_value" = "true" ]; then
         local sanitized_value="${value//\"/\\\"}"
@@ -36,7 +37,8 @@ set_or_uncomment_env_var() {
     fi
 
     [ -f "$target_file" ] || touch "$target_file"
-    tmp_file=$(mktemp)
+    target_dir=$(dirname "$target_file")
+    tmp_file=$(create_temp_file_in_dir "$target_dir" "env-edit" ".tmp")
 
     awk -v env_key="$key" -v env_line="${key} = ${formatted_value}" '
         BEGIN { replaced = 0 }
@@ -64,9 +66,11 @@ comment_out_env_var() {
     local key="$1"
     local target_file="${2:-$ENV_FILE}"
     local tmp_file=""
+    local target_dir=""
 
     [ -f "$target_file" ] || return 0
-    tmp_file=$(mktemp)
+    target_dir=$(dirname "$target_file")
+    tmp_file=$(create_temp_file_in_dir "$target_dir" "env-comment" ".tmp")
 
     awk -v env_key="$key" '
         BEGIN { done = 0 }

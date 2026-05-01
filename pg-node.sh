@@ -175,7 +175,7 @@ configure_firewall_for_port() {
 install_node_script() {
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
-    TEMP_FILE=$(mktemp)
+    TEMP_FILE=$(create_temp_file "pg-node-script" ".sh")
     
     # Download script to temp file first
     colorized_echo cyan "  Downloading script from GitHub..."
@@ -236,7 +236,7 @@ install_node_service_script() {
         colorized_echo red "node-serviced asset not found for platform $platform (expected $asset_name)"
         exit 1
     fi
-    tmp_dir=$(mktemp -d)
+    tmp_dir=$(create_temp_dir "node-serviced")
     archive_path="${tmp_dir}/${asset_name}"
     colorized_echo cyan "  Downloading ${asset_name}..."
     if ! curl -sSL "$asset_url" -o "$archive_path"; then
