@@ -21,6 +21,10 @@ detect_os() {
 }
 
 detect_and_update_package_manager() {
+    if [ -z "${OS:-}" ]; then
+        detect_os
+    fi
+
     colorized_echo blue "Updating package manager"
 
     if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
@@ -46,6 +50,10 @@ detect_and_update_package_manager() {
 
 install_package() {
     local package="$1"
+
+    if [ -z "${OS:-}" ]; then
+        detect_os
+    fi
 
     if [ -z "${PKG_MANAGER:-}" ]; then
         detect_and_update_package_manager

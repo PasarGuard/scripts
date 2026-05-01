@@ -20,8 +20,31 @@ github_install_script_from_repo() {
     local repo="$1"
     local script_name="$2"
     local install_name="$3"
+    local tmp_file=""
 
-    curl -fsSL "$(github_raw_url "$repo" "$script_name")" | install -m 755 /dev/stdin "/usr/local/bin/$install_name"
+    tmp_file=$(mktemp) || return 1
+    trap 'rm -f "$tmp_file"' RETURN
+
+    if ! curl -fSL "$(github_raw_url "$repo" "$script_name")" -o "$tmp_file"; then
+        trap - RETURN
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if ! chmod 755 "$tmp_file"; then
+        trap - RETURN
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if ! install -m 755 "$tmp_file" "/usr/local/bin/$install_name"; then
+        trap - RETURN
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    trap - RETURN
+    rm -f "$tmp_file"
 }
 
 install_shared_libs_from_local() {

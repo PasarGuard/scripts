@@ -3,11 +3,52 @@ set -e
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
+REQUIRED_SHARED_LIBS="common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh"
 if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
     SHARED_LIB_DIR="/usr/local/lib/pasarguard-scripts/lib"
 fi
 
-for shared_lib in common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh; do
+bootstrap_pasarguard_shared_libs() {
+    local fetch_repo="PasarGuard/scripts"
+    local bootstrap_dir="/usr/local/lib/pasarguard-scripts/lib"
+    local tmp_dir=""
+    local shared_lib=""
+
+    tmp_dir=$(mktemp -d) || return 1
+    mkdir -p "$bootstrap_dir" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+
+    for shared_lib in $REQUIRED_SHARED_LIBS; do
+        if ! curl -fsSL "https://github.com/${fetch_repo}/raw/main/lib/${shared_lib}" -o "$tmp_dir/$shared_lib"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        if ! install -m 644 "$tmp_dir/$shared_lib" "$bootstrap_dir/$shared_lib"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+    done
+
+    rm -rf "$tmp_dir"
+    SHARED_LIB_DIR="$bootstrap_dir"
+    return 0
+}
+
+missing_shared_lib=false
+for shared_lib in $REQUIRED_SHARED_LIBS; do
+    if [ ! -f "$SHARED_LIB_DIR/$shared_lib" ]; then
+        missing_shared_lib=true
+        break
+    fi
+done
+
+if [ "$missing_shared_lib" = true ]; then
+    bootstrap_pasarguard_shared_libs
+fi
+
+for shared_lib in $REQUIRED_SHARED_LIBS; do
     if [ ! -f "$SHARED_LIB_DIR/$shared_lib" ]; then
         printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/$shared_lib" >&2
         exit 1

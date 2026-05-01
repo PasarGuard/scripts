@@ -2,7 +2,9 @@
 
 install_docker() {
     colorized_echo blue "Installing Docker"
-    curl -fsSL https://get.docker.com | sh
+    if ! bash -o pipefail -c 'curl -fsSL https://get.docker.com | sh'; then
+        die "Failed to install Docker"
+    fi
     colorized_echo green "Docker installed successfully"
 }
 
