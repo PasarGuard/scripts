@@ -3085,7 +3085,7 @@ install_pasarguard() {
     local database_type=$3
 
     FILES_URL_PREFIX="https://raw.githubusercontent.com/pasarguard/panel"
-    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/pasarguard/scripts/main"
+    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/pasarguard/scripts/main/docker-compose"
 
     mkdir -p "$DATA_DIR"
     mkdir -p "$APP_DIR"
