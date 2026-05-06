@@ -215,7 +215,7 @@ restore_command() {
             exit 1
         fi
         archive_to_extract="$concatenated_file"
-        colorized_echo green "âœ“ Combined $part_count part(s)"
+        colorized_echo green "✓ Combined $part_count part(s)"
     elif [[ "$selected_filename" =~ \.zip$ ]]; then
         archive_format="zip"
         local base_name="${selected_filename%.zip}"
@@ -241,7 +241,7 @@ restore_command() {
             local concatenated_file="$temp_restore_dir/${base_name}_combined.zip"
             if command -v zip >/dev/null 2>&1 && zip -s 0 "$selected_file" --out "$concatenated_file" >>"$log_file" 2>&1; then
                 archive_to_extract="$concatenated_file"
-                colorized_echo green "âœ“ Rebuilt split zip archive with zip utility"
+                colorized_echo green "✓ Rebuilt split zip archive with zip utility"
             else
                 if command -v zip >/dev/null 2>&1; then
                     colorized_echo yellow "zip rebuild failed. Falling back to direct concatenation..."
@@ -264,7 +264,7 @@ restore_command() {
                     exit 1
                 fi
                 archive_to_extract="$concatenated_file"
-                colorized_echo green "âœ“ Combined $((part_count + 1)) split part(s)"
+                colorized_echo green "✓ Combined $((part_count + 1)) split part(s)"
             fi
         fi
     else
@@ -303,7 +303,7 @@ restore_command() {
             exit 1
         fi
     fi
-    colorized_echo green "âœ“ Archive extracted successfully"
+    colorized_echo green "✓ Archive extracted successfully"
 
     # Load environment variables from extracted .env
     colorized_echo blue "Loading configuration from backup..."
@@ -388,7 +388,7 @@ restore_command() {
         rm -f "$cleaned_env"
     fi
 
-    colorized_echo green "âœ“ Loaded $env_vars_loaded environment variables"
+    colorized_echo green "✓ Loaded $env_vars_loaded environment variables"
 
     if [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
         colorized_echo red "SQLALCHEMY_DATABASE_URL not found in backup .env file"
@@ -398,13 +398,13 @@ restore_command() {
         exit 1
     fi
 
-    colorized_echo green "âœ“ Found SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:0:50}..."
+    colorized_echo green "✓ Found SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:0:50}..."
 
     # Parse database configuration (similar to backup function)
     colorized_echo blue "Detecting database type..."
     if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
         db_type="sqlite"
-        colorized_echo green "âœ“ Detected SQLite database"
+        colorized_echo green "✓ Detected SQLite database"
         local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
         sqlite_url_part="${sqlite_url_part%%\?*}"
         sqlite_url_part="${sqlite_url_part%%#*}"
@@ -420,19 +420,19 @@ restore_command() {
     elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mariadb[^:]*:// ]]; then
             db_type="mariadb"
-            colorized_echo green "âœ“ Detected MariaDB database"
+            colorized_echo green "✓ Detected MariaDB database"
         elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mysql[^:]*:// ]]; then
             db_type="mysql"
-            colorized_echo green "âœ“ Detected MySQL database"
+            colorized_echo green "✓ Detected MySQL database"
         elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^postgresql[^:]*:// ]]; then
             # Check if it's timescaledb - use set +e to prevent failure on file not found
             set +e
             if grep -q "image: timescale/timescaledb" "$temp_restore_dir/docker-compose.yml" 2>/dev/null; then
                 db_type="timescaledb"
-                colorized_echo green "âœ“ Detected TimescaleDB database"
+                colorized_echo green "✓ Detected TimescaleDB database"
             else
                 db_type="postgresql"
-                colorized_echo green "âœ“ Detected PostgreSQL database"
+                colorized_echo green "✓ Detected PostgreSQL database"
             fi
             set -e
         fi
@@ -484,10 +484,10 @@ restore_command() {
         exit 1
     fi
 
-    colorized_echo green "âœ“ Database configuration detected: $db_type"
+    colorized_echo green "✓ Database configuration detected: $db_type"
 
     # Confirm restore
-    colorized_echo red "âš ï¸  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
+    colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
     colorized_echo yellow "WARNING: This will overwrite your current $db_type database!"
     colorized_echo blue "Database type: $db_type"
     if [ -n "$db_name" ]; then
@@ -523,7 +523,7 @@ restore_command() {
     fi
 
     # Perform restore
-    colorized_echo red "âš ï¸  DANGER: Starting database restore - this will overwrite existing data!"
+    colorized_echo red "⚠️  DANGER: Starting database restore - this will overwrite existing data!"
     colorized_echo blue "Starting database restore..."
 
     case $db_type in
@@ -891,4 +891,3 @@ restore_command() {
     colorized_echo green "Restore completed successfully!"
     colorized_echo green "PasarGuard services have been restarted."
 }
-

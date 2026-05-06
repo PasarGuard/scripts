@@ -1148,7 +1148,7 @@ check_existing_database_volumes() {
         return 0
     fi
 
-    colorized_echo yellow "âš ï¸  WARNING: Found existing volumes/directories that may conflict with the installation:"
+    colorized_echo yellow "⚠️  WARNING: Found existing volumes/directories that may conflict with the installation:"
 
     for path in "${existing_paths[@]}"; do
         local dir_size=$(du -sh "$path" 2>/dev/null | cut -f1 || echo "unknown size")
@@ -1171,7 +1171,7 @@ check_existing_database_volumes() {
     done
 
     echo
-    colorized_echo red "âš ï¸  DANGER: These volumes may contain data from a previous pasarguard installation."
+    colorized_echo red "⚠️  DANGER: These volumes may contain data from a previous pasarguard installation."
     colorized_echo yellow "If you proceed without deleting them, there may be conflicts or data corruption."
     echo
     colorized_echo cyan "Do you want to delete these volumes? (default: no)"
@@ -1183,9 +1183,9 @@ check_existing_database_volumes() {
 
         for path in "${existing_paths[@]}"; do
             if rm -rf "$path" 2>/dev/null; then
-                colorized_echo green "âœ“ Deleted directory: $path"
+                colorized_echo green "✓ Deleted directory: $path"
             else
-                colorized_echo red "âœ— Failed to delete directory: $path (may be in use or permission denied)"
+                colorized_echo red "✗ Failed to delete directory: $path (may be in use or permission denied)"
             fi
         done
 
@@ -1194,9 +1194,9 @@ check_existing_database_volumes() {
             local actual_vol=$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${prefixed_vol}$|^${vol_name}$" | head -n1)
             if [ -n "$actual_vol" ]; then
                 if docker volume rm "$actual_vol" >/dev/null 2>&1; then
-                    colorized_echo green "âœ“ Deleted Docker volume: $actual_vol"
+                    colorized_echo green "✓ Deleted Docker volume: $actual_vol"
                 else
-                    colorized_echo red "âœ— Failed to delete Docker volume: $actual_vol (may be in use)"
+                    colorized_echo red "✗ Failed to delete Docker volume: $actual_vol (may be in use)"
                 fi
             fi
         done
@@ -1859,24 +1859,24 @@ usage() {
     echo
 
     colorized_echo cyan "Commands:"
-    colorized_echo yellow "  up              $(tput sgr0)â€“ Start services"
-    colorized_echo yellow "  down            $(tput sgr0)â€“ Stop services"
-    colorized_echo yellow "  restart         $(tput sgr0)â€“ Restart services"
-    colorized_echo yellow "  status          $(tput sgr0)â€“ Show status"
-    colorized_echo yellow "  logs            $(tput sgr0)â€“ Show logs"
-    colorized_echo yellow "  cli             $(tput sgr0)â€“ pasarguard CLI"
-    colorized_echo yellow "  tui             $(tput sgr0)â€“ pasarguard TUI"
-    colorized_echo yellow "  install         $(tput sgr0)â€“ Install pasarguard"
-    colorized_echo yellow "  update          $(tput sgr0)â€“ Update to latest version"
-    colorized_echo yellow "  uninstall       $(tput sgr0)â€“ Uninstall pasarguard"
-    colorized_echo yellow "  install-script  $(tput sgr0)â€“ Install pasarguard script"
-    colorized_echo yellow "  install-node    $(tput sgr0)â€“ Install PasarGuard node"
-    colorized_echo yellow "  backup          $(tput sgr0)â€“ Manual backup launch"
-    colorized_echo yellow "  backup-service  $(tput sgr0)â€“ pasarguard Backup service to backup to TG, and a new job in crontab"
-    colorized_echo yellow "  restore         $(tput sgr0)â€“ Restore database from backup file"
-    colorized_echo yellow "  edit            $(tput sgr0)â€“ Edit docker-compose.yml (via nano or vi editor)"
-    colorized_echo yellow "  edit-env        $(tput sgr0)â€“ Edit environment file (via nano or vi editor)"
-    colorized_echo yellow "  help            $(tput sgr0)â€“ Show this help message"
+    colorized_echo yellow "  up              $(tput sgr0)– Start services"
+    colorized_echo yellow "  down            $(tput sgr0)– Stop services"
+    colorized_echo yellow "  restart         $(tput sgr0)– Restart services"
+    colorized_echo yellow "  status          $(tput sgr0)– Show status"
+    colorized_echo yellow "  logs            $(tput sgr0)– Show logs"
+    colorized_echo yellow "  cli             $(tput sgr0)– pasarguard CLI"
+    colorized_echo yellow "  tui             $(tput sgr0)– pasarguard TUI"
+    colorized_echo yellow "  install         $(tput sgr0)– Install pasarguard"
+    colorized_echo yellow "  update          $(tput sgr0)– Update to latest version"
+    colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall pasarguard"
+    colorized_echo yellow "  install-script  $(tput sgr0)– Install pasarguard script"
+    colorized_echo yellow "  install-node    $(tput sgr0)– Install PasarGuard node"
+    colorized_echo yellow "  backup          $(tput sgr0)– Manual backup launch"
+    colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backup service to backup to TG, and a new job in crontab"
+    colorized_echo yellow "  restore         $(tput sgr0)– Restore database from backup file"
+    colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
+    colorized_echo yellow "  edit-env        $(tput sgr0)– Edit environment file (via nano or vi editor)"
+    colorized_echo yellow "  help            $(tput sgr0)– Show this help message"
 
     echo
     colorized_echo cyan "Directories:"

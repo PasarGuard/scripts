@@ -127,7 +127,7 @@ send_backup_to_telegram() {
         local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
         local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
         local escaped_time=$(printf '%s' "$backup_time" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
-        local caption="ðŸ“¦ *Backup Information*\nðŸŒ *Server IP*: \`$escaped_server_ip\`\nðŸ“ *Backup File*: \`$escaped_filename\`\nâ° *Backup Time*: \`$escaped_time\`"
+        local caption="📦 *Backup Information*\n🌐 *Server IP*: \`$escaped_server_ip\`\n📁 *Backup File*: \`$escaped_filename\`\n⏰ *Backup Time*: \`$escaped_time\`"
 
         local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$part;filename=$custom_filename" \
@@ -164,17 +164,17 @@ send_backup_to_telegram() {
         done
         files_list="${files_list%$'\n'}"
 
-        local info_message=$'ðŸ“¦ Backup Upload Summary\n'
-        info_message+=$'â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n'
-        info_message+="ðŸŒ Server IP: $server_ip"$'\n'
-        info_message+="â° Time: $backup_time"$'\n'
-        info_message+=$'\nâœ… Files Uploaded:\n'
+        local info_message=$'📦 Backup Upload Summary\n'
+        info_message+=$'──────────────────────\n'
+        info_message+="🌐 Server IP: $server_ip"$'\n'
+        info_message+="⏰ Time: $backup_time"$'\n'
+        info_message+=$'\n✅ Files Uploaded:\n'
         info_message+="$files_list"$'\n'
-        info_message+=$'\nðŸ“‚ Extraction Guide:\n'
-        info_message+=$'ðŸªŸ Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
-        info_message+=$'ðŸ§ Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
-        info_message+=$'ðŸŽ macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
-        info_message+=$'âš ï¸ Always download the .zip and every .zXX part before extracting.'
+        info_message+=$'\n📂 Extraction Guide:\n'
+        info_message+=$'🪟 Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
+        info_message+=$'🐧 Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
+        info_message+=$'🍎 macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
+        info_message+=$'⚠️ Always download the .zip and every .zXX part before extracting.'
 
         curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
             -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
@@ -202,10 +202,10 @@ send_backup_error_to_telegram() {
         server_ip="Unknown IP"
     fi
     local error_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
-    local message="âš ï¸ Backup Error Notification
-ðŸŒ Server IP: $server_ip
-âŒ Errors: $error_messages
-â° Time: $error_time"
+    local message="⚠️ Backup Error Notification
+🌐 Server IP: $server_ip
+❌ Errors: $error_messages
+⏰ Time: $error_time"
 
     local max_length=1000
     if [ ${#message} -gt $max_length ]; then
@@ -224,7 +224,7 @@ send_backup_error_to_telegram() {
         response=$(curl "${curl_proxy_args[@]}" -s -w "%{http_code}" -o /tmp/tg_response.json \
             -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
             -F document=@"$log_file;filename=backup_error.log" \
-            -F caption="ðŸ“œ Backup Error Log - $error_time" \
+            -F caption="📜 Backup Error Log - $error_time" \
             "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument")
 
         http_code="${response:(-3)}"
@@ -1316,4 +1316,3 @@ backup_command() {
         send_backup_to_telegram "$backup_file"
     fi
 }
-
