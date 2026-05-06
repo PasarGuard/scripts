@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
 
+mask_telegram_bot_key() {
+    local secret="$1"
+    local length=${#secret}
+
+    if [ -z "$secret" ]; then
+        printf '%s\n' ""
+        return 0
+    fi
+
+    if [ "$length" -le 6 ]; then
+        printf '****%s\n' "$secret"
+        return 0
+    fi
+
+    printf '****%s\n' "${secret: -6}"
+}
+
+filter_backup_cron_entries() {
+    local source_file="$1"
+    local target_file="$2"
+
+    grep -F -v "# pasarguard-backup-service" "$source_file" >"$target_file" || true
+}
+
 send_backup_to_telegram() {
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do
@@ -260,6 +284,7 @@ backup_service() {
             backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
             backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
             [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
+            local masked_telegram_bot_key=""
 
             if [[ "$cron_schedule" == "0 0 * * *" ]]; then
                 interval_hours=24
@@ -267,9 +292,11 @@ backup_service() {
                 interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
             fi
 
+            masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
+
             colorized_echo green "====================================="
             colorized_echo green "Current Backup Configuration:"
-            colorized_echo cyan "Telegram Bot API Key: $telegram_bot_key"
+            colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
             colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
             colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
             if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
@@ -456,9 +483,11 @@ add_cron_job() {
     local schedule="$1"
     local command="$2"
     local temp_cron=$(mktemp)
+    local filtered_cron="${temp_cron}.tmp"
 
     crontab -l 2>/dev/null >"$temp_cron" || true
-    grep -v "$command" "$temp_cron" >"${temp_cron}.tmp" && mv "${temp_cron}.tmp" "$temp_cron"
+    filter_backup_cron_entries "$temp_cron" "$filtered_cron"
+    mv "$filtered_cron" "$temp_cron"
     echo "$schedule $command # pasarguard-backup-service" >>"$temp_cron"
 
     if crontab "$temp_cron"; then
@@ -483,6 +512,7 @@ view_backup_service() {
     backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
     [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
     local interval_hours=""
+    local masked_telegram_bot_key=""
 
     if [[ "$cron_schedule" == "0 0 * * *" ]]; then
         interval_hours=24
@@ -490,11 +520,13 @@ view_backup_service() {
         interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
     fi
 
+    masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
+
     colorized_echo blue "====================================="
     colorized_echo blue "      Backup Service Details         "
     colorized_echo blue "====================================="
     colorized_echo green "Status: Enabled"
-    colorized_echo cyan "Telegram Bot API Key: $telegram_bot_key"
+    colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
     colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
     colorized_echo cyan "Cron Schedule: $cron_schedule"
     if [[ "$interval_hours" -eq 24 ]]; then
@@ -526,12 +558,15 @@ edit_backup_service() {
     backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
     [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
     local interval_hours=""
+    local masked_telegram_bot_key=""
 
     if [[ "$cron_schedule" == "0 0 * * *" ]]; then
         interval_hours=24
     else
         interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
     fi
+
+    masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
 
     colorized_echo blue "====================================="
     colorized_echo blue "      Edit Backup Service            "
@@ -541,7 +576,7 @@ edit_backup_service() {
     if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
         proxy_display="Enabled ($backup_proxy_url)"
     fi
-    colorized_echo cyan "1. Telegram Bot API Key: $telegram_bot_key"
+    colorized_echo cyan "1. Telegram Bot API Key: $masked_telegram_bot_key"
     colorized_echo cyan "2. Telegram Chat ID: $telegram_chat_id"
     colorized_echo cyan "3. Backup Interval: Every $interval_hours hour(s)"
     colorized_echo cyan "4. Proxy: $proxy_display"
@@ -552,7 +587,7 @@ edit_backup_service() {
     case $edit_choice in
     1)
         while true; do
-            printf "Enter new Telegram bot API key [current: $telegram_bot_key]: "
+            printf "Enter new Telegram bot API key [current: %s]: " "$masked_telegram_bot_key"
             read new_bot_key
             if [[ -n "$new_bot_key" ]]; then
                 sed -i "s|^BACKUP_TELEGRAM_BOT_KEY=.*|BACKUP_TELEGRAM_BOT_KEY=$new_bot_key|" "$ENV_FILE"
@@ -608,8 +643,10 @@ edit_backup_service() {
             # Set PATH for cron to ensure docker and other tools are found
             local backup_command="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash $script_path backup"
             local temp_cron=$(mktemp)
+            local filtered_cron="${temp_cron}.tmp"
             crontab -l 2>/dev/null >"$temp_cron" || true
-            grep -v "# pasarguard-backup-service" "$temp_cron" >"${temp_cron}.tmp" && mv "${temp_cron}.tmp" "$temp_cron"
+            filter_backup_cron_entries "$temp_cron" "$filtered_cron"
+            mv "$filtered_cron" "$temp_cron"
             echo "$new_cron_schedule $backup_command # pasarguard-backup-service" >>"$temp_cron"
 
             if crontab "$temp_cron"; then
@@ -693,9 +730,11 @@ remove_backup_service() {
     sed -i '/BACKUP_PROXY_URL/d' "$ENV_FILE"
 
     local temp_cron=$(mktemp)
+    local filtered_cron="${temp_cron}.tmp"
     crontab -l 2>/dev/null >"$temp_cron" || true
 
-    sed -i '/# pasarguard-backup-service/d' "$temp_cron"
+    filter_backup_cron_entries "$temp_cron" "$filtered_cron"
+    mv "$filtered_cron" "$temp_cron"
 
     if crontab "$temp_cron"; then
         colorized_echo green "Backup service task removed from crontab."
@@ -719,13 +758,63 @@ backup_command() {
     fi
 
     local backup_dir="$APP_DIR/backup"
-    local temp_dir="/tmp/pasarguard_backup"
     local timestamp=$(date +"%Y%m%d%H%M%S")
     local backup_file="$backup_dir/backup_$timestamp.zip"
     local error_messages=()
-    local log_file="/var/log/pasarguard_backup_error.log"
     local final_backup_paths=()
     local split_size_arg="47m" # keep Telegram chunks under 50MB
+    local temp_dir=""
+    local log_file=""
+    local lock_file="${TMPDIR:-/tmp}/${APP_NAME}-backup.lock"
+    local lock_dir="${TMPDIR:-/tmp}/${APP_NAME}-backup.lock.d"
+    local lock_fd=9
+    local keep_log_file=false
+
+    mkdir -p "$backup_dir"
+
+    if ! temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pasarguard_backup.XXXXXX"); then
+        colorized_echo red "Failed to create backup temp directory."
+        return 1
+    fi
+
+    if ! log_file=$(mktemp "${TMPDIR:-/tmp}/pasarguard_backup_error.XXXXXX.log"); then
+        colorized_echo red "Failed to create backup log file."
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    if command -v flock >/dev/null 2>&1; then
+        eval "exec ${lock_fd}>\"$lock_file\""
+        if ! flock -n "$lock_fd"; then
+            colorized_echo yellow "Another backup process is already running."
+            rm -rf "$temp_dir"
+            rm -f "$log_file"
+            return 1
+        fi
+    elif ! mkdir "$lock_dir" 2>/dev/null; then
+        colorized_echo yellow "Another backup process is already running."
+        rm -rf "$temp_dir"
+        rm -f "$log_file"
+        return 1
+    else
+        printf '%s\n' "$$" >"$lock_dir/pid"
+    fi
+
+    cleanup_backup_command() {
+        trap - RETURN
+        rm -rf "$temp_dir"
+        if [ "$keep_log_file" != true ] && [ -n "$log_file" ]; then
+            rm -f "$log_file"
+        fi
+        if command -v flock >/dev/null 2>&1; then
+            eval "exec ${lock_fd}>&-"
+        else
+            rm -rf "$lock_dir"
+        fi
+    }
+
+    trap cleanup_backup_command RETURN
+
     >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
 
@@ -740,16 +829,6 @@ backup_command() {
         detect_os
         install_package zip
     fi
-
-    # Remove old backups before creating new one (keep only latest)
-    rm -f "$backup_dir"/backup_*.tar.gz
-    rm -f "$backup_dir"/backup_*.zip
-    rm -f "$backup_dir"/backup_*.z[0-9][0-9] 2>/dev/null || true
-    mkdir -p "$backup_dir"
-
-    # Clean up temp directory completely before starting
-    rm -rf "$temp_dir"
-    mkdir -p "$temp_dir"
 
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do
@@ -770,7 +849,8 @@ backup_command() {
         error_messages+=("Environment file (.env) not found.")
         echo "Environment file (.env) not found." >>"$log_file"
         send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
-        exit 1
+        keep_log_file=true
+        return 1
     fi
 
     local db_type=""
@@ -1273,6 +1353,11 @@ backup_command() {
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
+        find "$backup_dir" -maxdepth 1 -type f \
+            \( -name "backup_*.tar.gz" -o -name "backup_*.zip" -o -name "backup_*.z[0-9][0-9]" \) \
+            ! -name "backup_${timestamp}.zip" \
+            ! -name "backup_${timestamp}.z[0-9][0-9]" \
+            -delete 2>/dev/null || true
         local backup_size=$(du -h "$backup_file" | cut -f1)
         colorized_echo green "Backup archive created: $backup_file (Size: $backup_size)"
     fi
@@ -1284,10 +1369,8 @@ backup_command() {
         final_backup_paths+=("$backup_file")
     fi
 
-    # Clean up temp directory after archive is created
-    rm -rf "$temp_dir"
-
     if [ ${#error_messages[@]} -gt 0 ]; then
+        keep_log_file=true
         colorized_echo red "Backup completed with errors:"
         for error in "${error_messages[@]}"; do
             colorized_echo red "  - $error"
@@ -1300,6 +1383,7 @@ backup_command() {
     fi
 
     if [ ${#final_backup_paths[@]} -eq 0 ]; then
+        keep_log_file=true
         colorized_echo red "Backup file was not created. Check log file: $log_file"
         return 1
     fi

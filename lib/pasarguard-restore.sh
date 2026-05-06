@@ -22,6 +22,17 @@ restore_command() {
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
 
+    redact_database_url() {
+        local url="$1"
+
+        if [ -z "$url" ]; then
+            printf '%s\n' "not set"
+            return 0
+        fi
+
+        printf '%s\n' "$url" | sed -E 's#^([^:]+://)([^@/]+)@#\1REDACTED@#'
+    }
+
     if [ -f "$ENV_FILE" ]; then
         set +e
         while IFS='=' read -r key value || [ -n "$key" ]; do
@@ -398,7 +409,7 @@ restore_command() {
         exit 1
     fi
 
-    colorized_echo green "✓ Found SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:0:50}..."
+    colorized_echo green "✓ Found SQLALCHEMY_DATABASE_URL: $(redact_database_url "$SQLALCHEMY_DATABASE_URL")"
 
     # Parse database configuration (similar to backup function)
     colorized_echo blue "Detecting database type..."
@@ -688,9 +699,10 @@ restore_command() {
 
             colorized_echo blue "Restoring $db_type database from container: $container_name"
 
-            # Prepare restore credentials
-                local restore_user="${db_user:-${DB_USER:-postgres}}"
-                local restore_password="${db_password:-${DB_PASSWORD:-}}"
+            # Prepare restore credentials, preferring the current installation values.
+                local restore_user="${current_db_user:-${db_user:-${DB_USER:-postgres}}}"
+                local restore_password="${current_db_password:-${db_password:-${DB_PASSWORD:-}}}"
+                local restore_db_name="${current_db_name:-${db_name:-${DB_NAME:-postgres}}}"
 
                 if [ -z "$restore_password" ]; then
                     colorized_echo red "No database password found for restore."
@@ -714,7 +726,7 @@ restore_command() {
                 # Use target installation's identity when available, falling back to backup values.
                 # This ensures cross-server restores work correctly when the local DB user/name
                 # differs from the backup source.
-                local target_db_name="${current_db_name:-$db_name}"
+                local target_db_name="$restore_db_name"
                 local target_db_owner="${current_db_user:-$restore_user}"
 
                 # Drop and recreate the target database for a clean slate
@@ -771,8 +783,8 @@ restore_command() {
                 fi
             else
                 # Plain PostgreSQL restore with ON_ERROR_STOP so psql exits non-zero on SQL errors
-                colorized_echo blue "Attempting restore using app user '$restore_user' to database '$db_name'..."
-                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                colorized_echo blue "Attempting restore using app user '$restore_user' to database '$restore_db_name'..."
+                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$restore_db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                     colorized_echo green "$db_type database restored successfully."
                     restore_success=true
                 else
@@ -852,6 +864,9 @@ restore_command() {
         fi
         if [ "$preserve_db_credentials" = true ]; then
             colorized_echo yellow "Database credentials in backup differ from current installation; preserving current database credentials."
+            if [ -n "$current_mysql_root_password" ]; then
+                replace_or_append_env_var "MYSQL_ROOT_PASSWORD" "$current_mysql_root_password" true "$ENV_FILE"
+            fi
             if [ -n "$current_db_user" ]; then
                 replace_or_append_env_var "DB_USER" "$current_db_user" false "$ENV_FILE"
             fi
