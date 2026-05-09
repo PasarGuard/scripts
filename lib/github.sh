@@ -6,7 +6,7 @@ github_raw_url() {
     local repo="$1"
     local path="$2"
 
-    printf 'https://github.com/%s/raw/main/%s\n' "$repo" "$path"
+    printf 'https://github.com/%s/raw/shared_lib/%s\n' "$repo" "$path"
 }
 
 github_download_file() {
