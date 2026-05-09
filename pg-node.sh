@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
+if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
+    SHARED_LIB_DIR="/usr/local/lib/pasarguard-scripts/lib"
+fi
+
+for shared_lib in common.sh system.sh docker.sh github.sh; do
+    if [ ! -f "$SHARED_LIB_DIR/$shared_lib" ]; then
+        printf 'Missing shared library: %s\n' "$SHARED_LIB_DIR/$shared_lib" >&2
+        exit 1
+    fi
+done
+
+# shellcheck source=lib/common.sh
+source "$SHARED_LIB_DIR/common.sh"
+# shellcheck source=lib/system.sh
+source "$SHARED_LIB_DIR/system.sh"
+# shellcheck source=lib/docker.sh
+source "$SHARED_LIB_DIR/docker.sh"
+# shellcheck source=lib/github.sh
+source "$SHARED_LIB_DIR/github.sh"
+
 # Handle global options
 AUTO_CONFIRM=false
 APP_NAME=""
@@ -67,44 +90,9 @@ SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
 SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
 LAST_XRAY_CORES=5
 FETCH_REPO="PasarGuard/scripts"
-SCRIPT_URL="https://github.com/$FETCH_REPO/raw/main/pg-node.sh"
 NODE_SERVICE_REPO="PasarGuard/node-serviced"
 NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
 NODE_SERVICE_BINARY_NAME="node-serviced"
-colorized_echo() {
-    local color=$1
-    local text=$2
-    local style=${3:-0} # Default style is normal
-    case $color in
-    "red")
-        printf "\e[${style};91m${text}\e[0m\n"
-        ;;
-    "green")
-        printf "\e[${style};92m${text}\e[0m\n"
-        ;;
-    "yellow")
-        printf "\e[${style};93m${text}\e[0m\n"
-        ;;
-    "blue")
-        printf "\e[${style};94m${text}\e[0m\n"
-        ;;
-    "magenta")
-        printf "\e[${style};95m${text}\e[0m\n"
-        ;;
-    "cyan")
-        printf "\e[${style};96m${text}\e[0m\n"
-        ;;
-    *)
-        echo "${text}"
-        ;;
-    esac
-}
-check_running_as_root() {
-    if [ "$(id -u)" != "0" ]; then
-        colorized_echo red "This command must be run as root."
-        exit 1
-    fi
-}
 set_service_paths() {
     SERVICE_NAME="${APP_NAME}-service"
     SERVICE_BINARY_PATH="/usr/local/bin/${SERVICE_NAME}"
@@ -184,92 +172,15 @@ configure_firewall_for_port() {
     local hint="If a firewall is enabled (e.g., UFW or firewalld), allow ${port}/${proto}."
     colorized_echo yellow "$hint"
 }
-detect_os() {
-    # Detect the operating system
-    if [ -f /etc/lsb-release ]; then
-        OS=$(lsb_release -si)
-    elif [ -f /etc/os-release ]; then
-        OS=$(awk -F= '/^NAME/{print $2}' /etc/os-release | tr -d '"')
-    elif [ -f /etc/redhat-release ]; then
-        OS=$(cat /etc/redhat-release | awk '{print $1}')
-    elif [ -f /etc/arch-release ]; then
-        OS="Arch"
-    else
-        colorized_echo red "Unsupported operating system"
-        exit 1
-    fi
-}
-detect_and_update_package_manager() {
-    colorized_echo blue "Updating package manager"
-    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
-        PKG_MANAGER="apt-get"
-        $PKG_MANAGER update -qq >/dev/null 2>&1
-    elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]]; then
-        PKG_MANAGER="yum"
-        $PKG_MANAGER update -y -q >/dev/null 2>&1
-        $PKG_MANAGER install -y -q epel-release >/dev/null 2>&1
-    elif [[ "$OS" == "Fedora"* ]]; then
-        PKG_MANAGER="dnf"
-        $PKG_MANAGER update -q -y >/dev/null 2>&1
-    elif [[ "$OS" == "Arch"* ]]; then
-        PKG_MANAGER="pacman"
-        $PKG_MANAGER -Sy --noconfirm --quiet >/dev/null 2>&1
-    elif [[ "$OS" == "openSUSE"* ]]; then
-        PKG_MANAGER="zypper"
-        $PKG_MANAGER refresh --quiet >/dev/null 2>&1
-    else
-        colorized_echo red "Unsupported operating system"
-        exit 1
-    fi
-}
-detect_compose() {
-    # Check if docker compose command exists
-    if docker compose >/dev/null 2>&1; then
-        COMPOSE='docker compose'
-    elif docker-compose >/dev/null 2>&1; then
-        COMPOSE='docker-compose'
-    else
-        colorized_echo red "docker compose not found"
-        exit 1
-    fi
-}
-install_package() {
-    if [ -z "$PKG_MANAGER" ]; then
-        detect_and_update_package_manager
-    fi
-    PACKAGE=$1
-    colorized_echo blue "Installing $PACKAGE"
-    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
-        $PKG_MANAGER -y -qq install "$PACKAGE" >/dev/null 2>&1
-    elif [[ "$OS" == "CentOS"* ]] || [[ "$OS" == "AlmaLinux"* ]]; then
-        $PKG_MANAGER install -y -q "$PACKAGE" >/dev/null 2>&1
-    elif [[ "$OS" == "Fedora"* ]]; then
-        $PKG_MANAGER install -y -q "$PACKAGE" >/dev/null 2>&1
-    elif [[ "$OS" == "Arch"* ]]; then
-        $PKG_MANAGER -S --noconfirm --quiet "$PACKAGE" >/dev/null 2>&1
-    elif [[ "$OS" == "openSUSE"* ]]; then
-        PKG_MANAGER="zypper"
-        $PKG_MANAGER --quiet install -y "$PACKAGE" >/dev/null 2>&1
-    else
-        colorized_echo red "Unsupported operating system"
-        exit 1
-    fi
-}
-install_docker() {
-    # Install Docker and Docker Compose using the official installation script
-    colorized_echo blue "Installing Docker"
-    curl -fsSL https://get.docker.com | sh
-    colorized_echo green "Docker installed successfully"
-}
 install_node_script() {
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
-    TEMP_FILE=$(mktemp)
+    TEMP_FILE=$(create_temp_file "pg-node-script" ".sh")
     
     # Download script to temp file first
     colorized_echo cyan "  Downloading script from GitHub..."
-    if ! curl -sSL "$SCRIPT_URL" -o "$TEMP_FILE"; then
-        colorized_echo red "✗ Failed to download script from $SCRIPT_URL"
+    if ! github_download_file "$(github_raw_url "$FETCH_REPO" "pg-node.sh")" "$TEMP_FILE"; then
+        colorized_echo red "✗ Failed to download script from $(github_raw_url "$FETCH_REPO" "pg-node.sh")"
         rm -f "$TEMP_FILE"
         exit 1
     fi
@@ -279,6 +190,8 @@ install_node_script() {
     if grep -q "^APP_NAME=" "$TEMP_FILE"; then
         sed -i "s|^APP_NAME=.*|APP_NAME=\"$APP_NAME\"|" "$TEMP_FILE"
     fi
+
+    install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh
     
     # Remove old file if it exists
     if [ -f "$TARGET_PATH" ]; then
@@ -323,7 +236,7 @@ install_node_service_script() {
         colorized_echo red "node-serviced asset not found for platform $platform (expected $asset_name)"
         exit 1
     fi
-    tmp_dir=$(mktemp -d)
+    tmp_dir=$(create_temp_dir "node-serviced")
     archive_path="${tmp_dir}/${asset_name}"
     colorized_echo cyan "  Downloading ${asset_name}..."
     if ! curl -sSL "$asset_url" -o "$archive_path"; then
@@ -610,7 +523,7 @@ read_and_save_file() {
 install_node() {
     local node_version=$1
     FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/node/main"
-    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/scripts/main"
+    COMPOSE_FILES_URL_PREFIX="https://raw.githubusercontent.com/PasarGuard/scripts/main/docker-compose"
     colorized_echo blue "Creating directories..."
     colorized_echo cyan "  Command: mkdir -p $DATA_DIR $DATA_DIR/certs $APP_DIR"
     mkdir -p "$DATA_DIR"
@@ -804,20 +717,21 @@ uninstall_node_data_files() {
     fi
 }
 up_node() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" up -d --remove-orphans
+    compose_up
 }
 down_node() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" down
+    compose_down
 }
 show_node_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs
+    compose_logs
 }
 follow_node_logs() {
-    $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" logs -f
+    compose_logs_follow
 }
 update_node_script() {
     colorized_echo blue "Updating node script"
-    curl -sSL $SCRIPT_URL | install -m 755 /dev/stdin /usr/local/bin/$APP_NAME
+    install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh
+    github_install_script_from_repo "$FETCH_REPO" "pg-node.sh" "$APP_NAME"
     colorized_echo green "node script updated successfully"
 }
 update_node() {
@@ -1453,64 +1367,6 @@ update_command() {
 
     colorized_echo blue "node updated successfully"
 }
-identify_the_operating_system_and_architecture() {
-    if [[ "$(uname)" == 'Linux' ]]; then
-        case "$(uname -m)" in
-        'i386' | 'i686')
-            ARCH='32'
-            ;;
-        'amd64' | 'x86_64')
-            ARCH='64'
-            ;;
-        'armv5tel')
-            ARCH='arm32-v5'
-            ;;
-        'armv6l')
-            ARCH='arm32-v6'
-            grep Features /proc/cpuinfo | grep -qw 'vfp' || ARCH='arm32-v5'
-            ;;
-        'armv7' | 'armv7l')
-            ARCH='arm32-v7a'
-            grep Features /proc/cpuinfo | grep -qw 'vfp' || ARCH='arm32-v5'
-            ;;
-        'armv8' | 'aarch64')
-            ARCH='arm64-v8a'
-            ;;
-        'mips')
-            ARCH='mips32'
-            ;;
-        'mipsle')
-            ARCH='mips32le'
-            ;;
-        'mips64')
-            ARCH='mips64'
-            lscpu | grep -q "Little Endian" && ARCH='mips64le'
-            ;;
-        'mips64le')
-            ARCH='mips64le'
-            ;;
-        'ppc64')
-            ARCH='ppc64'
-            ;;
-        'ppc64le')
-            ARCH='ppc64le'
-            ;;
-        'riscv64')
-            ARCH='riscv64'
-            ;;
-        's390x')
-            ARCH='s390x'
-            ;;
-        *)
-            echo "error: The architecture is not supported."
-            exit 1
-            ;;
-        esac
-    else
-        echo "error: This operating system is not supported."
-        exit 1
-    fi
-}
 # Function to update the Xray core
 get_xray_core() {
     local requested_version="${1:-}"
@@ -1650,72 +1506,6 @@ get_current_xray_core_version() {
     fi
     echo "Not installed"
 }
-install_yq() {
-    if command -v yq &>/dev/null; then
-        colorized_echo green "yq is already installed."
-        return
-    fi
-    identify_the_operating_system_and_architecture
-    local base_url="https://github.com/mikefarah/yq/releases/latest/download"
-    local yq_binary=""
-    case "$ARCH" in
-    '64' | 'x86_64')
-        yq_binary="yq_linux_amd64"
-        ;;
-    'arm32-v7a' | 'arm32-v6' | 'arm32-v5' | 'armv7l')
-        yq_binary="yq_linux_arm"
-        ;;
-    'arm64-v8a' | 'aarch64')
-        yq_binary="yq_linux_arm64"
-        ;;
-    '32' | 'i386' | 'i686')
-        yq_binary="yq_linux_386"
-        ;;
-    *)
-        colorized_echo red "Unsupported architecture: $ARCH"
-        exit 1
-        ;;
-    esac
-    local yq_url="${base_url}/${yq_binary}"
-    colorized_echo blue "Downloading yq from ${yq_url}..."
-    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
-        colorized_echo yellow "Neither curl nor wget is installed. Attempting to install curl."
-        install_package curl || {
-            colorized_echo red "Failed to install curl. Please install curl or wget manually."
-            exit 1
-        }
-    fi
-    if command -v curl &>/dev/null; then
-        if curl -L "$yq_url" -o /usr/local/bin/yq; then
-            chmod +x /usr/local/bin/yq
-            colorized_echo green "yq installed successfully!"
-        else
-            colorized_echo red "Failed to download yq using curl. Please check your internet connection."
-            exit 1
-        fi
-    elif command -v wget &>/dev/null; then
-        if wget -O /usr/local/bin/yq "$yq_url"; then
-            chmod +x /usr/local/bin/yq
-            colorized_echo green "yq installed successfully!"
-        else
-            colorized_echo red "Failed to download yq using wget. Please check your internet connection."
-            exit 1
-        fi
-    fi
-    if ! echo "$PATH" | grep -q "/usr/local/bin"; then
-        export PATH="/usr/local/bin:$PATH"
-    fi
-    hash -r
-    if command -v yq &>/dev/null; then
-        colorized_echo green "yq is ready to use."
-    elif [ -x "/usr/local/bin/yq" ]; then
-        colorized_echo yellow "yq is installed at /usr/local/bin/yq but not found in PATH."
-        colorized_echo yellow "You can add /usr/local/bin to your PATH environment variable."
-    else
-        colorized_echo red "yq installation failed. Please try again or install manually."
-        exit 1
-    fi
-}
 update_core_command() {
     check_running_as_root
     local core_version_arg=""
@@ -1767,19 +1557,6 @@ update_core_command() {
     colorized_echo red "Restarting node..."
     restart_command -n --no-restart-service
     colorized_echo blue "Installation of XRAY-CORE version $selected_version completed."
-}
-check_editor() {
-    if [ -z "$EDITOR" ]; then
-        if command -v nano >/dev/null 2>&1; then
-            EDITOR="nano"
-        elif command -v vi >/dev/null 2>&1; then
-            EDITOR="vi"
-        else
-            detect_os
-            install_package nano
-            EDITOR="nano"
-        fi
-    fi
 }
 edit_command() {
     detect_os

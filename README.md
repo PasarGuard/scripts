@@ -24,37 +24,37 @@
 -   **Install pasarguard with SQLite**:
 
     ```bash
-    curl -fsSLo /tmp/pg.sh https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh && sudo bash /tmp/pg.sh install
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install
     ```
 
 -   **Install pasarguard with MySQL**:
 
     ```bash
-    curl -fsSLo /tmp/pg.sh https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh && sudo bash /tmp/pg.sh install --database mysql
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database mysql
     ```
 
 -   **Install pasarguard with PostgreSQL**:
 
     ```bash
-    curl -fsSLo /tmp/pg.sh https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh && sudo bash /tmp/pg.sh install --database postgresql
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database postgresql
     ```
 
 -   **Install pasarguard with TimescaleDB(v1+ only) and pre-release version**:
 
     ```bash
-    curl -fsSLo /tmp/pg.sh https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh && sudo bash /tmp/pg.sh install --database timescaledb --pre-release
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database timescaledb --pre-release
     ```
 
 -   **Install pasarguard with MariaDB and Dev branch**:
 
     ```bash
-    curl -fsSLo /tmp/pg.sh https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh && sudo bash /tmp/pg.sh install --database mariadb --dev
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database mariadb --dev
     ```
 
 -   **Install pasarguard with MariaDB and Manual version**:
 
     ```bash
-    curl -fsSLo /tmp/pg.sh https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh && sudo bash /tmp/pg.sh install --database mariadb --version v0.5.2
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pasarguard.sh)" @ install --database mariadb --version v0.5.2
     ```
 
 ## Installing Node
@@ -63,22 +63,22 @@
 
 -   **Install Node**
     ```bash
-    curl -fsSLo /tmp/pg-node.sh https://github.com/PasarGuard/scripts/raw/main/pg-node.sh && sudo bash /tmp/pg-node.sh install
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install
     ```
 -   **Install Node Manual version:**
     ```bash
-    curl -fsSLo /tmp/pg-node.sh https://github.com/PasarGuard/scripts/raw/main/pg-node.sh && sudo bash /tmp/pg-node.sh install --version 0.1.0
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --version 0.1.0
     ```
 -   **Install Node pre-release version:**
 
     ```bash
-    curl -fsSLo /tmp/pg-node.sh https://github.com/PasarGuard/scripts/raw/main/pg-node.sh && sudo bash /tmp/pg-node.sh install --pre-release
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --pre-release
     ```
 
 -   **Install Node with custom name:**
 
     ```bash
-    curl -fsSLo /tmp/pg-node.sh https://github.com/PasarGuard/scripts/raw/main/pg-node.sh && sudo bash /tmp/pg-node.sh install --name Node2
+    sudo bash -c "$(curl -fsSL https://github.com/PasarGuard/scripts/raw/main/pg-node.sh)" @ install --name Node2
     ```
 
     > 📌 **Tip:**  
