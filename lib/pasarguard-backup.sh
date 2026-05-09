@@ -874,6 +874,8 @@ backup_command() {
         echo "Please check $ENV_FILE for SQLALCHEMY_DATABASE_URL" >>"$log_file"
         error_messages+=("SQLALCHEMY_DATABASE_URL not found in .env file")
         colorized_echo yellow "Please check the log file for details: $log_file"
+        keep_log_file=true
+        send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
         return 1
     fi
 
@@ -948,6 +950,11 @@ backup_command() {
                 # Remove query parameters from database name if any
                 db_name="${db_name%%\?*}"
                 db_name="${db_name%%#*}"
+
+                urldecode() { local url_encoded="${1//+/ }"; printf '%b' "${url_encoded//%/\\x}"; }
+                db_user=$(urldecode "$db_user")
+                db_password=$(urldecode "$db_password")
+                db_name=$(urldecode "$db_name")
 
                 # Set default ports if not specified
                 if [ -z "$db_port" ]; then

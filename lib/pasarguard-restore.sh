@@ -471,6 +471,11 @@ restore_command() {
             db_name="${db_name%%\?*}"
             db_name="${db_name%%#*}"
 
+            urldecode() { local url_encoded="${1//+/ }"; printf '%b' "${url_encoded//%/\\x}"; }
+            db_user=$(urldecode "$db_user")
+            db_password=$(urldecode "$db_password")
+            db_name=$(urldecode "$db_name")
+
             if [ -z "$db_port" ]; then
                 if [[ "$db_type" =~ ^(mysql|mariadb)$ ]]; then
                     db_port="3306"
@@ -596,7 +601,7 @@ restore_command() {
                 local restore_success=false
                 local backup_restore_user="${db_user:-${DB_USER:-}}"
                 local backup_restore_password="${db_password:-${DB_PASSWORD:-}}"
-                local app_db_target="${db_name:-${current_db_name:-}}"
+                local app_db_target="${current_db_name:-${db_name:-}}"
 
                 # Try root password from backup .env first
                 if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
@@ -641,7 +646,7 @@ restore_command() {
                 fi
 
                 # Final fallback: current installation app credentials
-                if [ "$restore_success" = false ] && [ -n "$current_db_user" ] && [ -n "$current_db_password" ] && { [ "$current_db_user" != "$backup_restore_user" ] || [ "$current_db_password" != "$backup_restore_password" ]; }; then
+                if [ "$restore_success" = false ] && [ -n "$current_db_user" ] && [ -n "$current_db_password" ] && { [ "$current_db_user" != "$backup_restore_user" ] || [ "$current_db_password" != "$backup_restore_password" ] || [ "${current_db_name:-}" != "${db_name:-}" ]; }; then
                     colorized_echo blue "Trying app user '$current_db_user' from current installation .env..."
                     if [ -n "$app_db_target" ]; then
                         if docker exec -i "$container_name" "$mysql_cmd" -u "$current_db_user" -p"$current_db_password" "$app_db_target" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
@@ -688,7 +693,12 @@ restore_command() {
         local backup_size=$(du -h "$temp_restore_dir/db_backup.sql" | cut -f1)
         colorized_echo blue "Backup file size: $backup_size"
 
-        if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]] && [ -n "$container_name" ]; then
+        if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+            if [ -z "$container_name" ]; then
+                colorized_echo red "Error: Database container not found. Please start the DB container or specify a valid container name."
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
             local verified_container=$(verify_and_start_container "$container_name" "$db_type")
             if [ -z "$verified_container" ]; then
                 colorized_echo red "Failed to start database container. Please start it manually."
