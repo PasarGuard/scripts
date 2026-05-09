@@ -790,7 +790,7 @@ restore_command() {
                 else
                     # If that fails, try using postgres superuser
                     colorized_echo yellow "Trying with postgres superuser..."
-                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d "$db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d "$restore_db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "$db_type database restored successfully."
                         restore_success=true
                     else
@@ -833,7 +833,11 @@ restore_command() {
             install_package rsync
         fi
         mkdir -p "$DATA_DIR"
-        if ! rsync -a "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
+        if [ "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
+            colorized_echo blue "Backing up current data directory before restore..."
+            cp -r "$DATA_DIR" "$DATA_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
+        fi
+        if ! rsync -a --delete "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
             colorized_echo red "Failed to restore data directory."
             echo "Failed to restore data directory from $extracted_data_dir to $DATA_DIR" >>"$log_file"
             rm -rf "$temp_restore_dir"
@@ -859,6 +863,8 @@ restore_command() {
             elif [ -n "$current_db_name" ] && [ -n "${DB_NAME:-}" ] && [ "$current_db_name" != "$DB_NAME" ]; then
                 preserve_db_credentials=true
             elif [ -n "$current_db_password" ] && [ -n "${DB_PASSWORD:-}" ] && [ "$current_db_password" != "$DB_PASSWORD" ]; then
+                preserve_db_credentials=true
+            elif [ -n "$current_mysql_root_password" ] && [ -n "${MYSQL_ROOT_PASSWORD:-}" ] && [ "$current_mysql_root_password" != "$MYSQL_ROOT_PASSWORD" ]; then
                 preserve_db_credentials=true
             fi
         fi
