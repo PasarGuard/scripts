@@ -765,12 +765,15 @@ backup_command() {
     local split_size_arg="47m" # keep Telegram chunks under 50MB
     local temp_dir=""
     local log_file=""
-    local lock_file="${TMPDIR:-/tmp}/${APP_NAME}-backup.lock"
-    local lock_dir="${TMPDIR:-/tmp}/${APP_NAME}-backup.lock.d"
-    local lock_fd=9
+    # Keep the lock with the backup artifacts so it is not affected by sticky-dir
+    # protections on /tmp when different users invoke the command.
+    local lock_dir="${backup_dir}/.${APP_NAME}-backup.lock.d"
     local keep_log_file=false
 
-    mkdir -p "$backup_dir"
+    if ! mkdir -p "$backup_dir"; then
+        colorized_echo red "Failed to prepare backup directory: $backup_dir"
+        return 1
+    fi
 
     if ! temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pasarguard_backup.XXXXXX"); then
         colorized_echo red "Failed to create backup temp directory."
@@ -783,22 +786,52 @@ backup_command() {
         return 1
     fi
 
-    if command -v flock >/dev/null 2>&1; then
-        eval "exec ${lock_fd}>\"$lock_file\""
-        if ! flock -n "$lock_fd"; then
-            colorized_echo yellow "Another backup process is already running."
-            rm -rf "$temp_dir"
-            rm -f "$log_file"
-            return 1
+    acquire_backup_lock() {
+        local lock_pid=""
+
+        if mkdir "$lock_dir" 2>/dev/null; then
+            printf '%s\n' "$$" >"$lock_dir/pid"
+            return 0
         fi
-    elif ! mkdir "$lock_dir" 2>/dev/null; then
+
+        if [ -f "$lock_dir/pid" ]; then
+            lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || true)
+            if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+                return 1
+            fi
+        fi
+
+        if rm -rf "$lock_dir" 2>/dev/null && mkdir "$lock_dir" 2>/dev/null; then
+            printf '%s\n' "$$" >"$lock_dir/pid"
+            return 0
+        fi
+
+        return 2
+    }
+
+    local lock_status=0
+    if acquire_backup_lock; then
+        lock_status=0
+    else
+        lock_status=$?
+    fi
+
+    case "$lock_status" in
+    0)
+        ;;
+    1)
         colorized_echo yellow "Another backup process is already running."
         rm -rf "$temp_dir"
         rm -f "$log_file"
         return 1
-    else
-        printf '%s\n' "$$" >"$lock_dir/pid"
-    fi
+        ;;
+    *)
+        colorized_echo red "Failed to acquire backup lock: $lock_dir"
+        rm -rf "$temp_dir"
+        rm -f "$log_file"
+        return 1
+        ;;
+    esac
 
     cleanup_backup_command() {
         trap - RETURN
@@ -806,11 +839,7 @@ backup_command() {
         if [ "$keep_log_file" != true ] && [ -n "$log_file" ]; then
             rm -f "$log_file"
         fi
-        if command -v flock >/dev/null 2>&1; then
-            eval "exec ${lock_fd}>&-"
-        else
-            rm -rf "$lock_dir"
-        fi
+        rm -rf "$lock_dir"
     }
 
     trap cleanup_backup_command RETURN
