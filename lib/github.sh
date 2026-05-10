@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-SHARED_LIB_INSTALL_DIR="/usr/local/lib/pasarguard-scripts/lib"
+SHARED_LIB_INSTALL_DIR="${SHARED_LIB_INSTALL_DIR:-/usr/local/lib/pasarguard-scripts/lib}"
 
 github_raw_url() {
     local repo="$1"

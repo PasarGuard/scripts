@@ -12,12 +12,14 @@ trap 'rm -rf "$MOCK_ROOT"' EXIT
 
 MOCK_BIN="$MOCK_ROOT/bin"
 MOCK_LIB="$MOCK_ROOT/lib"
-mkdir -p "$MOCK_BIN" "$MOCK_LIB"
+MOCK_TMP="$MOCK_ROOT/tmp"
+mkdir -p "$MOCK_BIN" "$MOCK_LIB" "$MOCK_TMP"
 
-# Override paths for testing
+# Override paths for testing to avoid permission issues
+export APP_TMP_DIR="$MOCK_TMP"
+export DATA_DIR="$MOCK_ROOT/data"
+mkdir -p "$DATA_DIR"
 export SHARED_LIB_INSTALL_DIR="$MOCK_LIB"
-# We'll use a wrapper for backup_scripts to use our mock bin dir
-# or just redefine the paths in the test.
 
 # shellcheck source=lib/common.sh
 source "$ROOT_DIR/lib/common.sh"
