@@ -1360,7 +1360,16 @@ backup_command() {
             ;;
         sqlite)
             if [ -f "$sqlite_file" ]; then
-                if ! cp "$sqlite_file" "$temp_dir/db_backup.sqlite" 2>>"$log_file"; then
+                if ! command -v sqlite3 >/dev/null 2>&1; then
+                    detect_os
+                    install_package sqlite3 || true
+                fi
+
+                if command -v sqlite3 >/dev/null 2>&1; then
+                    if ! sqlite3 "$sqlite_file" ".backup '$temp_dir/db_backup.sqlite'" >>"$log_file" 2>&1; then
+                        error_messages+=("Failed to create SQLite backup snapshot.")
+                    fi
+                elif ! cp "$sqlite_file" "$temp_dir/db_backup.sqlite" 2>>"$log_file"; then
                     error_messages+=("Failed to copy SQLite database.")
                 fi
             else
@@ -1392,6 +1401,8 @@ backup_command() {
         if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
             local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
             rsync_args+=(--exclude "$sqlite_relative_path")
+            rsync_args+=(--exclude "${sqlite_relative_path}-wal")
+            rsync_args+=(--exclude "${sqlite_relative_path}-shm")
             echo "Excluding SQLite database from data directory copy: $sqlite_relative_path" >>"$log_file"
         fi
 
