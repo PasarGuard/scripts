@@ -64,18 +64,28 @@ restore_command() {
     fi
 
     local backup_dir="$APP_DIR/backup"
-    local temp_restore_dir="/tmp/pasarguard_restore"
+    local restore_staging_root=""
+    local temp_restore_dir=""
     local log_file="/var/log/pasarguard_restore_error.log"
     >"$log_file"
     echo "Restore Log - $(date)" >>"$log_file"
 
-    # Clean up temp directory
-    rm -rf "$temp_restore_dir"
-    mkdir -p "$temp_restore_dir"
-
     # Check if backup directory exists
     if [ ! -d "$backup_dir" ]; then
         colorized_echo red "Backup directory not found: $backup_dir"
+        exit 1
+    fi
+
+    # Restores can be large, so avoid /tmp by default and stage beside the
+    # backup unless RESTORE_TMPDIR is explicitly set.
+    restore_staging_root="${RESTORE_TMPDIR:-$backup_dir}"
+    if ! mkdir -p "$restore_staging_root"; then
+        colorized_echo red "Failed to prepare restore staging directory: $restore_staging_root"
+        exit 1
+    fi
+
+    if ! temp_restore_dir=$(mktemp -d "${restore_staging_root}/pasarguard_restore.XXXXXX"); then
+        colorized_echo red "Failed to create restore temp directory."
         exit 1
     fi
 
@@ -203,6 +213,8 @@ restore_command() {
     colorized_echo blue "Preparing archive for extraction..."
     local archive_to_extract="$selected_file"
     local archive_format="tar"
+    local zip_split_archive=false
+    local split_zip_base_name=""
 
     if [[ "$selected_filename" =~ \.part[0-9]{2}\.zip$ ]]; then
         archive_format="zip"
@@ -229,18 +241,19 @@ restore_command() {
         colorized_echo green "✓ Combined $part_count part(s)"
     elif [[ "$selected_filename" =~ \.zip$ ]]; then
         archive_format="zip"
-        local base_name="${selected_filename%.zip}"
+        split_zip_base_name="${selected_filename%.zip}"
         local zip_split_parts=()
         while IFS= read -r part_file; do
             [ -n "$part_file" ] && zip_split_parts+=("$part_file")
-        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.z[0-9][0-9]" | sort)
+        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${split_zip_base_name}.z[0-9][0-9]" | sort)
 
         if [ ${#zip_split_parts[@]} -gt 0 ]; then
-            colorized_echo yellow "Detected split zip backup (.zXX + .zip). Rebuilding archive..."
+            zip_split_archive=true
+            colorized_echo yellow "Detected split zip backup (.zXX + .zip)."
             local expected_part=1
             for part_file in "${zip_split_parts[@]}"; do
                 local expected_name
-                expected_name=$(printf "%s.z%02d" "$base_name" "$expected_part")
+                expected_name=$(printf "%s.z%02d" "$split_zip_base_name" "$expected_part")
                 if [ "$(basename "$part_file")" != "$expected_name" ]; then
                     colorized_echo red "Missing split part $expected_name. Cannot restore split backup."
                     rm -rf "$temp_restore_dir"
@@ -248,35 +261,7 @@ restore_command() {
                 fi
                 expected_part=$((expected_part + 1))
             done
-
-            local concatenated_file="$temp_restore_dir/${base_name}_combined.zip"
-            if command -v zip >/dev/null 2>&1 && zip -s 0 "$selected_file" --out "$concatenated_file" >>"$log_file" 2>&1; then
-                archive_to_extract="$concatenated_file"
-                colorized_echo green "✓ Rebuilt split zip archive with zip utility"
-            else
-                if command -v zip >/dev/null 2>&1; then
-                    colorized_echo yellow "zip rebuild failed. Falling back to direct concatenation..."
-                else
-                    colorized_echo yellow "zip utility not found. Falling back to direct concatenation..."
-                fi
-                >"$concatenated_file"
-                local part_count=0
-                for part_file in "${zip_split_parts[@]}"; do
-                    if ! cat "$part_file" >>"$concatenated_file"; then
-                        colorized_echo red "Failed to read split part: $(basename "$part_file")"
-                        rm -rf "$temp_restore_dir"
-                        exit 1
-                    fi
-                    part_count=$((part_count + 1))
-                done
-                if ! cat "$selected_file" >>"$concatenated_file"; then
-                    colorized_echo red "Failed to read main zip file: $selected_filename"
-                    rm -rf "$temp_restore_dir"
-                    exit 1
-                fi
-                archive_to_extract="$concatenated_file"
-                colorized_echo green "✓ Combined $((part_count + 1)) split part(s)"
-            fi
+            colorized_echo blue "Using main zip file with adjacent split parts for extraction."
         fi
     else
         archive_format="tar"
@@ -288,11 +273,29 @@ restore_command() {
             detect_os
             install_package unzip
         fi
+        if [ "$zip_split_archive" = true ] && ! command -v zip >/dev/null 2>&1; then
+            detect_os
+            install_package zip
+        fi
         if ! unzip -tq "$archive_to_extract" >/dev/null 2>>"$log_file"; then
-            colorized_echo red "ERROR: The backup file is not a valid zip archive."
-            echo "File is not a valid zip archive: $archive_to_extract" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
+            if [ "$zip_split_archive" = true ] && command -v zip >/dev/null 2>&1; then
+                local rebuilt_archive="$temp_restore_dir/${split_zip_base_name}_combined.zip"
+                colorized_echo yellow "Direct split-zip validation failed. Rebuilding archive with zip utility..."
+                if zip -s 0 "$selected_file" --out "$rebuilt_archive" >>"$log_file" 2>&1 && unzip -tq "$rebuilt_archive" >/dev/null 2>>"$log_file"; then
+                    archive_to_extract="$rebuilt_archive"
+                    colorized_echo green "✓ Rebuilt split zip archive with zip utility"
+                else
+                    colorized_echo red "ERROR: The split backup archive could not be validated."
+                    echo "Failed to validate split zip archive: $selected_file" >>"$log_file"
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+            else
+                colorized_echo red "ERROR: The backup file is not a valid zip archive."
+                echo "File is not a valid zip archive: $archive_to_extract" >>"$log_file"
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
         fi
         if ! unzip -oq "$archive_to_extract" -d "$temp_restore_dir" 2>>"$log_file"; then
             colorized_echo red "Failed to extract backup file."
@@ -353,7 +356,7 @@ restore_command() {
     local env_file_to_use="$extracted_env"
     if grep -q $'\x00' "$extracted_env" 2>/dev/null; then
         # File has null bytes, create cleaned version
-        local cleaned_env="/tmp/pasarguard_env_cleaned_$$"
+        local cleaned_env="$temp_restore_dir/pasarguard_env_cleaned"
         set +e
         tr -d '\000' < "$extracted_env" > "$cleaned_env" 2>/dev/null
         local tr_result=$?
