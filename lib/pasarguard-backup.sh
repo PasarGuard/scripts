@@ -1431,7 +1431,7 @@ backup_command() {
 
         if [ "$archive_size_bytes" -gt "$split_size_bytes" ]; then
             colorized_echo blue "Splitting backup archive into Telegram-sized parts..."
-            if ! split -d -a 2 -b "$split_size_bytes" --additional-suffix=".zip" \
+            if ! split -d -a 2 --numeric-suffixes=1 -b "$split_size_bytes" --additional-suffix=".zip" \
                 "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
                 error_messages+=("Failed to split backup archive.")
                 echo "Failed to split backup archive." >>"$log_file"

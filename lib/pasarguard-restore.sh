@@ -105,8 +105,13 @@ restore_command() {
     local backup_files=()
     for file in "${backup_candidates[@]}"; do
         local filename=$(basename "$file")
-        if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]] && [[ ! "$filename" =~ \.part01\.zip$ ]]; then
-            continue
+        if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]]; then
+            local base_name="${filename%%.part*}"
+            if [ -f "$backup_dir/${base_name}.part00.zip" ]; then
+                [[ "$filename" =~ \.part00\.zip$ ]] || continue
+            else
+                [[ "$filename" =~ \.part01\.zip$ ]] || continue
+            fi
         fi
         if [[ "$filename" =~ \.z[0-9]{2}$ ]]; then
             continue
@@ -220,17 +225,36 @@ restore_command() {
         archive_format="zip"
         local base_name="${selected_filename%%.part*}"
         colorized_echo yellow "Detected split zip backup. Checking available parts..."
-        if [ ! -f "$backup_dir/${base_name}.part01.zip" ]; then
-            colorized_echo red "Missing ${base_name}.part01.zip. Cannot restore split backup."
+        local first_part_number=""
+        if [ -f "$backup_dir/${base_name}.part00.zip" ]; then
+            first_part_number=0
+        elif [ -f "$backup_dir/${base_name}.part01.zip" ]; then
+            first_part_number=1
+        else
+            colorized_echo red "Missing initial split part for ${base_name}. Cannot restore split backup."
             rm -rf "$temp_restore_dir"
             exit 1
         fi
         local concatenated_file="$temp_restore_dir/${base_name}_combined.zip"
         >"$concatenated_file"
         local part_count=0
+        local expected_part_number="$first_part_number"
         while IFS= read -r part_file; do
+            local part_filename
+            local actual_part_number
+            part_filename=$(basename "$part_file")
+            actual_part_number="${part_filename##*.part}"
+            actual_part_number="${actual_part_number%.zip}"
+            actual_part_number=$((10#$actual_part_number))
+
+            if [ "$actual_part_number" -ne "$expected_part_number" ]; then
+                colorized_echo red "Missing split part $(printf "%s.part%02d.zip" "$base_name" "$expected_part_number"). Cannot restore split backup."
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
             cat "$part_file" >>"$concatenated_file"
             part_count=$((part_count + 1))
+            expected_part_number=$((expected_part_number + 1))
         done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | sort)
         if [ "$part_count" -eq 0 ]; then
             colorized_echo red "No parts found for $base_name"
