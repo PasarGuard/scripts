@@ -87,10 +87,12 @@ send_backup_to_telegram() {
     local backup_paths=()
     local uploaded_files=()
     local cleanup_dir=""
+    local extraction_mode="zip"
 
     local telegram_split_bytes=$((49 * 1000 * 1000))
 
     if [[ "$latest_backup" =~ \.part[0-9]{2}\.zip$ ]]; then
+        extraction_mode="part_zip"
         local base="${latest_backup%%.part*}"
         while IFS= read -r file; do
             [ -n "$file" ] && backup_paths+=("$file")
@@ -100,6 +102,7 @@ send_backup_to_telegram() {
             return 1
         fi
     elif [[ "$latest_backup" =~ \.z[0-9]{2}$ ]]; then
+        extraction_mode="split_zip"
         local base="${latest_backup%.z??}"
         while IFS= read -r file; do
             [ -n "$file" ] && backup_paths+=("$file")
@@ -117,10 +120,12 @@ send_backup_to_telegram() {
             [ -n "$file" ] && split_files+=("$file")
         done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base}.z[0-9][0-9]" | sort)
         if [ ${#split_files[@]} -gt 0 ]; then
+            extraction_mode="split_zip"
             backup_paths=("${split_files[@]}")
         fi
         backup_paths+=("$backup_dir/$latest_backup")
     elif [[ "$latest_backup" =~ \.tar\.gz$ ]]; then
+        extraction_mode="tar"
         cleanup_dir="/tmp/pasarguard_backup_split"
         rm -rf "$cleanup_dir"
         mkdir -p "$cleanup_dir"
@@ -198,10 +203,22 @@ send_backup_to_telegram() {
         info_message+=$'\n✅ Files Uploaded:\n'
         info_message+="$files_list"$'\n'
         info_message+=$'\n📂 Extraction Guide:\n'
-        info_message+=$'🪟 Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
-        info_message+=$'🐧 Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
-        info_message+=$'🍎 macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
-        info_message+=$'⚠️ Always download the .zip and every .zXX part before extracting.'
+        if [ "$extraction_mode" = "part_zip" ]; then
+            info_message+=$'🪟 Windows: Rebuild the archive first, e.g. copy /b backup_xxx.part01.zip+backup_xxx.part02.zip+... backup_xxx.zip, then extract backup_xxx.zip with 7-Zip.\n'
+            info_message+=$'🐧 Linux: Run cat backup_xxx.part*.zip > backup_xxx.zip && unzip backup_xxx.zip.\n'
+            info_message+=$'🍎 macOS: Run cat backup_xxx.part*.zip > backup_xxx.zip && unzip backup_xxx.zip.\n'
+            info_message+=$'⚠️ Always download every .partNN.zip file before rebuilding the archive.'
+        elif [ "$extraction_mode" = "split_zip" ]; then
+            info_message+=$'🪟 Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
+            info_message+=$'🐧 Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
+            info_message+=$'🍎 macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
+            info_message+=$'⚠️ Always download the .zip and every .zXX part before extracting.'
+        else
+            info_message+=$'🪟 Windows: Extract the uploaded archive with 7-Zip.\n'
+            info_message+=$'🐧 Linux: Run unzip backup_xxx.zip.\n'
+            info_message+=$'🍎 macOS: Open the archive with Archive Utility or run unzip backup_xxx.zip.\n'
+            info_message+=$'⚠️ Download the complete archive before extracting.'
+        fi
 
         curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
             -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
@@ -765,7 +782,7 @@ backup_command() {
     local backup_file="$backup_dir/backup_$timestamp.zip"
     local error_messages=()
     local final_backup_paths=()
-    local split_size_arg="47m" # keep Telegram chunks under 50MB
+    local split_size_bytes=$((47 * 1024 * 1024)) # keep Telegram chunks under 50MB
     local staging_root=""
     local temp_dir=""
     local log_file=""
@@ -1405,26 +1422,51 @@ backup_command() {
     if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
-    elif ! (cd "$temp_dir" && zip -rq -s "$split_size_arg" "$backup_file" .) 2>>"$log_file"; then
+    elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
-        find "$backup_dir" -maxdepth 1 -type f \
-            \( -name "backup_*.tar.gz" -o -name "backup_*.zip" -o -name "backup_*.z[0-9][0-9]" \) \
-            ! -name "backup_${timestamp}.zip" \
-            ! -name "backup_${timestamp}.z[0-9][0-9]" \
-            -delete 2>/dev/null || true
+        local archive_size_bytes=0
+        archive_size_bytes=$(stat -c%s "$backup_file" 2>/dev/null || wc -c <"$backup_file")
+
+        if [ "$archive_size_bytes" -gt "$split_size_bytes" ]; then
+            colorized_echo blue "Splitting backup archive into Telegram-sized parts..."
+            if ! split -d -a 2 -b "$split_size_bytes" --additional-suffix=".zip" \
+                "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
+                error_messages+=("Failed to split backup archive.")
+                echo "Failed to split backup archive." >>"$log_file"
+            else
+                rm -f "$backup_file"
+            fi
+        fi
+
+        if [ ${#error_messages[@]} -eq 0 ]; then
+            find "$backup_dir" -maxdepth 1 -type f \
+                \( -name "backup_*.tar.gz" -o -name "backup_*.zip" -o -name "backup_*.z[0-9][0-9]" -o -name "backup_*.part[0-9][0-9].zip" \) \
+                ! -name "backup_${timestamp}.zip" \
+                ! -name "backup_${timestamp}.z[0-9][0-9]" \
+                ! -name "backup_${timestamp}.part[0-9][0-9].zip" \
+                -delete 2>/dev/null || true
+        fi
+    fi
+
+    while IFS= read -r file; do
+        final_backup_paths+=("$file")
+    done < <(find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.part[0-9][0-9].zip" | sort)
+
+    if [ ${#final_backup_paths[@]} -eq 0 ] && [ -f "$backup_file" ]; then
+        final_backup_paths+=("$backup_file")
+    fi
+
+    if [ ${#error_messages[@]} -eq 0 ] && [ ${#final_backup_paths[@]} -gt 0 ]; then
         local backup_size_bytes=0
         local size_file=""
-        while IFS= read -r size_file; do
+        for size_file in "${final_backup_paths[@]}"; do
             [ -n "$size_file" ] || continue
             local size_bytes=0
             size_bytes=$(stat -c%s "$size_file" 2>/dev/null || wc -c <"$size_file")
             backup_size_bytes=$((backup_size_bytes + size_bytes))
-        done < <(
-            find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.z[0-9][0-9]" | sort
-            printf '%s\n' "$backup_file"
-        )
+        done
 
         local backup_size=""
         if command -v numfmt >/dev/null 2>&1; then
@@ -1432,14 +1474,11 @@ backup_command() {
         else
             backup_size=$(awk -v size="$backup_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
         fi
-        colorized_echo green "Backup archive created: $backup_file (Size: $backup_size)"
-    fi
-
-    if [ -f "$backup_file" ]; then
-        while IFS= read -r file; do
-            final_backup_paths+=("$file")
-        done < <(find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.z[0-9][0-9]" | sort)
-        final_backup_paths+=("$backup_file")
+        if [ ${#final_backup_paths[@]} -eq 1 ]; then
+            colorized_echo green "Backup archive created: ${final_backup_paths[0]} (Size: $backup_size)"
+        else
+            colorized_echo green "Backup archive created in ${#final_backup_paths[@]} parts (Total Size: $backup_size)"
+        fi
     fi
 
     if [ ${#error_messages[@]} -gt 0 ]; then
