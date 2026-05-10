@@ -863,15 +863,12 @@ backup_command() {
     esac
 
     cleanup_backup_command() {
-        trap - RETURN
         rm -rf "$temp_dir"
         if [ "$keep_log_file" != true ] && [ -n "$log_file" ]; then
             rm -f "$log_file"
         fi
         rm -rf "$lock_dir"
     }
-
-    trap cleanup_backup_command RETURN
 
     >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
@@ -908,6 +905,7 @@ backup_command() {
         echo "Environment file (.env) not found." >>"$log_file"
         send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
         keep_log_file=true
+        cleanup_backup_command
         return 1
     fi
 
@@ -934,6 +932,7 @@ backup_command() {
         colorized_echo yellow "Please check the log file for details: $log_file"
         keep_log_file=true
         send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
+        cleanup_backup_command
         return 1
     fi
 
@@ -1409,6 +1408,11 @@ backup_command() {
         if ! rsync "${rsync_args[@]}" "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
             error_messages+=("Failed to copy data directory.")
             echo "Failed to copy data directory" >>"$log_file"
+        elif [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
+            local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
+            rm -f "$temp_dir/pasarguard_data/$sqlite_relative_path" \
+                "$temp_dir/pasarguard_data/${sqlite_relative_path}-wal" \
+                "$temp_dir/pasarguard_data/${sqlite_relative_path}-shm" 2>>"$log_file" || true
         fi
     else
         colorized_echo yellow "Data directory $DATA_DIR does not exist. Skipping data directory backup."
@@ -1502,12 +1506,14 @@ backup_command() {
         if [ -f "$ENV_FILE" ]; then
             send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
         fi
+        cleanup_backup_command
         return 1
     fi
 
     if [ ${#final_backup_paths[@]} -eq 0 ]; then
         keep_log_file=true
         colorized_echo red "Backup file was not created. Check log file: $log_file"
+        cleanup_backup_command
         return 1
     fi
 
@@ -1522,4 +1528,5 @@ backup_command() {
     if [ -f "$ENV_FILE" ]; then
         send_backup_to_telegram "$backup_file"
     fi
+    cleanup_backup_command
 }

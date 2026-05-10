@@ -66,9 +66,6 @@ restore_command() {
     local backup_dir="$APP_DIR/backup"
     local restore_staging_root=""
     local temp_restore_dir=""
-    local log_file="/var/log/pasarguard_restore_error.log"
-    >"$log_file"
-    echo "Restore Log - $(date)" >>"$log_file"
 
     # Check if backup directory exists
     if [ ! -d "$backup_dir" ]; then
@@ -88,6 +85,10 @@ restore_command() {
         colorized_echo red "Failed to create restore temp directory."
         exit 1
     fi
+
+    local log_file="${temp_restore_dir}/pasarguard_restore_error.log"
+    >"$log_file"
+    echo "Restore Log - $(date)" >>"$log_file"
 
     # List available backup files (find all backup-related files in backup directory)
     local backup_candidates=()

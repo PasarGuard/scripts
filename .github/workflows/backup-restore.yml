@@ -1,0 +1,50 @@
+name: Backup Restore
+
+on:
+  push:
+    paths:
+      - ".github/workflows/backup-restore.yml"
+      - "lib/pasarguard-backup.sh"
+      - "lib/pasarguard-restore.sh"
+      - "lib/common.sh"
+      - "lib/docker.sh"
+      - "lib/env.sh"
+      - "lib/system.sh"
+      - "tests/backup_restore_roundtrip.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/backup-restore.yml"
+      - "lib/pasarguard-backup.sh"
+      - "lib/pasarguard-restore.sh"
+      - "lib/common.sh"
+      - "lib/docker.sh"
+      - "lib/env.sh"
+      - "lib/system.sh"
+      - "tests/backup_restore_roundtrip.sh"
+  workflow_dispatch:
+
+jobs:
+  backup-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        database:
+          - sqlite
+          - mysql
+          - mariadb
+          - postgresql
+          - timescaledb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync zip unzip sqlite3
+
+      - name: Run backup/restore round-trip
+        run: bash tests/backup_restore_roundtrip.sh "${{ matrix.database }}"
