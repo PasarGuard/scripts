@@ -34,8 +34,6 @@ MYSQL_ROOT_PASSWORD="rootpass"
 DB_USER="appuser"
 DB_PASSWORD="apppass"
 DB_NAME="appdb"
-POSTGRES_SUPERUSER="postgres"
-POSTGRES_SUPERPASS="postgrespass"
 EXPECTED_DB_VALUE="from_backup"
 EXPECTED_SENTINEL_VALUE="sentinel-before-backup"
 EXPECTED_ENV_FLAG="before-backup"
@@ -49,9 +47,18 @@ LATEST_BACKUP=""
 EXTRACTED_BACKUP_DIR=""
 
 cleanup() {
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ] && [ -d "$WORK_DIR" ]; then
+        while IFS= read -r log_path; do
+            [ -n "$log_path" ] || continue
+            printf '\n===== %s =====\n' "$log_path" >&2
+            sed -n '1,220p' "$log_path" >&2 || true
+        done < <(find "$WORK_DIR" -type f -name '*.log' | sort)
+    fi
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     rm -rf "$EXTRACTED_BACKUP_DIR"
     rm -rf "$WORK_DIR"
+    exit "$exit_code"
 }
 trap cleanup EXIT
 
@@ -316,25 +323,17 @@ mutate_mariadb_db() {
 setup_postgresql_container() {
     local image="$1"
     docker run -d --name "$CONTAINER_NAME" \
-        -e POSTGRES_USER="$POSTGRES_SUPERUSER" \
-        -e POSTGRES_PASSWORD="$POSTGRES_SUPERPASS" \
-        -e POSTGRES_DB=postgres \
+        -e POSTGRES_USER="$DB_USER" \
+        -e POSTGRES_PASSWORD="$DB_PASSWORD" \
+        -e POSTGRES_DB="$DB_NAME" \
         "$image" >/dev/null
 
-    wait_for_command 30 docker exec -e PGPASSWORD="$POSTGRES_SUPERPASS" "$CONTAINER_NAME" \
-        pg_isready -U "$POSTGRES_SUPERUSER" -d postgres
-
-    docker exec -e PGPASSWORD="$POSTGRES_SUPERPASS" "$CONTAINER_NAME" \
-        psql -v ON_ERROR_STOP=1 -U "$POSTGRES_SUPERUSER" -d postgres \
-        -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
-
-    docker exec -e PGPASSWORD="$POSTGRES_SUPERPASS" "$CONTAINER_NAME" \
-        psql -v ON_ERROR_STOP=1 -U "$POSTGRES_SUPERUSER" -d postgres \
-        -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+    wait_for_command 30 docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER_NAME" \
+        pg_isready -U "$DB_USER" -d "$DB_NAME"
 
     if [ "$DB_TYPE" = "timescaledb" ]; then
-        docker exec -e PGPASSWORD="$POSTGRES_SUPERPASS" "$CONTAINER_NAME" \
-            psql -v ON_ERROR_STOP=1 -U "$POSTGRES_SUPERUSER" -d "$DB_NAME" \
+        docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER_NAME" \
+            psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" \
             -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
     fi
 

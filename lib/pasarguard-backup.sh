@@ -1228,59 +1228,24 @@ backup_command() {
                         error_messages+=("PostgreSQL container not found or not running.")
                     else
                         container_name="$verified_container"
-                # Local Docker container
-                # Try postgres superuser with DB_PASSWORD first for pg_dumpall (all databases)
-                if [ -n "${DB_PASSWORD:-}" ]; then
-                    colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using postgres superuser)"
-                    export PGPASSWORD="$DB_PASSWORD"
-                    if docker exec "$container_name" pg_dumpall -U postgres >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                        colorized_echo green "PostgreSQL backup completed successfully (all databases)"
-                        unset PGPASSWORD
-                    else
-                        # Fallback to pg_dump with SQL URL credentials
-                        unset PGPASSWORD
-                        colorized_echo yellow "pg_dumpall failed, falling back to pg_dump for specific database"
                         local backup_user="${db_user:-${DB_USER:-postgres}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
 
-                        if [ -z "$backup_password" ] || [ -z "$db_name" ]; then
-                            colorized_echo red "Error: Cannot fallback - missing database name or password in SQLALCHEMY_DATABASE_URL"
-                            error_messages+=("PostgreSQL backup failed - pg_dumpall failed and fallback credentials incomplete.")
+                        if [ -z "$backup_password" ]; then
+                            colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
+                            error_messages+=("PostgreSQL password not found.")
+                        elif [ -z "$db_name" ]; then
+                            colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
+                            error_messages+=("PostgreSQL database name not found.")
                         else
-                            colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
-                            export PGPASSWORD="$backup_password"
-                            if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using user: $backup_user)"
+                            if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                 colorized_echo red "PostgreSQL dump failed. Check log file for details."
                                 error_messages+=("PostgreSQL dump failed.")
                             else
                                 colorized_echo green "PostgreSQL backup completed successfully"
                             fi
-                            unset PGPASSWORD
                         fi
-                    fi
-                else
-                    # No DB_PASSWORD, use SQL URL credentials for pg_dump
-                    local backup_user="${db_user:-${DB_USER:-postgres}}"
-                    local backup_password="${db_password:-${DB_PASSWORD:-}}"
-
-                    if [ -z "$backup_password" ]; then
-                        colorized_echo red "Error: Database password not found. Check DB_PASSWORD or SQLALCHEMY_DATABASE_URL in .env"
-                        error_messages+=("PostgreSQL password not found.")
-                    elif [ -z "$db_name" ]; then
-                        colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
-                        error_messages+=("PostgreSQL database name not found.")
-                    else
-                        colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using app user)"
-                        export PGPASSWORD="$backup_password"
-                        if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                            colorized_echo red "PostgreSQL dump failed. Check log file for details."
-                            error_messages+=("PostgreSQL dump failed.")
-                        else
-                            colorized_echo green "PostgreSQL backup completed successfully"
-                        fi
-                        unset PGPASSWORD
-                    fi
-                fi
                     fi
                 fi
             else
@@ -1340,14 +1305,12 @@ backup_command() {
                             error_messages+=("TimescaleDB database name not found.")
                         else
                             colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using user: $backup_user)"
-                            export PGPASSWORD="$backup_password"
-                            if ! docker exec "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                 colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
                                 error_messages+=("TimescaleDB dump failed for database '$db_name'.")
                             else
                                 colorized_echo green "TimescaleDB backup completed successfully"
                             fi
-                            unset PGPASSWORD
                         fi
                     fi
                 fi

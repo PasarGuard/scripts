@@ -739,6 +739,8 @@ restore_command() {
                 local restore_user="${current_db_user:-${db_user:-${DB_USER:-postgres}}}"
                 local restore_password="${current_db_password:-${db_password:-${DB_PASSWORD:-}}}"
                 local restore_db_name="${current_db_name:-${db_name:-${DB_NAME:-postgres}}}"
+                local admin_user="${current_db_user:-${db_user:-${DB_USER:-postgres}}}"
+                local admin_password="${current_db_password:-${db_password:-${DB_PASSWORD:-$restore_password}}}"
 
                 if [ -z "$restore_password" ]; then
                     colorized_echo red "No database password found for restore."
@@ -746,7 +748,6 @@ restore_command() {
                     exit 1
                 fi
 
-            export PGPASSWORD="$restore_password"
             local restore_success=false
 
             if [ "$db_type" = "timescaledb" ]; then
@@ -767,24 +768,24 @@ restore_command() {
 
                 # Drop and recreate the target database for a clean slate
                 colorized_echo blue "Dropping and recreating database '$target_db_name'..."
-                docker exec "$container_name" psql -U postgres -d postgres \
+                docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
                     -v db_name="$target_db_name" \
                     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'db_name' AND pid <> pg_backend_pid();" \
                     >>"$log_file" 2>&1
-                docker exec "$container_name" psql -U postgres -d postgres \
+                docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
                     -v db_name="$target_db_name" \
                     -c "DROP DATABASE IF EXISTS :\"db_name\";" >>"$log_file" 2>&1
-                docker exec "$container_name" psql -U postgres -d postgres \
+                docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
                     -v db_name="$target_db_name" -v db_owner="$target_db_owner" \
                     -c "CREATE DATABASE :\"db_name\" OWNER :\"db_owner\";" >>"$log_file" 2>&1
 
                 # Create the timescaledb extension in the fresh database
-                docker exec "$container_name" psql -U postgres --dbname="$target_db_name" \
+                docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$target_db_name" \
                     -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >>"$log_file" 2>&1
 
                 # Call pre_restore to put TimescaleDB into restore mode
                 colorized_echo blue "Calling timescaledb_pre_restore()..."
-                docker exec "$container_name" psql -U postgres --dbname="$target_db_name" \
+                docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$target_db_name" \
                     -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1
 
                 # Filter out extension DROP/CREATE statements from the dump.
@@ -796,12 +797,12 @@ restore_command() {
 
                 # Restore the filtered dump with ON_ERROR_STOP so psql exits non-zero on SQL errors
                 colorized_echo blue "Restoring database dump..."
-                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
+                if docker exec -i -e PGPASSWORD="$restore_password" "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
                     restore_success=true
                 else
-                    # Fallback: try with postgres superuser
-                    colorized_echo yellow "Trying with postgres superuser..."
-                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres --dbname="$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
+                    # Fallback: try with the configured admin user.
+                    colorized_echo yellow "Trying with admin user..."
+                    if docker exec -i -e PGPASSWORD="$admin_password" "$container_name" psql -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$target_db_name" < "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"; then
                         restore_success=true
                     fi
                 fi
@@ -811,7 +812,7 @@ restore_command() {
 
                 # Call post_restore regardless of outcome to leave DB in a usable state
                 colorized_echo blue "Calling timescaledb_post_restore()..."
-                docker exec "$container_name" psql -U postgres --dbname="$target_db_name" \
+                docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$target_db_name" \
                     -c "SELECT timescaledb_post_restore();" >>"$log_file" 2>&1
 
                 if [ "$restore_success" = true ]; then
@@ -820,26 +821,24 @@ restore_command() {
             else
                 # Plain PostgreSQL restore with ON_ERROR_STOP so psql exits non-zero on SQL errors
                 colorized_echo blue "Attempting restore using app user '$restore_user' to database '$restore_db_name'..."
-                if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$restore_db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                if docker exec -i -e PGPASSWORD="$restore_password" "$container_name" psql -v ON_ERROR_STOP=1 -U "$restore_user" -d "$restore_db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                     colorized_echo green "$db_type database restored successfully."
                     restore_success=true
                 else
-                    # If that fails, try using postgres superuser
-                    colorized_echo yellow "Trying with postgres superuser..."
-                    if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d "$restore_db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    # If that fails, try using the configured admin user.
+                    colorized_echo yellow "Trying with admin user..."
+                    if docker exec -i -e PGPASSWORD="$admin_password" "$container_name" psql -v ON_ERROR_STOP=1 -U "$admin_user" -d "$restore_db_name" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "$db_type database restored successfully."
                         restore_success=true
                     else
                         # Try restoring to postgres database (for pg_dumpall backups)
-                        if docker exec -i "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                        if docker exec -i -e PGPASSWORD="$admin_password" "$container_name" psql -v ON_ERROR_STOP=1 -U "$admin_user" -d postgres < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                             colorized_echo green "$db_type database restored successfully."
                             restore_success=true
                         fi
                     fi
                 fi
             fi
-
-            unset PGPASSWORD
 
             if [ "$restore_success" = false ]; then
                 colorized_echo red "Failed to restore $db_type database."
