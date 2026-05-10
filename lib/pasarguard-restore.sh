@@ -765,19 +765,19 @@ restore_command() {
                 # differs from the backup source.
                 local target_db_name="$restore_db_name"
                 local target_db_owner="${current_db_user:-$restore_user}"
+                local target_db_name_sql="${target_db_name//\'/\'\'}"
+                local target_db_name_ident="${target_db_name//\"/\"\"}"
+                local target_db_owner_ident="${target_db_owner//\"/\"\"}"
 
                 # Drop and recreate the target database for a clean slate
                 colorized_echo blue "Dropping and recreating database '$target_db_name'..."
                 docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
-                    -v db_name="$target_db_name" \
-                    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'db_name' AND pid <> pg_backend_pid();" \
+                    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$target_db_name_sql' AND pid <> pg_backend_pid();" \
                     >>"$log_file" 2>&1
                 docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
-                    -v db_name="$target_db_name" \
-                    -c "DROP DATABASE IF EXISTS :\"db_name\";" >>"$log_file" 2>&1
+                    -c "DROP DATABASE IF EXISTS \"$target_db_name_ident\";" >>"$log_file" 2>&1
                 docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
-                    -v db_name="$target_db_name" -v db_owner="$target_db_owner" \
-                    -c "CREATE DATABASE :\"db_name\" OWNER :\"db_owner\";" >>"$log_file" 2>&1
+                    -c "CREATE DATABASE \"$target_db_name_ident\" OWNER \"$target_db_owner_ident\";" >>"$log_file" 2>&1
 
                 # Create the timescaledb extension in the fresh database
                 docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$target_db_name" \
