@@ -3,11 +3,20 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_TYPE="${1:-}"
+ARCHIVE_MODE="${2:-single}"
 
 if [ -z "$DB_TYPE" ]; then
-    printf 'Usage: %s <sqlite|mysql|mariadb|postgresql|timescaledb>\n' "${BASH_SOURCE[0]}" >&2
+    printf 'Usage: %s <sqlite|mysql|mariadb|postgresql|timescaledb> [single|multipart]\n' "${BASH_SOURCE[0]}" >&2
     exit 1
 fi
+
+case "$ARCHIVE_MODE" in
+single | multipart) ;;
+*)
+    printf 'Unsupported archive mode: %s\n' "$ARCHIVE_MODE" >&2
+    exit 1
+    ;;
+esac
 
 # shellcheck source=lib/common.sh
 source "$ROOT_DIR/lib/common.sh"
@@ -45,6 +54,9 @@ ORIGINAL_PAYLOAD_SHA=""
 ORIGINAL_SQLITE_DUMP_SHA=""
 LATEST_BACKUP=""
 EXTRACTED_BACKUP_DIR=""
+COMBINED_BACKUP_ARCHIVE=""
+MULTIPART_SPLIT_SIZE_BYTES=2048
+MULTIPART_SPLIT_THRESHOLD_BYTES=3072
 
 cleanup() {
     local exit_code=$?
@@ -57,6 +69,7 @@ cleanup() {
     fi
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     rm -rf "$EXTRACTED_BACKUP_DIR"
+    rm -f "$COMBINED_BACKUP_ARCHIVE"
     rm -rf "$WORK_DIR"
     exit "$exit_code"
 }
@@ -155,8 +168,12 @@ wait_for_mysql_root_query() {
 write_common_files() {
     mkdir -p "$APP_DIR" "$DATA_DIR" "$BACKUP_DIR"
     printf '%s\n' "$EXPECTED_SENTINEL_VALUE" >"$DATA_DIR/sentinel.txt"
-    dd if=/dev/zero of="$DATA_DIR/payload.bin" bs=1024 count=4 status=none
-    printf 'payload-%s\n' "$DB_TYPE" >>"$DATA_DIR/payload.bin"
+    if [ "$ARCHIVE_MODE" = "multipart" ]; then
+        dd if=/dev/urandom of="$DATA_DIR/payload.bin" bs=1024 count=8 status=none
+    else
+        dd if=/dev/zero of="$DATA_DIR/payload.bin" bs=1024 count=4 status=none
+        printf 'payload-%s\n' "$DB_TYPE" >>"$DATA_DIR/payload.bin"
+    fi
 }
 
 write_sqlite_env() {
@@ -392,7 +409,19 @@ assert_zip_contains_required_files() {
     done <<<"$required_list"
 }
 
+combine_split_backup_parts() {
+    local combined_archive="$1"
+    local part_file=""
+
+    : >"$combined_archive"
+    while IFS= read -r part_file; do
+        [ -n "$part_file" ] || continue
+        cat "$part_file" >>"$combined_archive"
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.part[0-9][0-9].zip' | sort)
+}
+
 verify_backup_archive_contents() {
+    local archive_to_verify="$1"
     local expected_files=""
 
     if [ -n "$EXTRACTED_BACKUP_DIR" ]; then
@@ -400,7 +429,7 @@ verify_backup_archive_contents() {
     fi
     EXTRACTED_BACKUP_DIR="$(mktemp -d "$WORK_DIR/backup_extract.XXXXXX")"
 
-    unzip -q "$LATEST_BACKUP" -d "$EXTRACTED_BACKUP_DIR"
+    unzip -q "$archive_to_verify" -d "$EXTRACTED_BACKUP_DIR"
 
     if [ "$DB_TYPE" = "sqlite" ]; then
         expected_files=$'.env\ndb_backup.sqlite\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
@@ -409,9 +438,9 @@ verify_backup_archive_contents() {
     fi
 
     if [ "$DB_TYPE" = "sqlite" ]; then
-        assert_zip_contains_required_files "$LATEST_BACKUP" "$expected_files"
+        assert_zip_contains_required_files "$archive_to_verify" "$expected_files"
     else
-        assert_zip_contains_exact_files "$LATEST_BACKUP" "$expected_files"
+        assert_zip_contains_exact_files "$archive_to_verify" "$expected_files"
     fi
     assert_equals "$(sha256sum "$EXTRACTED_BACKUP_DIR/.env" | awk '{print $1}')" "$ORIGINAL_ENV_SHA" "Backed up .env contents changed."
     assert_equals "$(sha256sum "$EXTRACTED_BACKUP_DIR/docker-compose.yml" | awk '{print $1}')" "$ORIGINAL_COMPOSE_SHA" "Backed up docker-compose.yml contents changed."
@@ -448,19 +477,59 @@ verify_restored_files() {
 
 verify_backup_created() {
     local backup_count
-    backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' \) | wc -l | awk '{print $1}')
+    backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) | wc -l | awk '{print $1}')
     if [ "$backup_count" -lt 1 ]; then
         printf 'No backup archive was created in %s\n' "$BACKUP_DIR" >&2
         exit 1
     fi
 
-    LATEST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.zip' ! -name 'backup_*.part*.zip' | sort | tail -n 1)"
-    if [ -z "$LATEST_BACKUP" ] || [ ! -f "$LATEST_BACKUP" ]; then
-        printf 'Expected a single zip archive in %s but did not find one\n' "$BACKUP_DIR" >&2
-        exit 1
-    fi
+    if [ "$ARCHIVE_MODE" = "multipart" ]; then
+        local part_count
+        local base_zip_count
+        local total_parts_size
+        local combined_size
+        local largest_part_size
 
-    verify_backup_archive_contents
+        part_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.part[0-9][0-9].zip' | wc -l | awk '{print $1}')
+        if [ "$part_count" -lt 2 ]; then
+            printf 'Expected a multipart backup in %s but found only %s part(s)\n' "$BACKUP_DIR" "$part_count" >&2
+            exit 1
+        fi
+
+        base_zip_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.zip' ! -name 'backup_*.part*.zip' | wc -l | awk '{print $1}')
+        if [ "$base_zip_count" -ne 0 ]; then
+            printf 'Expected multipart backup to remove the base zip, but found %s base zip file(s)\n' "$base_zip_count" >&2
+            exit 1
+        fi
+
+        LATEST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.part[0-9][0-9].zip' | sort | head -n 1)"
+        COMBINED_BACKUP_ARCHIVE="$WORK_DIR/combined-backup.zip"
+        combine_split_backup_parts "$COMBINED_BACKUP_ARCHIVE"
+
+        total_parts_size=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.part[0-9][0-9].zip' -printf '%s\n' | awk '{sum += $1} END {print sum + 0}')
+        combined_size=$(stat -c%s "$COMBINED_BACKUP_ARCHIVE" 2>/dev/null || wc -c <"$COMBINED_BACKUP_ARCHIVE")
+        assert_equals "$combined_size" "$total_parts_size" "Combined multipart archive size did not match the sum of its parts."
+        if [ "$combined_size" -le "$MULTIPART_SPLIT_THRESHOLD_BYTES" ]; then
+            printf 'Expected multipart archive to exceed %s bytes, got %s bytes\n' "$MULTIPART_SPLIT_THRESHOLD_BYTES" "$combined_size" >&2
+            exit 1
+        fi
+
+        largest_part_size=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.part[0-9][0-9].zip' -printf '%s\n' | sort -nr | head -n 1)
+        if [ -z "$largest_part_size" ] || [ "$largest_part_size" -gt "$MULTIPART_SPLIT_SIZE_BYTES" ]; then
+            printf 'Multipart backup part exceeded %s bytes (largest part: %s)\n' "$MULTIPART_SPLIT_SIZE_BYTES" "${largest_part_size:-missing}" >&2
+            exit 1
+        fi
+
+        verify_backup_archive_contents "$COMBINED_BACKUP_ARCHIVE"
+    else
+        LATEST_BACKUP="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.zip' ! -name 'backup_*.part*.zip' | sort | tail -n 1)"
+        if [ -z "$LATEST_BACKUP" ] || [ ! -f "$LATEST_BACKUP" ]; then
+            printf 'Expected a single zip archive in %s but did not find one\n' "$BACKUP_DIR" >&2
+            exit 1
+        fi
+
+        verify_backup_archive_contents "$LATEST_BACKUP"
+    fi
 }
 
 prepare_case() {
@@ -540,6 +609,13 @@ mutate_database_after_backup() {
 }
 
 main() {
+    if [ "$ARCHIVE_MODE" = "multipart" ]; then
+        export BACKUP_SPLIT_SIZE_BYTES="$MULTIPART_SPLIT_SIZE_BYTES"
+        export BACKUP_SPLIT_THRESHOLD_BYTES="$MULTIPART_SPLIT_THRESHOLD_BYTES"
+    fi
+
+    printf 'Running backup/restore round-trip for %s with archive mode: %s\n' "$DB_TYPE" "$ARCHIVE_MODE"
+
     prepare_case
     backup_command
     verify_backup_created
@@ -548,7 +624,7 @@ main() {
     run_restore
     verify_restored_files
     verify_restored_database
-    printf 'Backup/restore round-trip passed for %s\n' "$DB_TYPE"
+    printf 'Backup/restore round-trip passed for %s (%s)\n' "$DB_TYPE" "$ARCHIVE_MODE"
 }
 
 main

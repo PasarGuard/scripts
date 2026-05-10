@@ -36,6 +36,9 @@ jobs:
           - mariadb
           - postgresql
           - timescaledb
+        archive_mode:
+          - single
+          - multipart
 
     steps:
       - name: Checkout
@@ -47,4 +50,4 @@ jobs:
           sudo apt-get install -y rsync zip unzip sqlite3
 
       - name: Run backup/restore round-trip
-        run: bash tests/backup_restore_roundtrip.sh "${{ matrix.database }}"
+        run: bash tests/backup_restore_roundtrip.sh "${{ matrix.database }}" "${{ matrix.archive_mode }}"

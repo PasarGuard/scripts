@@ -782,7 +782,8 @@ backup_command() {
     local backup_file="$backup_dir/backup_$timestamp.zip"
     local error_messages=()
     local final_backup_paths=()
-    local split_size_bytes=$((47 * 1024 * 1024)) # keep Telegram chunks under 50MB
+    local split_size_bytes="${BACKUP_SPLIT_SIZE_BYTES:-$((47 * 1024 * 1024))}" # keep Telegram chunks under 50MB
+    local split_threshold_bytes="${BACKUP_SPLIT_THRESHOLD_BYTES:-$split_size_bytes}"
     local staging_root=""
     local temp_dir=""
     local log_file=""
@@ -1407,7 +1408,7 @@ backup_command() {
         local archive_size_bytes=0
         archive_size_bytes=$(stat -c%s "$backup_file" 2>/dev/null || wc -c <"$backup_file")
 
-        if [ "$archive_size_bytes" -gt "$split_size_bytes" ]; then
+        if [ "$archive_size_bytes" -gt "$split_threshold_bytes" ]; then
             colorized_echo blue "Splitting backup archive into Telegram-sized parts..."
             if ! split -d -a 2 --numeric-suffixes=1 -b "$split_size_bytes" --additional-suffix=".zip" \
                 "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
