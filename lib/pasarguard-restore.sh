@@ -369,27 +369,23 @@ restore_command() {
         exit 1
     fi
 
-    # Check for binary content or null bytes (warning only, not fatal)
-    if grep -q $'\x00' "$extracted_env" 2>/dev/null; then
-        colorized_echo yellow "WARNING: .env file contains null bytes, cleaning..."
-    fi
-
     local env_vars_loaded=0
 
-    # Check if file has null bytes - if not, use it directly
     local env_file_to_use="$extracted_env"
-    if grep -q $'\x00' "$extracted_env" 2>/dev/null; then
-        # File has null bytes, create cleaned version
-        local cleaned_env="$temp_restore_dir/pasarguard_env_cleaned"
-        set +e
-        tr -d '\000' < "$extracted_env" > "$cleaned_env" 2>/dev/null
-        local tr_result=$?
-        set -e
-        if [ $tr_result -eq 0 ] && [ -s "$cleaned_env" ]; then
+    local cleaned_env="$temp_restore_dir/pasarguard_env_cleaned"
+    set +e
+    tr -d '\000' < "$extracted_env" > "$cleaned_env" 2>/dev/null
+    local tr_result=$?
+    set -e
+    if [ $tr_result -eq 0 ] && [ -s "$cleaned_env" ]; then
+        if ! cmp -s "$extracted_env" "$cleaned_env" 2>/dev/null; then
+            colorized_echo yellow "WARNING: .env file contains null bytes, cleaning..."
             env_file_to_use="$cleaned_env"
         else
             rm -f "$cleaned_env"
         fi
+    else
+        rm -f "$cleaned_env"
     fi
 
     # Use the EXACT same pattern as backup_command function
@@ -576,6 +572,8 @@ restore_command() {
             rm -rf "$temp_restore_dir"
             exit 1
         fi
+
+        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
 
         if [ -f "$sqlite_file" ]; then
             cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
@@ -879,6 +877,9 @@ restore_command() {
             echo "Failed to restore data directory from $extracted_data_dir to $DATA_DIR" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
+        fi
+        if [ "$db_type" = "sqlite" ] && [ -n "${sqlite_file:-}" ]; then
+            rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
         fi
         colorized_echo green "Data directory restored to $DATA_DIR."
     else
