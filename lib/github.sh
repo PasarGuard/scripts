@@ -16,6 +16,48 @@ github_download_file() {
     curl -fsSL "$url" -o "$target_path"
 }
 
+backup_scripts() {
+    local backup_dir=""
+    backup_dir=$(create_temp_dir "scripts-backup")
+
+    # Backup main scripts
+    [ -f "/usr/local/bin/pasarguard" ] && cp "/usr/local/bin/pasarguard" "$backup_dir/"
+    [ -f "/usr/local/bin/pg-node" ] && cp "/usr/local/bin/pg-node" "$backup_dir/"
+
+    # Backup shared libraries
+    if [ -d "$SHARED_LIB_INSTALL_DIR" ]; then
+        mkdir -p "$backup_dir/lib"
+        # Only copy if directory is not empty
+        if [ "$(ls -A "$SHARED_LIB_INSTALL_DIR")" ]; then
+            cp -r "$SHARED_LIB_INSTALL_DIR/"* "$backup_dir/lib/"
+        fi
+    fi
+
+    printf '%s\n' "$backup_dir"
+}
+
+restore_scripts() {
+    local backup_dir="$1"
+    [ -z "$backup_dir" ] && return 1
+
+    # Restore main scripts
+    [ -f "$backup_dir/pasarguard" ] && install -m 755 "$backup_dir/pasarguard" "/usr/local/bin/pasarguard"
+    [ -f "$backup_dir/pg-node" ] && install -m 755 "$backup_dir/pg-node" "/usr/local/bin/pg-node"
+
+    # Restore shared libraries
+    if [ -d "$backup_dir/lib" ]; then
+        mkdir -p "$SHARED_LIB_INSTALL_DIR"
+        if [ "$(ls -A "$backup_dir/lib")" ]; then
+            install -m 644 "$backup_dir/lib/"* "$SHARED_LIB_INSTALL_DIR/"
+        fi
+    fi
+}
+
+cleanup_backup() {
+    local backup_dir="$1"
+    [ -n "$backup_dir" ] && rm -rf "$backup_dir"
+}
+
 github_install_script_from_repo() {
     local repo="$1"
     local script_name="$2"
@@ -70,8 +112,14 @@ install_shared_libs_from_repo() {
     mkdir -p "$SHARED_LIB_INSTALL_DIR"
 
     for lib_name in "$@"; do
-        github_download_file "$(github_raw_url "$fetch_repo" "lib/$lib_name")" "$tmp_dir/$lib_name"
-        install -m 644 "$tmp_dir/$lib_name" "$SHARED_LIB_INSTALL_DIR/$lib_name"
+        if ! github_download_file "$(github_raw_url "$fetch_repo" "lib/$lib_name")" "$tmp_dir/$lib_name"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        if ! install -m 644 "$tmp_dir/$lib_name" "$SHARED_LIB_INSTALL_DIR/$lib_name"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     done
 
     rm -rf "$tmp_dir"

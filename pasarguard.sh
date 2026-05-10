@@ -1763,8 +1763,25 @@ update_command() {
 update_pasarguard_script() {
     FETCH_REPO="PasarGuard/scripts"
     colorized_echo blue "Updating pasarguard script"
-    install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh
-    github_install_script_from_repo "$FETCH_REPO" "pasarguard.sh" "pasarguard"
+
+    local backup_dir
+    backup_dir=$(backup_scripts)
+
+    if ! install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh; then
+        colorized_echo red "Failed to update shared libraries. Restoring from backup..."
+        restore_scripts "$backup_dir"
+        cleanup_backup "$backup_dir"
+        exit 1
+    fi
+
+    if ! github_install_script_from_repo "$FETCH_REPO" "pasarguard.sh" "pasarguard"; then
+        colorized_echo red "Failed to update pasarguard script. Restoring from backup..."
+        restore_scripts "$backup_dir"
+        cleanup_backup "$backup_dir"
+        exit 1
+    fi
+
+    cleanup_backup "$backup_dir"
     colorized_echo green "pasarguard script updated successfully"
 }
 

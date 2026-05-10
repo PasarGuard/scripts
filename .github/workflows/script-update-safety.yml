@@ -1,0 +1,32 @@
+name: Script Update Safety
+
+on:
+  push:
+    paths:
+      - ".github/workflows/script-update-safety.yml"
+      - "lib/github.sh"
+      - "lib/common.sh"
+      - "pasarguard.sh"
+      - "pg-node.sh"
+      - "tests/test_script_update_safety.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/script-update-safety.yml"
+      - "lib/github.sh"
+      - "lib/common.sh"
+      - "pasarguard.sh"
+      - "pg-node.sh"
+      - "tests/test_script_update_safety.sh"
+  workflow_dispatch:
+
+jobs:
+  test-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run script update safety test
+        run: bash tests/test_script_update_safety.sh
