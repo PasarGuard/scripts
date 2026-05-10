@@ -763,6 +763,7 @@ backup_command() {
     local error_messages=()
     local final_backup_paths=()
     local split_size_arg="47m" # keep Telegram chunks under 50MB
+    local staging_root=""
     local temp_dir=""
     local log_file=""
     # Keep the lock with the backup artifacts so it is not affected by sticky-dir
@@ -775,12 +776,20 @@ backup_command() {
         return 1
     fi
 
-    if ! temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pasarguard_backup.XXXXXX"); then
+    # Backups can be large, so avoid /tmp by default and stage beside the final
+    # archive unless BACKUP_TMPDIR is explicitly set.
+    staging_root="${BACKUP_TMPDIR:-$backup_dir}"
+    if ! mkdir -p "$staging_root"; then
+        colorized_echo red "Failed to prepare backup staging directory: $staging_root"
+        return 1
+    fi
+
+    if ! temp_dir=$(mktemp -d "${staging_root}/pasarguard_backup.XXXXXX"); then
         colorized_echo red "Failed to create backup temp directory."
         return 1
     fi
 
-    if ! log_file=$(mktemp "${TMPDIR:-/tmp}/pasarguard_backup_error.XXXXXX.log"); then
+    if ! log_file=$(mktemp "${staging_root}/pasarguard_backup_error.XXXXXX.log"); then
         colorized_echo red "Failed to create backup log file."
         rm -rf "$temp_dir"
         return 1
@@ -1358,7 +1367,15 @@ backup_command() {
     colorized_echo blue "Copying data directory..."
     # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
     if [ -d "$DATA_DIR" ]; then
-        if ! rsync -av --exclude 'xray-core' --exclude 'mysql' --exclude 'mariadb' --exclude 'postgresql' --exclude 'timescaledb' "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
+        local rsync_args=(-av --exclude 'xray-core' --exclude 'mysql' --exclude 'mariadb' --exclude 'postgresql' --exclude 'timescaledb')
+
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
+            local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
+            rsync_args+=(--exclude "$sqlite_relative_path")
+            echo "Excluding SQLite database from data directory copy: $sqlite_relative_path" >>"$log_file"
+        fi
+
+        if ! rsync "${rsync_args[@]}" "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
             error_messages+=("Failed to copy data directory.")
             echo "Failed to copy data directory" >>"$log_file"
         fi
