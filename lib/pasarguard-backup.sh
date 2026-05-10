@@ -74,7 +74,10 @@ send_backup_to_telegram() {
         server_ip="Unknown IP"
     fi
     local backup_dir="$APP_DIR/backup"
-    local latest_backup=$(ls -t "$backup_dir" 2>/dev/null | head -n 1)
+    local latest_backup=""
+    latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
+        \( -name 'backup_*.tar.gz' -o -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) \
+        -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
 
     if [ -z "$latest_backup" ]; then
         colorized_echo red "No backups found to send."
@@ -1411,7 +1414,24 @@ backup_command() {
             ! -name "backup_${timestamp}.zip" \
             ! -name "backup_${timestamp}.z[0-9][0-9]" \
             -delete 2>/dev/null || true
-        local backup_size=$(du -h "$backup_file" | cut -f1)
+        local backup_size_bytes=0
+        local size_file=""
+        while IFS= read -r size_file; do
+            [ -n "$size_file" ] || continue
+            local size_bytes=0
+            size_bytes=$(stat -c%s "$size_file" 2>/dev/null || wc -c <"$size_file")
+            backup_size_bytes=$((backup_size_bytes + size_bytes))
+        done < <(
+            find "$backup_dir" -maxdepth 1 -type f -name "backup_${timestamp}.z[0-9][0-9]" | sort
+            printf '%s\n' "$backup_file"
+        )
+
+        local backup_size=""
+        if command -v numfmt >/dev/null 2>&1; then
+            backup_size=$(numfmt --to=iec --suffix=B "$backup_size_bytes" 2>/dev/null || awk -v size="$backup_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
+        else
+            backup_size=$(awk -v size="$backup_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
+        fi
         colorized_echo green "Backup archive created: $backup_file (Size: $backup_size)"
     fi
 
