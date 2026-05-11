@@ -986,14 +986,15 @@ backup_command() {
             url_part="${url_part%%#*}"
 
             # Extract auth part (user:password@)
-            if [[ "$url_part" =~ ^([^@]+)@(.+)$ ]]; then
-                local auth_part="${BASH_REMATCH[1]}"
-                url_part="${BASH_REMATCH[2]}"
+            # Use the last '@' as the separator between auth and host
+            if [[ "$url_part" == *@* ]]; then
+                local auth_part="${url_part%@*}"
+                url_part="${url_part##*@}"
 
-                # Extract username and password
-                if [[ "$auth_part" =~ ^([^:]+):(.+)$ ]]; then
-                    db_user="${BASH_REMATCH[1]}"
-                    db_password="${BASH_REMATCH[2]}"
+                # Extract username and password (first ':' is the separator)
+                if [[ "$auth_part" == *:* ]]; then
+                    db_user="${auth_part%%:*}"
+                    db_password="${auth_part#*:}"
                 else
                     db_user="$auth_part"
                 fi
