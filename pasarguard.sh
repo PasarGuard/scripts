@@ -1924,79 +1924,85 @@ usage() {
     echo
 }
 
-case "$1" in
-up)
-    shift
-    up_command "$@"
-    ;;
-down)
-    shift
-    down_command "$@"
-    ;;
-restart)
-    shift
-    restart_command "$@"
-    ;;
-status)
-    shift
-    status_command "$@"
-    ;;
-logs)
-    shift
-    logs_command "$@"
-    ;;
-cli)
-    shift
-    cli_command "$@"
-    ;;
-tui)
-    shift
-    tui_command "$@"
-    ;;
-backup)
-    shift
-    backup_command "$@"
-    ;;
-backup-service)
-    shift
-    backup_service "$@"
-    ;;
-restore)
-    shift
-    restore_command "$@"
-    ;;
-install)
-    shift
-    install_command "$@"
-    ;;
-update)
-    shift
-    update_command "$@"
-    ;;
-uninstall)
-    shift
-    uninstall_command "$@"
-    ;;
-install-script)
-    shift
-    install_pasarguard_script "$@"
-    ;;
-install-node)
-    shift
-    install_node_command "$@"
-    ;;
-edit)
-    shift
-    edit_command "$@"
-    ;;
-edit-env)
-    shift
-    edit_env_command "$@"
-    ;;
-completion)
-    generate_completion
-    ;;
-help | *)
-    usage
-    ;;
-esac
+pasarguard_main() {
+    case "$1" in
+    up)
+        shift
+        up_command "$@"
+        ;;
+    down)
+        shift
+        down_command "$@"
+        ;;
+    restart)
+        shift
+        restart_command "$@"
+        ;;
+    status)
+        shift
+        status_command "$@"
+        ;;
+    logs)
+        shift
+        logs_command "$@"
+        ;;
+    cli)
+        shift
+        cli_command "$@"
+        ;;
+    tui)
+        shift
+        tui_command "$@"
+        ;;
+    backup)
+        shift
+        backup_command "$@"
+        ;;
+    backup-service)
+        shift
+        backup_service "$@"
+        ;;
+    restore)
+        shift
+        restore_command "$@"
+        ;;
+    install)
+        shift
+        install_command "$@"
+        ;;
+    update)
+        shift
+        update_command "$@"
+        ;;
+    uninstall)
+        shift
+        uninstall_command "$@"
+        ;;
+    install-script)
+        shift
+        install_pasarguard_script "$@"
+        ;;
+    install-node)
+        shift
+        install_node_command "$@"
+        ;;
+    edit)
+        shift
+        edit_command "$@"
+        ;;
+    edit-env)
+        shift
+        edit_env_command "$@"
+        ;;
+    completion)
+        generate_completion
+        ;;
+    help | *)
+        usage
+        ;;
+    esac
+}
+
+if [ "${PASARGUARD_SOURCE_ONLY:-false}" != "true" ]; then
+    pasarguard_main "$@"
+fi
