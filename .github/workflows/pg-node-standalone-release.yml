@@ -1,0 +1,47 @@
+name: PgNode Standalone Release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+jobs:
+  build-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build standalone bundle
+        run: |
+          set -euo pipefail
+          BUNDLE_ROOT="dist/pg-node-standalone"
+          mkdir -p "$BUNDLE_ROOT/lib" "$BUNDLE_ROOT/iran-sanction" "$BUNDLE_ROOT/docker-compose" "$BUNDLE_ROOT/pg-node-assets"
+          cp pg-node.sh "$BUNDLE_ROOT/"
+          cp iran-sanction/pg-node-standalone.sh "$BUNDLE_ROOT/iran-sanction/"
+          cp lib/common.sh "$BUNDLE_ROOT/lib/"
+          cp lib/system.sh "$BUNDLE_ROOT/lib/"
+          cp lib/docker.sh "$BUNDLE_ROOT/lib/"
+          cp lib/github.sh "$BUNDLE_ROOT/lib/"
+          cp iran-sanction/mirror.sh "$BUNDLE_ROOT/iran-sanction/"
+          cp docker-compose/node.yml "$BUNDLE_ROOT/docker-compose/"
+          cp pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/"
+          cp iran-sanction/README-pg-node-standalone.md "$BUNDLE_ROOT/README.md"
+          tar -czf dist/pg-node-standalone.tar.gz -C dist pg-node-standalone
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-node-standalone
+          path: dist/pg-node-standalone.tar.gz
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" dist/pg-node-standalone.tar.gz --clobber

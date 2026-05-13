@@ -11,10 +11,8 @@ install_docker() {
 detect_compose() {
     if docker compose version >/dev/null 2>&1; then
         COMPOSE='docker compose'
-    elif docker-compose version >/dev/null 2>&1; then
-        COMPOSE='docker-compose'
     else
-        die "docker compose not found"
+        die "docker compose v2 not found"
     fi
 }
 

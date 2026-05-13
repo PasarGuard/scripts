@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${PG_NODE_SCRIPT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
 REQUIRED_SHARED_LIBS="common.sh system.sh docker.sh github.sh"
 if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
@@ -104,6 +104,13 @@ COMMAND="$1"
 # Fetch IP address from ifconfig.io API
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
+NODE_IP="${NODE_IP_V4:-}"
+if [ -z "$NODE_IP" ]; then
+    NODE_IP="${NODE_IP_V6:-}"
+fi
+if [ -z "$NODE_IP" ]; then
+    NODE_IP="127.0.0.1"
+fi
 if [[ "$1" == "install" || "$1" == "install-script" ]] && [ -z "$APP_NAME" ]; then
     APP_NAME="pg-node"
 fi
@@ -1906,97 +1913,103 @@ renew_cert_command() {
     restart_command
 }
 
-# Bring existing env SSL paths in line with the current APP_NAME (safe no-op if not installed/default)
-sync_env_ssl_paths
-# Main command router
-case "$1" in
-install)
-    shift
-    install_command "$@"
-    ;;
-update)
-    shift
-    update_command "$@"
-    ;;
-uninstall)
-    uninstall_command
-    ;;
-up)
-    shift
-    up_command "$@"
-    ;;
-down)
-    down_command
-    ;;
-restart)
-    shift
-    restart_command "$@"
-    ;;
-status)
-    status_command
-    ;;
-logs)
-    shift
-    logs_command "$@"
-    ;;
-core-update)
-    shift
-    update_core_command "$@"
-    ;;
-geofiles)
-    shift
-    geofiles_command "$@"
-    ;;
-renew-cert)
-    shift
-    renew_cert_command "$@"
-    ;;
-install-script)
-    install_node_script
-    ;;
-uninstall-script)
-    uninstall_node_script
-    ;;
-service-install)
-    install_service_command
-    ;;
-service-uninstall)
-    uninstall_service_command
-    ;;
-service-restart)
-    restart_service_command
-    ;;
-service-status)
-    status_service_command
-    ;;
-service-logs)
-    shift
-    service_logs_command "$@"
-    ;;
-service-update)
-    service_update_command
-    ;;
-service-start)
-    service_start_command
-    ;;
-service-stop)
-    service_stop_command
-    ;;
-edit)
-    edit_command
-    ;;
-edit-env)
-    edit_env_command
-    ;;
-completion)
-    check_running_as_root
-    install_completion
-    colorized_echo cyan ""
-    colorized_echo yellow "To activate completion in this session, run:"
-    colorized_echo cyan "  source /etc/bash_completion.d/$APP_NAME"
-    colorized_echo yellow "Or simply restart your terminal."
-    ;;
-*)
-    usage
-    ;;
-esac
+pg_node_main() {
+    # Bring existing env SSL paths in line with the current APP_NAME (safe no-op if not installed/default)
+    sync_env_ssl_paths
+
+    case "$1" in
+    install)
+        shift
+        install_command "$@"
+        ;;
+    update)
+        shift
+        update_command "$@"
+        ;;
+    uninstall)
+        uninstall_command
+        ;;
+    up)
+        shift
+        up_command "$@"
+        ;;
+    down)
+        down_command
+        ;;
+    restart)
+        shift
+        restart_command "$@"
+        ;;
+    status)
+        status_command
+        ;;
+    logs)
+        shift
+        logs_command "$@"
+        ;;
+    core-update)
+        shift
+        update_core_command "$@"
+        ;;
+    geofiles)
+        shift
+        geofiles_command "$@"
+        ;;
+    renew-cert)
+        shift
+        renew_cert_command "$@"
+        ;;
+    install-script)
+        install_node_script
+        ;;
+    uninstall-script)
+        uninstall_node_script
+        ;;
+    service-install)
+        install_service_command
+        ;;
+    service-uninstall)
+        uninstall_service_command
+        ;;
+    service-restart)
+        restart_service_command
+        ;;
+    service-status)
+        status_service_command
+        ;;
+    service-logs)
+        shift
+        service_logs_command "$@"
+        ;;
+    service-update)
+        service_update_command
+        ;;
+    service-start)
+        service_start_command
+        ;;
+    service-stop)
+        service_stop_command
+        ;;
+    edit)
+        edit_command
+        ;;
+    edit-env)
+        edit_env_command
+        ;;
+    completion)
+        check_running_as_root
+        install_completion
+        colorized_echo cyan ""
+        colorized_echo yellow "To activate completion in this session, run:"
+        colorized_echo cyan "  source /etc/bash_completion.d/$APP_NAME"
+        colorized_echo yellow "Or simply restart your terminal."
+        ;;
+    *)
+        usage
+        ;;
+    esac
+}
+
+if [ "${PG_NODE_SOURCE_ONLY:-false}" != "true" ]; then
+    pg_node_main "$@"
+fi
