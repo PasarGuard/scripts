@@ -46,6 +46,19 @@ fi
 
 eval "$(declare -f detect_compose | sed '1s/detect_compose/original_detect_compose/')"
 
+install_if_different() {
+    local mode="$1"
+    local source_path="$2"
+    local dest_path="$3"
+
+    [ -f "$source_path" ] || die "Required source file not found: $source_path"
+    mkdir -p "$(dirname "$dest_path")"
+    if [ "$source_path" = "$dest_path" ]; then
+        return
+    fi
+    install -m "$mode" "$source_path" "$dest_path"
+}
+
 ensure_standalone_assets() {
     [ -f "$LOCAL_ENV_TEMPLATE" ] || die "Missing bundled env template: $LOCAL_ENV_TEMPLATE"
     [ -f "$LOCAL_COMPOSE_TEMPLATE" ] || die "Missing bundled compose template: $LOCAL_COMPOSE_TEMPLATE"
@@ -157,19 +170,27 @@ install_node_service_script() {
 
 install_node_script() {
     local target_path="/usr/local/bin/$APP_NAME"
+    local wrapper_source="$STANDALONE_SCRIPT_DIR/pg-node-standalone.sh"
+    local installed_wrapper="$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"
+
+    if [ ! -f "$wrapper_source" ]; then
+        wrapper_source="$installed_wrapper"
+    fi
+    [ -f "$wrapper_source" ] || die "Standalone pg-node wrapper not found: $wrapper_source"
 
     colorized_echo blue "Installing standalone node script"
     ensure_standalone_assets
     mkdir -p "$STANDALONE_INSTALL_ROOT/lib" "$STANDALONE_INSTALL_ROOT/iran-sanction" "$STANDALONE_INSTALL_ROOT/docker-compose" "$STANDALONE_INSTALL_ROOT/pg-node-assets"
-    install -m 755 "$STANDALONE_SCRIPT_DIR/pg-node-standalone.sh" "$target_path"
-    install -m 644 "$STANDALONE_ROOT_DIR/pg-node.sh" "$STANDALONE_INSTALL_ROOT/pg-node.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/node.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/node.yml"
-    install -m 644 "$STANDALONE_ROOT_DIR/pg-node-assets/.env.example" "$STANDALONE_INSTALL_ROOT/pg-node-assets/.env.example"
+    install_if_different 755 "$wrapper_source" "$target_path"
+    install_if_different 755 "$wrapper_source" "$installed_wrapper"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/pg-node.sh" "$STANDALONE_INSTALL_ROOT/pg-node.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/docker-compose/node.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/node.yml"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/pg-node-assets/.env.example" "$STANDALONE_INSTALL_ROOT/pg-node-assets/.env.example"
     colorized_echo green "Standalone node script installed successfully at $target_path"
 }
 

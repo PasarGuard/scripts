@@ -30,6 +30,23 @@ source "$STANDALONE_ROOT_DIR/pasarguard.sh"
 
 eval "$(declare -f detect_compose | sed '1s/detect_compose/original_detect_compose/')"
 
+install_if_different() {
+    local mode="$1"
+    local source_path="$2"
+    local dest_path="$3"
+
+    [ -f "$source_path" ] || die "Required source file not found: $source_path"
+    mkdir -p "$(dirname "$dest_path")"
+    if [ "$source_path" = "$dest_path" ]; then
+        return
+    fi
+    install -m "$mode" "$source_path" "$dest_path"
+}
+
+is_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 ensure_standalone_assets() {
     [ -f "$PASARGUARD_ENV_TEMPLATE" ] || die "Missing bundled env template: $PASARGUARD_ENV_TEMPLATE"
 }
@@ -100,11 +117,13 @@ install_docker() {
 }
 
 install_yq() {
-    if command -v yq >/dev/null 2>&1; then
-        colorized_echo green "yq is already installed."
-        return
-    fi
-    install_package yq
+    return
+}
+
+set_pasarguard_panel_image() {
+    local target_image="$1"
+    [ -f "$COMPOSE_FILE" ] || die "Compose file not found: $COMPOSE_FILE"
+    sed -i "0,/^[[:space:]]*image:[[:space:]]*pasarguard\/panel:.*/s#^[[:space:]]*image:[[:space:]]*pasarguard/panel:.*#    image: ${target_image}#" "$COMPOSE_FILE"
 }
 
 detect_compose() {
@@ -119,30 +138,38 @@ detect_compose() {
 
 install_pasarguard_script() {
     local target_path="/usr/local/bin/pasarguard"
+    local wrapper_source="$STANDALONE_SCRIPT_DIR/pasarguard-standalone.sh"
+    local installed_wrapper="$STANDALONE_INSTALL_ROOT/iran-sanction/pasarguard-standalone.sh"
+
+    if [ ! -f "$wrapper_source" ]; then
+        wrapper_source="$installed_wrapper"
+    fi
+    [ -f "$wrapper_source" ] || die "Standalone pasarguard wrapper not found: $wrapper_source"
 
     colorized_echo blue "Installing standalone pasarguard script"
     ensure_standalone_assets
     mkdir -p "$STANDALONE_INSTALL_ROOT/lib" "$STANDALONE_INSTALL_ROOT/iran-sanction" "$STANDALONE_INSTALL_ROOT/docker-compose" "$STANDALONE_INSTALL_ROOT/pasarguard-assets"
-    install -m 755 "$STANDALONE_SCRIPT_DIR/pasarguard-standalone.sh" "$target_path"
-    install -m 644 "$STANDALONE_ROOT_DIR/pasarguard.sh" "$STANDALONE_INSTALL_ROOT/pasarguard.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/env.sh" "$STANDALONE_INSTALL_ROOT/lib/env.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/pasarguard-backup.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-backup.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/lib/pasarguard-restore.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-restore.sh"
-    install -m 644 "$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
+    install_if_different 755 "$wrapper_source" "$target_path"
+    install_if_different 755 "$wrapper_source" "$installed_wrapper"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/pasarguard.sh" "$STANDALONE_INSTALL_ROOT/pasarguard.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/env.sh" "$STANDALONE_INSTALL_ROOT/lib/env.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/pasarguard-backup.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-backup.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/lib/pasarguard-restore.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-restore.sh"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
     if [ -f "$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh" ]; then
-        install -m 755 "$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"
+        install_if_different 755 "$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"
     fi
-    install -m 644 "$PASARGUARD_ENV_TEMPLATE" "$STANDALONE_INSTALL_ROOT/pasarguard-assets/.env.example"
-    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-mysql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mysql.yml"
-    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-mariadb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mariadb.yml"
-    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-postgresql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-postgresql.yml"
-    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-timescaledb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-timescaledb.yml"
+    install_if_different 644 "$PASARGUARD_ENV_TEMPLATE" "$STANDALONE_INSTALL_ROOT/pasarguard-assets/.env.example"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-mysql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mysql.yml"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-mariadb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mariadb.yml"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-postgresql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-postgresql.yml"
+    install_if_different 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-timescaledb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-timescaledb.yml"
     if [ -f "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-sqlite.yml" ]; then
-        install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-sqlite.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-sqlite.yml"
+        install_if_different 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-sqlite.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-sqlite.yml"
     fi
     colorized_echo green "Standalone pasarguard script installed successfully at $target_path"
 }
@@ -210,7 +237,7 @@ install_pasarguard() {
         else
             colorized_echo green "phpMyAdmin address: 0.0.0.0:8010"
             DB_PORT="3306"
-            MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+            MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             echo "MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\"" >>"$ENV_FILE"
         fi
 
@@ -238,7 +265,7 @@ install_pasarguard() {
         cp "$compose_source" "$COMPOSE_FILE"
         sed -i 's/^# \(SQLALCHEMY_DATABASE_URL = .*\)$/\1/' "$APP_DIR/.env"
 
-        if [ "$major_version" -eq 1 ]; then
+        if is_integer "$major_version" && [ "$major_version" -eq 1 ]; then
             db_driver_scheme="sqlite+aiosqlite"
         elif grep -Eq '^[#[:space:]]*SQLALCHEMY_DATABASE_URL[[:space:]]*=[[:space:]]*"sqlite\+aiosqlite' "$APP_DIR/.env"; then
             db_driver_scheme="sqlite+aiosqlite"

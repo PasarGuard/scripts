@@ -982,7 +982,7 @@ install_pasarguard() {
         else
             colorized_echo green "phpMyAdmin address: 0.0.0.0:8010"
             DB_PORT="3306"
-            MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+            MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             echo "MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\"" >>"$ENV_FILE"
         fi
 
@@ -1087,7 +1087,7 @@ prompt_for_db_password() {
 
         # Generate a 20-character password if the user leaves the input empty
         if [ -z "$DB_PASSWORD" ]; then
-            DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+            DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             colorized_echo green "A secure password has been generated automatically."
             break
         fi
@@ -1110,7 +1110,7 @@ prompt_for_pgadmin_password() {
 
         # Generate a 20-character password if the user leaves the input empty
         if [ -z "$PGADMIN_PASSWORD" ]; then
-            PGADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)
+            PGADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             colorized_echo green "A secure password has been generated automatically."
             break
         fi
