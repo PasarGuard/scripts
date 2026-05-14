@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 set -e
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-if [ ! -f "$ROOT_DIR/pg-node.sh" ] && [ -f "/usr/local/lib/pasarguard-scripts/pg-node-standalone/pg-node.sh" ]; then
-    ROOT_DIR="/usr/local/lib/pasarguard-scripts/pg-node-standalone"
+STANDALONE_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+STANDALONE_ROOT_DIR="$(cd -- "${STANDALONE_SCRIPT_DIR}/.." && pwd)"
+if [ ! -f "$STANDALONE_ROOT_DIR/pg-node.sh" ] && [ -f "/usr/local/lib/pasarguard-scripts/pg-node-standalone/pg-node.sh" ]; then
+    STANDALONE_ROOT_DIR="/usr/local/lib/pasarguard-scripts/pg-node-standalone"
 fi
 
-MIRROR_LIB="$SCRIPT_DIR/mirror.sh"
-if [ "$ROOT_DIR" = "/usr/local/lib/pasarguard-scripts/pg-node-standalone" ]; then
-    MIRROR_LIB="$ROOT_DIR/iran-sanction/mirror.sh"
+MIRROR_LIB="$STANDALONE_SCRIPT_DIR/mirror.sh"
+if [ "$STANDALONE_ROOT_DIR" = "/usr/local/lib/pasarguard-scripts/pg-node-standalone" ]; then
+    MIRROR_LIB="$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh"
 fi
-LOCAL_ENV_TEMPLATE="$ROOT_DIR/pg-node-assets/.env.example"
-LOCAL_COMPOSE_TEMPLATE="$ROOT_DIR/docker-compose/node.yml"
+LOCAL_ENV_TEMPLATE="$STANDALONE_ROOT_DIR/pg-node-assets/.env.example"
+LOCAL_COMPOSE_TEMPLATE="$STANDALONE_ROOT_DIR/docker-compose/node.yml"
 STANDALONE_INSTALL_ROOT="/usr/local/lib/pasarguard-scripts/pg-node-standalone"
 APT_MIRROR_PREPARED=false
 DOCKER_MIRROR_PREPARED=false
 
-if [ ! -f "$ROOT_DIR/pg-node.sh" ]; then
-    printf 'Missing base script: %s\n' "$ROOT_DIR/pg-node.sh" >&2
+if [ ! -f "$STANDALONE_ROOT_DIR/pg-node.sh" ]; then
+    printf 'Missing base script: %s\n' "$STANDALONE_ROOT_DIR/pg-node.sh" >&2
     exit 1
 fi
 if [ ! -f "$MIRROR_LIB" ]; then
@@ -29,10 +29,10 @@ fi
 # shellcheck source=iran-sanction/mirror.sh
 source "$MIRROR_LIB"
 
-export PG_NODE_SCRIPT_DIR="$ROOT_DIR"
+export PG_NODE_SCRIPT_DIR="$STANDALONE_ROOT_DIR"
 export PG_NODE_SOURCE_ONLY=true
 # shellcheck source=pg-node.sh
-source "$ROOT_DIR/pg-node.sh"
+source "$STANDALONE_ROOT_DIR/pg-node.sh"
 
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ipify.ir 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ipify.ir 2>/dev/null || echo "")
@@ -161,15 +161,15 @@ install_node_script() {
     colorized_echo blue "Installing standalone node script"
     ensure_standalone_assets
     mkdir -p "$STANDALONE_INSTALL_ROOT/lib" "$STANDALONE_INSTALL_ROOT/iran-sanction" "$STANDALONE_INSTALL_ROOT/docker-compose" "$STANDALONE_INSTALL_ROOT/pg-node-assets"
-    install -m 755 "$SCRIPT_DIR/pg-node-standalone.sh" "$target_path"
-    install -m 644 "$ROOT_DIR/pg-node.sh" "$STANDALONE_INSTALL_ROOT/pg-node.sh"
-    install -m 644 "$ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
-    install -m 644 "$ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
-    install -m 644 "$ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
-    install -m 644 "$ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
-    install -m 644 "$ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
-    install -m 644 "$ROOT_DIR/docker-compose/node.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/node.yml"
-    install -m 644 "$ROOT_DIR/pg-node-assets/.env.example" "$STANDALONE_INSTALL_ROOT/pg-node-assets/.env.example"
+    install -m 755 "$STANDALONE_SCRIPT_DIR/pg-node-standalone.sh" "$target_path"
+    install -m 644 "$STANDALONE_ROOT_DIR/pg-node.sh" "$STANDALONE_INSTALL_ROOT/pg-node.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/node.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/node.yml"
+    install -m 644 "$STANDALONE_ROOT_DIR/pg-node-assets/.env.example" "$STANDALONE_INSTALL_ROOT/pg-node-assets/.env.example"
     colorized_echo green "Standalone node script installed successfully at $target_path"
 }
 

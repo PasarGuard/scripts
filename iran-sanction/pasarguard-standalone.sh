@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 set -e
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-if [ ! -f "$ROOT_DIR/pasarguard.sh" ] && [ -f "/usr/local/lib/pasarguard-scripts/pasarguard-standalone/pasarguard.sh" ]; then
-    ROOT_DIR="/usr/local/lib/pasarguard-scripts/pasarguard-standalone"
+STANDALONE_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+STANDALONE_ROOT_DIR="$(cd -- "${STANDALONE_SCRIPT_DIR}/.." && pwd)"
+if [ ! -f "$STANDALONE_ROOT_DIR/pasarguard.sh" ] && [ -f "/usr/local/lib/pasarguard-scripts/pasarguard-standalone/pasarguard.sh" ]; then
+    STANDALONE_ROOT_DIR="/usr/local/lib/pasarguard-scripts/pasarguard-standalone"
 fi
 
-MIRROR_LIB="$SCRIPT_DIR/mirror.sh"
-if [ "$ROOT_DIR" = "/usr/local/lib/pasarguard-scripts/pasarguard-standalone" ]; then
-    MIRROR_LIB="$ROOT_DIR/iran-sanction/mirror.sh"
+MIRROR_LIB="$STANDALONE_SCRIPT_DIR/mirror.sh"
+if [ "$STANDALONE_ROOT_DIR" = "/usr/local/lib/pasarguard-scripts/pasarguard-standalone" ]; then
+    MIRROR_LIB="$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh"
 fi
 
-PASARGUARD_ENV_TEMPLATE="$ROOT_DIR/pasarguard-assets/.env.example"
-PASARGUARD_COMPOSE_DIR="$ROOT_DIR/docker-compose"
+PASARGUARD_ENV_TEMPLATE="$STANDALONE_ROOT_DIR/pasarguard-assets/.env.example"
+PASARGUARD_COMPOSE_DIR="$STANDALONE_ROOT_DIR/docker-compose"
 STANDALONE_INSTALL_ROOT="/usr/local/lib/pasarguard-scripts/pasarguard-standalone"
 APT_MIRROR_PREPARED=false
 DOCKER_MIRROR_PREPARED=false
 
-[ -f "$ROOT_DIR/pasarguard.sh" ] || { printf 'Missing base script: %s\n' "$ROOT_DIR/pasarguard.sh" >&2; exit 1; }
+[ -f "$STANDALONE_ROOT_DIR/pasarguard.sh" ] || { printf 'Missing base script: %s\n' "$STANDALONE_ROOT_DIR/pasarguard.sh" >&2; exit 1; }
 [ -f "$MIRROR_LIB" ] || { printf 'Missing mirror library: %s\n' "$MIRROR_LIB" >&2; exit 1; }
 
 # shellcheck source=iran-sanction/mirror.sh
@@ -26,7 +26,7 @@ source "$MIRROR_LIB"
 
 export PASARGUARD_SOURCE_ONLY=true
 # shellcheck source=pasarguard.sh
-source "$ROOT_DIR/pasarguard.sh"
+source "$STANDALONE_ROOT_DIR/pasarguard.sh"
 
 eval "$(declare -f detect_compose | sed '1s/detect_compose/original_detect_compose/')"
 
@@ -123,26 +123,26 @@ install_pasarguard_script() {
     colorized_echo blue "Installing standalone pasarguard script"
     ensure_standalone_assets
     mkdir -p "$STANDALONE_INSTALL_ROOT/lib" "$STANDALONE_INSTALL_ROOT/iran-sanction" "$STANDALONE_INSTALL_ROOT/docker-compose" "$STANDALONE_INSTALL_ROOT/pasarguard-assets"
-    install -m 755 "$SCRIPT_DIR/pasarguard-standalone.sh" "$target_path"
-    install -m 644 "$ROOT_DIR/pasarguard.sh" "$STANDALONE_INSTALL_ROOT/pasarguard.sh"
-    install -m 644 "$ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
-    install -m 644 "$ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
-    install -m 644 "$ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
-    install -m 644 "$ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
-    install -m 644 "$ROOT_DIR/lib/env.sh" "$STANDALONE_INSTALL_ROOT/lib/env.sh"
-    install -m 644 "$ROOT_DIR/lib/pasarguard-backup.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-backup.sh"
-    install -m 644 "$ROOT_DIR/lib/pasarguard-restore.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-restore.sh"
-    install -m 644 "$ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
-    if [ -f "$ROOT_DIR/iran-sanction/pg-node-standalone.sh" ]; then
-        install -m 755 "$ROOT_DIR/iran-sanction/pg-node-standalone.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"
+    install -m 755 "$STANDALONE_SCRIPT_DIR/pasarguard-standalone.sh" "$target_path"
+    install -m 644 "$STANDALONE_ROOT_DIR/pasarguard.sh" "$STANDALONE_INSTALL_ROOT/pasarguard.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/github.sh" "$STANDALONE_INSTALL_ROOT/lib/github.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/env.sh" "$STANDALONE_INSTALL_ROOT/lib/env.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/pasarguard-backup.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-backup.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/lib/pasarguard-restore.sh" "$STANDALONE_INSTALL_ROOT/lib/pasarguard-restore.sh"
+    install -m 644 "$STANDALONE_ROOT_DIR/iran-sanction/mirror.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/mirror.sh"
+    if [ -f "$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh" ]; then
+        install -m 755 "$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh" "$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"
     fi
     install -m 644 "$PASARGUARD_ENV_TEMPLATE" "$STANDALONE_INSTALL_ROOT/pasarguard-assets/.env.example"
-    install -m 644 "$ROOT_DIR/docker-compose/pasarguard-mysql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mysql.yml"
-    install -m 644 "$ROOT_DIR/docker-compose/pasarguard-mariadb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mariadb.yml"
-    install -m 644 "$ROOT_DIR/docker-compose/pasarguard-postgresql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-postgresql.yml"
-    install -m 644 "$ROOT_DIR/docker-compose/pasarguard-timescaledb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-timescaledb.yml"
-    if [ -f "$ROOT_DIR/docker-compose/pasarguard-sqlite.yml" ]; then
-        install -m 644 "$ROOT_DIR/docker-compose/pasarguard-sqlite.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-sqlite.yml"
+    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-mysql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mysql.yml"
+    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-mariadb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-mariadb.yml"
+    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-postgresql.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-postgresql.yml"
+    install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-timescaledb.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-timescaledb.yml"
+    if [ -f "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-sqlite.yml" ]; then
+        install -m 644 "$STANDALONE_ROOT_DIR/docker-compose/pasarguard-sqlite.yml" "$STANDALONE_INSTALL_ROOT/docker-compose/pasarguard-sqlite.yml"
     fi
     colorized_echo green "Standalone pasarguard script installed successfully at $target_path"
 }
@@ -280,8 +280,8 @@ update_command() {
 }
 
 install_node_command() {
-    local standalone_node="$ROOT_DIR/iran-sanction/pg-node-standalone.sh"
-    if [ "$ROOT_DIR" = "$STANDALONE_INSTALL_ROOT" ]; then
+    local standalone_node="$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh"
+    if [ "$STANDALONE_ROOT_DIR" = "$STANDALONE_INSTALL_ROOT" ]; then
         standalone_node="$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"
     fi
     [ -f "$standalone_node" ] || die "Bundled standalone pg-node installer not found: $standalone_node"
