@@ -100,7 +100,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 set -- "${ARGS[@]}"
-COMMAND="$1"
+COMMAND="${1:-}"
 # Fetch IP address from ifconfig.io API
 NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
 NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
@@ -111,11 +111,11 @@ fi
 if [ -z "$NODE_IP" ]; then
     NODE_IP="127.0.0.1"
 fi
-if [[ "$1" == "install" || "$1" == "install-script" ]] && [ -z "$APP_NAME" ]; then
+if [[ "${1:-}" == "install" || "${1:-}" == "install-script" ]] && [ -z "${APP_NAME:-}" ]; then
     APP_NAME="pg-node"
 fi
 # Set script name if APP_NAME is not set
-if [ -z "$APP_NAME" ]; then
+if [ -z "${APP_NAME:-}" ]; then
     SCRIPT_NAME=$(basename "$0")
     APP_NAME="${SCRIPT_NAME%.*}"
 fi

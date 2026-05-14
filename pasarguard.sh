@@ -71,12 +71,12 @@ source "$SHARED_LIB_DIR/pasarguard-backup.sh"
 source "$SHARED_LIB_DIR/pasarguard-restore.sh"
 
 # Handle @ symbol if used in installation (skip it)
-if [ "$1" == "@" ]; then
+if [ "${1:-}" = "@" ]; then
     shift
 fi
 
 INSTALL_DIR="/opt"
-if [ -z "$APP_NAME" ]; then
+if [ -z "${APP_NAME:-}" ]; then
     APP_NAME="pasarguard"
 fi
 APP_DIR="$INSTALL_DIR/$APP_NAME"
