@@ -1362,47 +1362,27 @@ install_command() {
         local version=$1
         repo_url="https://api.github.com/repos/pasarguard/panel/releases"
 
-        if [ "$version" == "latest" ]; then
-            latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
+        if [[ "$version" == "latest" || "$version" == "pre-release" || "$version" == "dev" ]]; then
+            local latest_tag
+            latest_tag=$(curl -s --max-time 5 ${repo_url}/latest | jq -r '.tag_name // empty' 2>/dev/null || echo "null")
+            if [ -z "$latest_tag" ] || [ "$latest_tag" == "null" ]; then
+                major_version=1
+                [ "$version" == "pre-release" ] && pasarguard_version="latest"
+                return 0
+            fi
             major_version=$(echo "$latest_tag" | sed 's/^v//' | sed 's/[^0-9]*\([0-9]*\)\..*/\1/')
+            [ -z "$major_version" ] && major_version=1
             return 0
         fi
 
-        if [ "$version" == "dev" ]; then
-            major_version=0
-            return 0
-        fi
-
-        if [ "$version" == "pre-release" ]; then
-            local latest_stable_tag=$(curl -s "$repo_url/latest" | jq -r '.tag_name')
-            local latest_pre_release_tag=$(curl -s "$repo_url" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
-
-            if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
-                return 1 # No releases found at all
-            elif [ "$latest_stable_tag" == "null" ]; then
-                pasarguard_version=$latest_pre_release_tag
-            elif [ "$latest_pre_release_tag" == "null" ]; then
-                pasarguard_version=$latest_stable_tag
-            else
-                # Compare versions using sort -V
-                local chosen_version=$(printf "%s\n" "$latest_stable_tag" "$latest_pre_release_tag" | sort -V | tail -n 1)
-                pasarguard_version=$chosen_version
-            fi
-            # Determine major_version for the chosen version (supports v1+)
-            major_version=$(echo "$pasarguard_version" | sed 's/^v//' | sed 's/[^0-9]*\([0-9]*\)\..*/\1/')
-            if [[ -z "$major_version" ]]; then
-                major_version=0
-            fi
-            return 0
-        fi
-
-        # Check if the repo contains the version tag
-        if curl -s -o /dev/null -w "%{http_code}" "${repo_url}/tags/${version}" | grep -q "^200$"; then
+        local http_code
+        http_code=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}" "${repo_url}/tags/${version}" 2>/dev/null || echo "000")
+        if [[ "$http_code" == "200" || "$http_code" == "000" ]]; then
             major_version=$(echo "$version" | sed 's/^v//' | sed 's/[^0-9]*\([0-9]*\)\..*/\1/')
+            [ -z "$major_version" ] && major_version=1
             return 0
-        else
-            return 1
         fi
+        return 1
     }
 
     semver_regex='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'

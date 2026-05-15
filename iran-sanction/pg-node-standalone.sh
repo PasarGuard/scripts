@@ -381,28 +381,24 @@ install_command() {
     check_version_exists() {
         local version="$1"
         local repo_url="https://api.github.com/repos/PasarGuard/node/releases"
-        if [ "$version" == "latest" ]; then
-            latest_tag=$(curl -s "${repo_url}/latest" | jq -r '.tag_name')
-            [ "$latest_tag" != "null" ]
-            return
+        
+        # In standalone mode, we trust 'latest' and 'pre-release' and 'dev' without checking GitHub
+        if [[ "$version" == "latest" || "$version" == "pre-release" || "$version" == "dev" ]]; then
+            return 0
         fi
-        if [ "$version" == "pre-release" ]; then
-            local latest_stable_tag latest_pre_release_tag chosen_version
-            latest_stable_tag=$(curl -s "$repo_url/latest" | jq -r '.tag_name')
-            latest_pre_release_tag=$(curl -s "$repo_url" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
-            if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
-                return 1
-            elif [ "$latest_stable_tag" == "null" ]; then
-                node_version=$latest_pre_release_tag
-            elif [ "$latest_pre_release_tag" == "null" ]; then
-                node_version=$latest_stable_tag
-            else
-                chosen_version=$(printf "%s\n" "$latest_stable_tag" "$latest_pre_release_tag" | sort -V | tail -n 1)
-                node_version=$chosen_version
+
+        # For specific versions, try to verify but proceed if GitHub is unreachable
+        local http_code
+        http_code=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}" "${repo_url}/tags/${version}" 2>/dev/null || echo "000")
+        
+        if [[ "$http_code" == "200" || "$http_code" == "000" ]]; then
+            if [[ "$http_code" == "000" ]]; then
+                colorized_echo yellow "  ⚠ Unable to reach GitHub to verify version $version. Proceeding anyway."
             fi
             return 0
         fi
-        curl -s -o /dev/null -w "%{http_code}" "${repo_url}/tags/${version}" | grep -q "^200$"
+
+        return 1
     }
 
     if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

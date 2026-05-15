@@ -160,6 +160,9 @@ install_pasarguard_script() {
     install_if_different 755 "$wrapper_source" "$target_path"
     install_if_different 755 "$wrapper_source" "$installed_wrapper"
     install_if_different 644 "$STANDALONE_ROOT_DIR/pasarguard.sh" "$STANDALONE_INSTALL_ROOT/pasarguard.sh"
+    if [ -f "$STANDALONE_ROOT_DIR/pg-node.sh" ]; then
+        install_if_different 644 "$STANDALONE_ROOT_DIR/pg-node.sh" "$STANDALONE_INSTALL_ROOT/pg-node.sh"
+    fi
     install_if_different 644 "$STANDALONE_ROOT_DIR/lib/common.sh" "$STANDALONE_INSTALL_ROOT/lib/common.sh"
     install_if_different 644 "$STANDALONE_ROOT_DIR/lib/system.sh" "$STANDALONE_INSTALL_ROOT/lib/system.sh"
     install_if_different 644 "$STANDALONE_ROOT_DIR/lib/docker.sh" "$STANDALONE_INSTALL_ROOT/lib/docker.sh"
