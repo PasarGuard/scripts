@@ -10,11 +10,9 @@ on:
       - "tests/unit_lib_common.sh"
       - "tests/unit_lib_env.sh"
       - "tests/unit_lib_github.sh"
-      - "tests/unit_lib_backup.sh"
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
       - "tests/unit_lib_system.sh"
-      - "tests/unit_lib_restore.sh"
   pull_request:
     paths:
       - ".github/workflows/command-tests.yml"
@@ -25,8 +23,6 @@ on:
       - "tests/unit_lib_env.sh"
       - "tests/unit_lib_github.sh"
       - "tests/unit_lib_system.sh"
-      - "tests/unit_lib_restore.sh"
-      - "tests/unit_lib_backup.sh"
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
   workflow_dispatch:
@@ -46,10 +42,6 @@ jobs:
         run: bash tests/unit_lib_github.sh
       - name: Run lib/system.sh unit tests
         run: bash tests/unit_lib_system.sh
-      - name: Run lib/pasarguard-restore.sh unit tests
-        run: bash tests/unit_lib_restore.sh
-      - name: Run lib/pasarguard-backup.sh unit tests
-        run: bash tests/unit_lib_backup.sh
       - name: Run pasarguard.sh unit tests
         run: bash tests/unit_pasarguard.sh
       - name: Run pg-node.sh unit tests

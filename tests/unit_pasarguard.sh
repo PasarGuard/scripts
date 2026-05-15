@@ -44,6 +44,11 @@ assert_false() {
     if ! "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+assert_eq() {
+    local actual="$1" expected="$2" label="$3"
+    if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
+}
+
 echo "=== unit_pasarguard.sh ==="
 
 # -----------------------------------------------------------------------
@@ -174,7 +179,7 @@ rm -rf "$MOCK_HOME/.acme.sh"
 # Should check /root/.acme.sh (but we can't easily mock that if not root)
 # Let's mock 'command -v acme.sh'
 command() {
-    if [[ "$1" == "-v" && "$2" == "acme.sh" ]]; then
+    if [[ "${1:-}" == "-v" && "${2:-}" == "acme.sh" ]]; then
         echo "/usr/bin/acme.sh"
         return 0
     fi
@@ -234,18 +239,27 @@ assert_eq "$(detect_pasarguard_backend_service)" "pasarguard" \
 # -----------------------------------------------------------------------
 # is_port_in_use
 # -----------------------------------------------------------------------
-# Mock ss command
+# Mock port monitoring commands
 ss() {
-    if [[ "$*" == *":8000"* ]]; then
-        echo "LISTEN 0 128 *:8000 *:* "
+    if [[ "${1:-}" == "-ltn" ]]; then
+        echo "LISTEN 0 128 *:55555 *:* "
+        echo "LISTEN 0 128 *:443 *:* "
         return 0
     fi
     return 1
 }
-export -f ss
-assert_true  "is_port_in_use: detects port 8000" is_port_in_use 8000
+netstat() {
+    if [[ "${1:-}" == "-lnt" ]]; then
+        echo "tcp 0 0 0.0.0.0:55555 0.0.0.0:* LISTEN"
+        echo "tcp 0 0 0.0.0.0:443 0.0.0.0:* LISTEN"
+        return 0
+    fi
+    return 1
+}
+export -f ss netstat
+assert_true  "is_port_in_use: detects port 55555" is_port_in_use 55555
 assert_false "is_port_in_use: port 9000 free"  is_port_in_use 9000
-unset -f ss
+unset -f ss netstat
 
 # -----------------------------------------------------------------------
 # build_pasarguard_ssl_reload_command

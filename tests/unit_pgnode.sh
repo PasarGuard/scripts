@@ -91,7 +91,7 @@ assert_false "validate_san_entry: whitespace only"  validate_san_entry "   "
 # -----------------------------------------------------------------------
 # Mock uname
 uname() {
-    case "$1" in
+    case "${1:-}" in
         -s) echo "Linux" ;;
         -m) echo "x86_64" ;;
     esac
@@ -101,7 +101,7 @@ assert_eq "$(detect_node_serviced_platform)" "Linux_x86_64" \
     "detect_node_serviced_platform: identifies x86_64"
 
 uname() {
-    case "$1" in
+    case "${1:-}" in
         -s) echo "Linux" ;;
         -m) echo "aarch64" ;;
     esac

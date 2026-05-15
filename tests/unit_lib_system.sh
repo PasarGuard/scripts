@@ -66,27 +66,27 @@ unset -f awk
 # identify_the_operating_system_and_architecture
 # -----------------------------------------------------------------------
 uname() {
-    case "$1" in
+    case "${1:-}" in
         "") echo "Linux" ;;
         -m) echo "x86_64" ;;
     esac
 }
 export -f uname
 identify_the_operating_system_and_architecture
-assert_eq "$ARCH" "amd64" "identify_the_operating_system_and_architecture: x86_64 -> amd64"
+assert_eq "$ARCH" "64" "identify_the_operating_system_and_architecture: x86_64 -> 64"
 
 uname() {
-    case "$1" in
+    case "${1:-}" in
         "") echo "Linux" ;;
         -m) echo "aarch64" ;;
     esac
 }
 export -f uname
 identify_the_operating_system_and_architecture
-assert_eq "$ARCH" "arm64" "identify_the_operating_system_and_architecture: aarch64 -> arm64"
+assert_eq "$ARCH" "arm64-v8a" "identify_the_operating_system_and_architecture: aarch64 -> arm64-v8a"
 
 uname() {
-    case "$1" in
+    case "${1:-}" in
         "") echo "Darwin" ;;
     esac
 }
