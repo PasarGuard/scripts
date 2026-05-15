@@ -126,12 +126,14 @@ if [[ "$CUSTOM_NAME_SET" == true && "$COMMAND" =~ ^(install|install-script)$ ]];
     fi
 fi
 INSTALL_DIR="/opt"
-if [ -d "$INSTALL_DIR/$APP_NAME" ]; then
-    APP_DIR="$INSTALL_DIR/$APP_NAME"
-else
-    APP_DIR="$INSTALL_DIR/$APP_NAME"
+if [ -z "${APP_DIR:-}" ]; then
+    if [ -d "$INSTALL_DIR/$APP_NAME" ]; then
+        APP_DIR="$INSTALL_DIR/$APP_NAME"
+    else
+        APP_DIR="$INSTALL_DIR/$APP_NAME"
+    fi
 fi
-DATA_DIR="/var/lib/$APP_NAME"
+DATA_DIR="${DATA_DIR:-/var/lib/$APP_NAME}"
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
 SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"

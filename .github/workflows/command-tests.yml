@@ -1,0 +1,56 @@
+name: Unit Tests
+
+on:
+  push:
+    paths:
+      - ".github/workflows/command-tests.yml"
+      - "pasarguard.sh"
+      - "pg-node.sh"
+      - "lib/**"
+      - "tests/unit_lib_common.sh"
+      - "tests/unit_lib_env.sh"
+      - "tests/unit_lib_github.sh"
+      - "tests/unit_lib_backup.sh"
+      - "tests/unit_pasarguard.sh"
+      - "tests/unit_pgnode.sh"
+      - "tests/unit_lib_system.sh"
+      - "tests/unit_lib_restore.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/command-tests.yml"
+      - "pasarguard.sh"
+      - "pg-node.sh"
+      - "lib/**"
+      - "tests/unit_lib_common.sh"
+      - "tests/unit_lib_env.sh"
+      - "tests/unit_lib_github.sh"
+      - "tests/unit_lib_system.sh"
+      - "tests/unit_lib_restore.sh"
+      - "tests/unit_lib_backup.sh"
+      - "tests/unit_pasarguard.sh"
+      - "tests/unit_pgnode.sh"
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run lib/common.sh unit tests
+        run: bash tests/unit_lib_common.sh
+      - name: Run lib/env.sh unit tests
+        run: bash tests/unit_lib_env.sh
+      - name: Run lib/github.sh unit tests
+        run: bash tests/unit_lib_github.sh
+      - name: Run lib/system.sh unit tests
+        run: bash tests/unit_lib_system.sh
+      - name: Run lib/pasarguard-restore.sh unit tests
+        run: bash tests/unit_lib_restore.sh
+      - name: Run lib/pasarguard-backup.sh unit tests
+        run: bash tests/unit_lib_backup.sh
+      - name: Run pasarguard.sh unit tests
+        run: bash tests/unit_pasarguard.sh
+      - name: Run pg-node.sh unit tests
+        run: bash tests/unit_pgnode.sh

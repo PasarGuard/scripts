@@ -79,8 +79,8 @@ INSTALL_DIR="/opt"
 if [ -z "${APP_NAME:-}" ]; then
     APP_NAME="pasarguard"
 fi
-APP_DIR="$INSTALL_DIR/$APP_NAME"
-DATA_DIR="/var/lib/$APP_NAME"
+APP_DIR="${APP_DIR:-$INSTALL_DIR/$APP_NAME}"
+DATA_DIR="${DATA_DIR:-/var/lib/$APP_NAME}"
 THEMES_DIR="$APP_DIR/themes"
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
