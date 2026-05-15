@@ -55,7 +55,9 @@ restore_scripts() {
 
 cleanup_backup() {
     local backup_dir="$1"
-    [ -n "$backup_dir" ] && rm -rf "$backup_dir"
+    if [ -n "$backup_dir" ]; then
+        rm -rf "$backup_dir"
+    fi
 }
 
 github_install_script_from_repo() {

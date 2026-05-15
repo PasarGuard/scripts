@@ -66,6 +66,11 @@ prepare_apt_mirror() {
     if [ "$APT_MIRROR_PREPARED" = true ]; then
         return
     fi
+    # Only select mirrors on install command
+    if [[ "$COMMAND" != "install" ]]; then
+        APT_MIRROR_PREPARED=true
+        return
+    fi
     require_apt
     ensure_apt_prerequisites
     colorized_echo blue "Selecting the best APT mirror"
@@ -128,9 +133,12 @@ set_pasarguard_panel_image() {
 
 detect_compose() {
     if command -v docker >/dev/null 2>&1 && [ "$DOCKER_MIRROR_PREPARED" != "true" ] && [ "$(id -u)" = "0" ]; then
-        colorized_echo blue "Selecting the best Docker mirror"
-        select_and_apply_docker_mirror
-        DOCKER_MIRROR_PREPARED=true
+        # Only select mirrors on install command
+        if [[ "$COMMAND" == "install" ]]; then
+            colorized_echo blue "Selecting the best Docker mirror"
+            select_and_apply_docker_mirror
+            DOCKER_MIRROR_PREPARED=true
+        fi
     fi
     ensure_docker_running
     original_detect_compose
