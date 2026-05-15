@@ -16,12 +16,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch bundled panel env template
+      - name: Fetch bundled env templates
         run: |
           set -euo pipefail
           mkdir -p dist/pasarguard-assets
+          mkdir -p dist/pg-node-assets
           curl -fsSL https://raw.githubusercontent.com/pasarguard/panel/main/.env.example -o dist/pasarguard-assets/.env.example
           curl -fsSL https://raw.githubusercontent.com/pasarguard/panel/main/docker-compose.yml -o dist/pasarguard-assets/pasarguard-sqlite.yml
+          curl -fsSL https://raw.githubusercontent.com/pasarguard/node/main/.env.example -o dist/pg-node-assets/.env.example
 
       - name: Build standalone bundle
         run: |
@@ -46,7 +48,7 @@ jobs:
           cp docker-compose/pasarguard-timescaledb.yml "$BUNDLE_ROOT/docker-compose/"
           cp docker-compose/node.yml "$BUNDLE_ROOT/docker-compose/"
           cp dist/pasarguard-assets/pasarguard-sqlite.yml "$BUNDLE_ROOT/docker-compose/pasarguard-sqlite.yml"
-          cp pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/"
+          cp dist/pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/.env.example"
           cp dist/pasarguard-assets/.env.example "$BUNDLE_ROOT/pasarguard-assets/.env.example"
           cp iran-sanction/README-pasarguard-standalone.fa.md "$BUNDLE_ROOT/README.md"
           tar -czf dist/pasarguard-standalone.tar.gz -C dist pasarguard-standalone
