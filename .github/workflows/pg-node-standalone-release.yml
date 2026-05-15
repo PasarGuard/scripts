@@ -16,6 +16,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Fetch bundled node env template
+        run: |
+          set -euo pipefail
+          mkdir -p dist/pg-node-assets
+          curl -fsSL https://raw.githubusercontent.com/pasarguard/node/main/.env.example -o dist/pg-node-assets/.env.example
+
       - name: Build standalone bundle
         run: |
           set -euo pipefail
@@ -29,8 +35,8 @@ jobs:
           cp lib/github.sh "$BUNDLE_ROOT/lib/"
           cp iran-sanction/mirror.sh "$BUNDLE_ROOT/iran-sanction/"
           cp docker-compose/node.yml "$BUNDLE_ROOT/docker-compose/"
-          cp pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/"
-          cp iran-sanction/README-pg-node-standalone.md "$BUNDLE_ROOT/README.md"
+          cp dist/pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/.env.example"
+          cp iran-sanction/README-pg-node-standalone.fa.md "$BUNDLE_ROOT/README.md"
           tar -czf dist/pg-node-standalone.tar.gz -C dist pg-node-standalone
 
       - name: Upload workflow artifact

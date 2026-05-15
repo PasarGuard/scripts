@@ -48,6 +48,7 @@ jobs:
           cp dist/pasarguard-assets/pasarguard-sqlite.yml "$BUNDLE_ROOT/docker-compose/pasarguard-sqlite.yml"
           cp pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/"
           cp dist/pasarguard-assets/.env.example "$BUNDLE_ROOT/pasarguard-assets/.env.example"
+          cp iran-sanction/README-pasarguard-standalone.fa.md "$BUNDLE_ROOT/README.md"
           tar -czf dist/pasarguard-standalone.tar.gz -C dist pasarguard-standalone
 
       - name: Upload workflow artifact
