@@ -36,6 +36,7 @@ APT_MIRRORS=(
 )
 
 APT_MIRRORS_UBUNTU=(
+    "http://ir.archive.ubuntu.com/ubuntu"
     "https://mirror.arvancloud.ir/ubuntu"
     "https://repo.hmirror.ir/ubuntu"
     "https://mirror.iranserver.com/ubuntu"
@@ -232,22 +233,38 @@ apply_apt_mirror() {
     detect_release_info
     codename="$(get_os_codename)"
 
+    if is_ubuntu_family && [[ -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+        sources_file="/etc/apt/sources.list.d/ubuntu.sources"
+        backup="${sources_file}.bak.$(date +%Y%m%d%H%M%S)"
+    fi
+
     if [[ "$DRY_RUN" == "true" ]]; then
         info "[DRY-RUN] Would write $sources_file using mirror: $mirror (codename: $codename)"
         return 0
     fi
 
+    mkdir -p "$(dirname "$sources_file")"
     [[ -f "$sources_file" ]] || touch "$sources_file"
     cp "$sources_file" "$backup"
     info "Backed up $sources_file -> $backup"
 
     if is_ubuntu_family; then
-        cat > "$sources_file" <<EOF
+        if [[ "${sources_file##*/}" == "ubuntu.sources" ]]; then
+            cat > "$sources_file" <<EOF
+Types: deb
+URIs: ${mirror}
+Suites: ${codename} ${codename}-updates ${codename}-backports ${codename}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+        else
+            cat > "$sources_file" <<EOF
 deb ${mirror} ${codename} main restricted universe multiverse
 deb ${mirror} ${codename}-updates main restricted universe multiverse
 deb ${mirror} ${codename}-backports main restricted universe multiverse
 deb ${mirror} ${codename}-security main restricted universe multiverse
 EOF
+        fi
     else
         cat > "$sources_file" <<EOF
 deb ${mirror} ${codename} main contrib non-free non-free-firmware
@@ -372,4 +389,82 @@ ensure_runtime_requirements() {
 
 ensure_benchmark_requirements() {
     require curl awk sort
+}
+
+get_current_docker_mirror() {
+    local daemon_file="/etc/docker/daemon.json"
+
+    [ -f "$daemon_file" ] || return 1
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$daemon_file" <<'PYEOF'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    mirrors = data.get("registry-mirrors") or []
+    if mirrors:
+        print(mirrors[0])
+except Exception:
+    pass
+PYEOF
+        return 0
+    fi
+
+    sed -n 's/.*"registry-mirrors"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$daemon_file" | head -n 1
+}
+
+is_script_managed_docker_mirror() {
+    local current_mirror="$1"
+    local mirror=""
+
+    [ -n "$current_mirror" ] || return 1
+
+    for mirror in "${DOCKER_MIRRORS[@]}"; do
+        if [ "$mirror" = "$current_mirror" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+get_current_apt_mirror() {
+    local source_file=""
+    local mirror=""
+
+    for source_file in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do
+        [ -f "$source_file" ] || continue
+
+        if [[ "${source_file##*.}" == "sources" ]]; then
+            mirror=$(sed -n 's/^URIs:[[:space:]]*//p' "$source_file" | awk '{print $1}' | head -n 1)
+        else
+            mirror=$(awk '$1 == "deb" && $2 !~ /^\[/ {print $2; exit} $1 == "deb" && $2 ~ /^\[/ {print $3; exit}' "$source_file")
+        fi
+
+        if [ -n "$mirror" ]; then
+            echo "$mirror"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+is_script_managed_apt_mirror() {
+    local current_mirror="$1"
+    local mirror=""
+
+    [ -n "$current_mirror" ] || return 1
+
+    for mirror in "${APT_MIRRORS[@]}" "${APT_MIRRORS_UBUNTU[@]}"; do
+        if [ "$mirror" = "$current_mirror" ]; then
+            return 0
+        fi
+    done
+
+    return 1
 }
