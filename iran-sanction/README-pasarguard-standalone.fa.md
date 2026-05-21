@@ -24,7 +24,7 @@ tar -xzf pasarguard-standalone.tar.gz
 cd pasarguard-standalone
 chmod +x iran-sanction/pasarguard-standalone.sh
 ./iran-sanction/pasarguard-standalone.sh install-script
-pasarguard install
+pasarguard install --database timescaledb
 ```
 
 به‌جای `<tag>` تگ نسخه موردنظر را قرار دهید.
