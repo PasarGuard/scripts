@@ -19,6 +19,7 @@ APT_MIRROR_PREPARED=false
 APT_MIRROR_PROMPTED=false
 DOCKER_MIRROR_PREPARED=false
 DOCKER_MIRROR_PROMPTED=false
+COMMAND="${1:-}"
 
 [ -f "$STANDALONE_ROOT_DIR/pasarguard.sh" ] || { printf 'Missing base script: %s\n' "$STANDALONE_ROOT_DIR/pasarguard.sh" >&2; exit 1; }
 [ -f "$MIRROR_LIB" ] || { printf 'Missing mirror library: %s\n' "$MIRROR_LIB" >&2; exit 1; }
@@ -72,26 +73,25 @@ prepare_apt_mirror() {
         return
     fi
 
-    if [[ "${COMMAND:-}" != "install" ]]; then
-        current_mirror="$(get_current_apt_mirror 2>/dev/null || true)"
-        if is_script_managed_apt_mirror "$current_mirror"; then
-            if [ "$APT_MIRROR_PROMPTED" != "true" ]; then
-                colorized_echo yellow "APT mirror is already set to a script-managed mirror: $current_mirror"
-                read -r -p "Recalibrate APT mirror now? [y/N]: " recalibrate_choice
-                APT_MIRROR_PROMPTED=true
-                if [[ "$recalibrate_choice" =~ ^[Yy]$ ]]; then
-                    require_apt
-                    ensure_apt_prerequisites
-                    colorized_echo blue "Selecting the best APT mirror"
-                    select_and_apply_apt_mirror
-                fi
-            fi
-        fi
+    if [[ ! "${COMMAND:-}" =~ ^(install|update)$ ]]; then
         APT_MIRROR_PREPARED=true
         return
     fi
+
     require_apt
     ensure_apt_prerequisites
+
+    current_mirror="$(get_current_apt_mirror 2>/dev/null || true)"
+    if is_script_managed_apt_mirror "$current_mirror" && [ "$APT_MIRROR_PROMPTED" != "true" ]; then
+        colorized_echo yellow "APT mirror is already set to a script-managed mirror: $current_mirror"
+        read -r -p "Recalibrate APT mirror now? [y/N]: " recalibrate_choice
+        APT_MIRROR_PROMPTED=true
+        if [[ ! "$recalibrate_choice" =~ ^[Yy]$ ]]; then
+            APT_MIRROR_PREPARED=true
+            return
+        fi
+    fi
+
     colorized_echo blue "Selecting the best APT mirror"
     select_and_apply_apt_mirror
     APT_MIRROR_PREPARED=true
@@ -133,11 +133,7 @@ install_docker() {
         apt_install_packages docker.io docker-compose-v2
         ensure_docker_running
     fi
-    if [ "$DOCKER_MIRROR_PREPARED" != "true" ]; then
-        colorized_echo blue "Selecting the best Docker mirror"
-        select_and_apply_docker_mirror
-        DOCKER_MIRROR_PREPARED=true
-    fi
+    prepare_docker_mirror
 }
 
 prepare_docker_mirror() {
@@ -148,26 +144,20 @@ prepare_docker_mirror() {
         return
     fi
 
-    if [[ "${COMMAND:-}" == "install" ]]; then
-        colorized_echo blue "Selecting the best Docker mirror"
-        select_and_apply_docker_mirror
+    if [[ ! "${COMMAND:-}" =~ ^(install|update)$ ]]; then
         DOCKER_MIRROR_PREPARED=true
         return
     fi
 
     current_mirror="$(get_current_docker_mirror 2>/dev/null || true)"
-    if is_script_managed_docker_mirror "$current_mirror"; then
-        if [ "$DOCKER_MIRROR_PROMPTED" != "true" ]; then
-            colorized_echo yellow "Docker mirror is already set to a script-managed mirror: $current_mirror"
-            read -r -p "Recalibrate Docker mirror now? [y/N]: " recalibrate_choice
-            DOCKER_MIRROR_PROMPTED=true
-            if [[ "$recalibrate_choice" =~ ^[Yy]$ ]]; then
-                colorized_echo blue "Selecting the best Docker mirror"
-                select_and_apply_docker_mirror
-            fi
+    if is_script_managed_docker_mirror "$current_mirror" && [ "$DOCKER_MIRROR_PROMPTED" != "true" ]; then
+        colorized_echo yellow "Docker mirror is already set to a script-managed mirror: $current_mirror"
+        read -r -p "Recalibrate Docker mirror now? [y/N]: " recalibrate_choice
+        DOCKER_MIRROR_PROMPTED=true
+        if [[ ! "$recalibrate_choice" =~ ^[Yy]$ ]]; then
+            DOCKER_MIRROR_PREPARED=true
+            return
         fi
-        DOCKER_MIRROR_PREPARED=true
-        return
     fi
 
     colorized_echo blue "Selecting the best Docker mirror"
@@ -186,7 +176,7 @@ set_pasarguard_panel_image() {
 }
 
 detect_compose() {
-    if command -v docker >/dev/null 2>&1 && [ "$DOCKER_MIRROR_PREPARED" != "true" ] && [ "$(id -u)" = "0" ]; then
+    if [[ "${COMMAND:-}" =~ ^(install|update)$ ]] && command -v docker >/dev/null 2>&1 && [ "$DOCKER_MIRROR_PREPARED" != "true" ] && [ "$(id -u)" = "0" ]; then
         prepare_docker_mirror
     fi
     ensure_docker_running

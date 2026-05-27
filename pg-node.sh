@@ -534,9 +534,11 @@ gen_self_signed_cert() {
     colorized_echo cyan ""
     # Generate certificate
     colorized_echo blue "Generating self-signed certificate..."
-    colorized_echo cyan "  Command: openssl req -x509 -newkey rsa:4096 ..."
-    if openssl req -x509 -newkey rsa:4096 -keyout "$SSL_KEY_FILE" \
-        -out "$SSL_CERT_FILE" -days 36500 -nodes \
+    colorized_echo cyan "  Command: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 ..."
+    if openssl req -x509 -newkey ec \
+        -pkeyopt ec_paramgen_curve:P-256 \
+        -keyout "$SSL_KEY_FILE" \
+        -out "$SSL_CERT_FILE" -days 3650 -nodes \
         -subj "/CN=$NODE_IP" \
         -addext "subjectAltName = $san_string" >/dev/null 2>&1; then
         colorized_echo green "✓ Certificate generated successfully!"
