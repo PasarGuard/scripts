@@ -1855,6 +1855,7 @@ install_completion() {
     local completion_file="$completion_dir/$APP_NAME"
     mkdir -p "$completion_dir"
     generate_completion >"$completion_file"
+    chmod 644 "$completion_file"
     colorized_echo green "Bash completion installed to $completion_file"
 }
 
@@ -1975,7 +1976,12 @@ pasarguard_main() {
         edit_env_command "$@"
         ;;
     completion)
-        generate_completion
+        check_running_as_root
+        install_completion
+        colorized_echo cyan ""
+        colorized_echo yellow "To activate completion in this session, run:"
+        colorized_echo cyan "  source /etc/bash_completion.d/$APP_NAME"
+        colorized_echo yellow "Or simply restart your terminal."
         ;;
     help | *)
         usage

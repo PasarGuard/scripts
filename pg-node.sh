@@ -1647,7 +1647,7 @@ edit_env_command() {
         exit 1
     fi
 }
-generate_completion() {
+generate_bash_completion() {
     cat <<'EOF'
 _node_completions()
 {
@@ -1662,21 +1662,75 @@ EOF
     echo "complete -F _node_completions node.sh"
     echo "complete -F _node_completions $APP_NAME"
 }
+
+generate_zsh_completion() {
+    cat <<EOF
+#compdef $APP_NAME
+
+local -a commands
+commands=(
+  up
+  down
+  restart
+  status
+  logs
+  install
+  update
+  uninstall
+  install-script
+  uninstall-script
+  core-update
+  geofiles
+  renew-cert
+  edit
+  edit-env
+  completion
+  service-install
+  service-uninstall
+  service-restart
+  service-status
+  service-logs
+  service-update
+  service-start
+  service-stop
+)
+
+_describe 'command' commands
+EOF
+}
+
 install_completion() {
-    local completion_dir="/etc/bash_completion.d"
-    local completion_file="$completion_dir/$APP_NAME"
-    colorized_echo blue "Installing bash completion for $APP_NAME..."
-    mkdir -p "$completion_dir"
-    generate_completion >"$completion_file"
-    chmod 644 "$completion_file"
-    colorized_echo green "✓ Bash completion installed to $completion_file"
+    local bash_completion_dir="/etc/bash_completion.d"
+    local bash_completion_file="$bash_completion_dir/$APP_NAME"
+    local zsh_completion_dir="/usr/local/share/zsh/site-functions"
+    local zsh_completion_file="$zsh_completion_dir/_$APP_NAME"
+
+    colorized_echo blue "Installing shell completion for $APP_NAME..."
+
+    mkdir -p "$bash_completion_dir"
+    generate_bash_completion >"$bash_completion_file"
+    chmod 644 "$bash_completion_file"
+    colorized_echo green "✓ Bash completion installed to $bash_completion_file"
+
+    mkdir -p "$zsh_completion_dir"
+    generate_zsh_completion >"$zsh_completion_file"
+    chmod 644 "$zsh_completion_file"
+    colorized_echo green "✓ Zsh completion installed to $zsh_completion_file"
 }
 uninstall_completion() {
-    local completion_dir="/etc/bash_completion.d"
-    local completion_file="$completion_dir/$APP_NAME"
-    if [ -f "$completion_file" ]; then
-        rm "$completion_file"
-        colorized_echo yellow "Bash completion removed from $completion_file"
+    local bash_completion_dir="/etc/bash_completion.d"
+    local bash_completion_file="$bash_completion_dir/$APP_NAME"
+    local zsh_completion_dir="/usr/local/share/zsh/site-functions"
+    local zsh_completion_file="$zsh_completion_dir/_$APP_NAME"
+
+    if [ -f "$bash_completion_file" ]; then
+        rm "$bash_completion_file"
+        colorized_echo yellow "Bash completion removed from $bash_completion_file"
+    fi
+
+    if [ -f "$zsh_completion_file" ]; then
+        rm "$zsh_completion_file"
+        colorized_echo yellow "Zsh completion removed from $zsh_completion_file"
     fi
 }
 usage() {
@@ -1714,7 +1768,7 @@ usage() {
     colorized_echo yellow "  core-update       $(tput sgr0)✓  Update/Change Xray core"
     colorized_echo yellow "  geofiles          $(tput sgr0)✓  Download geoip and geosite files for specific regions"
     colorized_echo yellow "  renew-cert        $(tput sgr0)✓  Regenerate SSL/TLS certificate"
-    colorized_echo yellow "  completion        $(tput sgr0)✓  Install bash tab completion"
+    colorized_echo yellow "  completion        $(tput sgr0)✓  Install bash/zsh tab completion"
     echo
     colorized_echo cyan "Restart Options:"
     colorized_echo yellow "  -n, --no-logs           $(tput sgr0)✓  Do not follow logs after restart"
@@ -2004,8 +2058,9 @@ pg_node_main() {
         check_running_as_root
         install_completion
         colorized_echo cyan ""
-        colorized_echo yellow "To activate completion in this session, run:"
-        colorized_echo cyan "  source /etc/bash_completion.d/$APP_NAME"
+        colorized_echo yellow "To activate completion in this session:"
+        colorized_echo cyan "  bash: source /etc/bash_completion.d/$APP_NAME"
+        colorized_echo cyan "  zsh : autoload -Uz compinit && compinit"
         colorized_echo yellow "Or simply restart your terminal."
         ;;
     *)
