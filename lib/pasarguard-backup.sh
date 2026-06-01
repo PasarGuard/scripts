@@ -1329,11 +1329,12 @@ backup_command() {
                     install_package sqlite3 || true
                 fi
 
+                local sqlite_basename=$(basename "$sqlite_file")
                 if command -v sqlite3 >/dev/null 2>&1; then
-                    if ! sqlite3 "$sqlite_file" ".backup '$temp_dir/db_backup.sqlite'" >>"$log_file" 2>&1; then
+                    if ! sqlite3 "$sqlite_file" ".backup '$temp_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
                         error_messages+=("Failed to create SQLite backup snapshot.")
                     fi
-                elif ! cp "$sqlite_file" "$temp_dir/db_backup.sqlite" 2>>"$log_file"; then
+                elif ! cp "$sqlite_file" "$temp_dir/$sqlite_basename" 2>>"$log_file"; then
                     error_messages+=("Failed to copy SQLite database.")
                 fi
             else

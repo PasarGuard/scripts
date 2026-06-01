@@ -571,8 +571,17 @@ restore_command() {
 
     case $db_type in
     sqlite)
-        if [ ! -f "$temp_restore_dir/db_backup.sqlite" ]; then
-            colorized_echo red "SQLite backup file not found in backup archive."
+        local sqlite_basename=$(basename "$sqlite_file")
+        local backup_source=""
+
+        if [ -f "$temp_restore_dir/$sqlite_basename" ]; then
+            backup_source="$temp_restore_dir/$sqlite_basename"
+        elif [ -f "$temp_restore_dir/db_backup.sqlite" ]; then
+            backup_source="$temp_restore_dir/db_backup.sqlite"
+        fi
+
+        if [ -z "$backup_source" ]; then
+            colorized_echo red "SQLite backup file not found in backup archive (looked for $sqlite_basename or db_backup.sqlite)."
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -583,7 +592,7 @@ restore_command() {
             cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
         fi
 
-        if cp "$temp_restore_dir/db_backup.sqlite" "$sqlite_file" 2>>"$log_file"; then
+        if cp "$backup_source" "$sqlite_file" 2>>"$log_file"; then
             colorized_echo green "SQLite database restored successfully."
         else
             colorized_echo red "Failed to restore SQLite database."
@@ -901,7 +910,7 @@ restore_command() {
             colorized_echo blue "Backing up current app directory before restore..."
             cp -r "$APP_DIR" "$APP_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
         fi
-        if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
+        if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' --exclude "$sqlite_basename" \
             "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
             colorized_echo red "Failed to restore app directory files."
             echo "Failed to restore app directory files from $temp_restore_dir to $APP_DIR" >>"$log_file"
