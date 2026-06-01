@@ -431,8 +431,13 @@ verify_backup_archive_contents() {
 
     unzip -q "$archive_to_verify" -d "$EXTRACTED_BACKUP_DIR"
 
+    local sqlite_basename=""
     if [ "$DB_TYPE" = "sqlite" ]; then
-        expected_files=$'.env\ndb_backup.sqlite\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
+        sqlite_basename="db.sqlite3"
+    fi
+
+    if [ "$DB_TYPE" = "sqlite" ]; then
+        expected_files=$'.env\n'"$sqlite_basename"$'\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
     else
         expected_files=$'.env\ndb_backup.sql\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
     fi
@@ -448,11 +453,11 @@ verify_backup_archive_contents() {
     assert_equals "$(sha256sum "$EXTRACTED_BACKUP_DIR/pasarguard_data/payload.bin" | awk '{print $1}')" "$ORIGINAL_PAYLOAD_SHA" "Backed up payload.bin contents changed."
 
     if [ "$DB_TYPE" = "sqlite" ]; then
-        assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/db_backup.sqlite"
-        assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/db_backup.sqlite")" "$ORIGINAL_SQLITE_DUMP_SHA" "Backed up SQLite database logical contents changed."
-        if [ -f "$EXTRACTED_BACKUP_DIR/pasarguard_data/db.sqlite3" ]; then
-            assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/pasarguard_data/db.sqlite3"
-            assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/pasarguard_data/db.sqlite3")" "$ORIGINAL_SQLITE_DUMP_SHA" "Archived SQLite data-dir database logical contents changed."
+        assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/$sqlite_basename"
+        assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/$sqlite_basename")" "$ORIGINAL_SQLITE_DUMP_SHA" "Backed up SQLite database logical contents changed."
+        if [ -f "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename" ]; then
+            assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename"
+            assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename")" "$ORIGINAL_SQLITE_DUMP_SHA" "Archived SQLite data-dir database logical contents changed."
         fi
     else
         assert_file_contains "$EXTRACTED_BACKUP_DIR/db_backup.sql" "ci_roundtrip"

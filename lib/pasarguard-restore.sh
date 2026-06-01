@@ -21,6 +21,7 @@ restore_command() {
     local current_db_name=""
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
+    local sqlite_basename=""
 
     redact_database_url() {
         local url="$1"
@@ -571,7 +572,7 @@ restore_command() {
 
     case $db_type in
     sqlite)
-        local sqlite_basename=$(basename "$sqlite_file")
+        sqlite_basename=$(basename "$sqlite_file")
         local backup_source=""
 
         if [ -f "$temp_restore_dir/$sqlite_basename" ]; then
