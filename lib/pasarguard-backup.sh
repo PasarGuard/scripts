@@ -1347,14 +1347,21 @@ backup_command() {
         echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
     fi
 
-    colorized_echo blue "Copying configuration files..."
-    if ! cp "$APP_DIR/.env" "$temp_dir/" 2>>"$log_file"; then
-        error_messages+=("Failed to copy .env file.")
-        echo "Failed to copy .env file" >>"$log_file"
-    fi
-    if ! cp "$APP_DIR/docker-compose.yml" "$temp_dir/" 2>>"$log_file"; then
-        error_messages+=("Failed to copy docker-compose.yml file.")
-        echo "Failed to copy docker-compose.yml file" >>"$log_file"
+    colorized_echo blue "Copying app directory..."
+    if [ -d "$APP_DIR" ]; then
+        # Use rsync to copy the entire app directory, excluding the backup folder
+        if ! rsync -av --exclude 'backup' "$APP_DIR/" "$temp_dir/" >>"$log_file" 2>&1; then
+            error_messages+=("Failed to copy app directory.")
+            echo "Failed to copy app directory" >>"$log_file"
+        fi
+    else
+        colorized_echo yellow "Warning: App directory $APP_DIR does not exist. Copying individual files as fallback."
+        if [ -f "$APP_DIR/.env" ]; then
+            cp "$APP_DIR/.env" "$temp_dir/" 2>>"$log_file" || true
+        fi
+        if [ -f "$APP_DIR/docker-compose.yml" ]; then
+            cp "$APP_DIR/docker-compose.yml" "$temp_dir/" 2>>"$log_file" || true
+        fi
     fi
 
     colorized_echo blue "Copying data directory..."

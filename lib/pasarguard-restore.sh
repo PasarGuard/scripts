@@ -889,14 +889,29 @@ restore_command() {
         colorized_echo yellow "No pasarguard_data directory found in backup. Skipping data restore."
     fi
 
-    # Restore configuration files if needed
-    colorized_echo blue "Restoring configuration files..."
-    if [ -f "$temp_restore_dir/.env" ]; then
-        if [ -f "$APP_DIR/.env" ]; then
-            cp "$APP_DIR/.env" "$APP_DIR/.env.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+    # Restore app directory files (full app backup support)
+    colorized_echo blue "Restoring app directory files..."
+    if [ -d "$temp_restore_dir" ]; then
+        if ! command -v rsync >/dev/null 2>&1; then
+            detect_os
+            install_package rsync
         fi
-        cp "$temp_restore_dir/.env" "$APP_DIR/.env" 2>>"$log_file"
-        colorized_echo green "Environment file restored."
+        mkdir -p "$APP_DIR"
+        if [ "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+            colorized_echo blue "Backing up current app directory before restore..."
+            cp -r "$APP_DIR" "$APP_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
+        fi
+        if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
+            "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
+            colorized_echo red "Failed to restore app directory files."
+            echo "Failed to restore app directory files from $temp_restore_dir to $APP_DIR" >>"$log_file"
+        else
+            colorized_echo green "App directory files restored."
+        fi
+    fi
+
+    # Perform configuration adjustments (e.g. preserve credentials)
+    if [ -f "$APP_DIR/.env" ]; then
         local preserve_db_credentials=false
         if [[ "$db_type" != "sqlite" ]]; then
             if [ -n "$current_db_user" ] && [ -n "${DB_USER:-}" ] && [ "$current_db_user" != "$DB_USER" ]; then
@@ -927,14 +942,6 @@ restore_command() {
                 replace_or_append_env_var "SQLALCHEMY_DATABASE_URL" "$current_sqlalchemy_url" true "$ENV_FILE"
             fi
         fi
-    fi
-
-    if [ -f "$temp_restore_dir/docker-compose.yml" ]; then
-        if [ -f "$APP_DIR/docker-compose.yml" ]; then
-            cp "$APP_DIR/docker-compose.yml" "$APP_DIR/docker-compose.yml.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
-        fi
-        cp "$temp_restore_dir/docker-compose.yml" "$APP_DIR/docker-compose.yml" 2>>"$log_file"
-        colorized_echo green "Docker Compose file restored."
     fi
 
     # Clean up
