@@ -1077,51 +1077,15 @@ status_command() {
 }
 
 prompt_for_db_password() {
-    while true; do
-        colorized_echo cyan "This password will be used to access the database and should be strong."
-        colorized_echo cyan "Note: Avoid special characters like '@', ':', '/', '?', '#', '[', ']' as they may cause connection issues."
-        colorized_echo cyan "If you do not enter a custom password, a secure 20-character password will be generated automatically."
-
-        # Prompt for password input
-        read -p "Enter the password for the database (or press Enter to generate a secure default password): " DB_PASSWORD
-
-        # Generate a 20-character password if the user leaves the input empty
-        if [ -z "$DB_PASSWORD" ]; then
-            DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
-            colorized_echo green "A secure password has been generated automatically."
-            break
-        fi
-
-        # Validate password
-        if [[ "$DB_PASSWORD" =~ [@:/?#\[\]] ]]; then
-            colorized_echo red "Error: Password contains restricted characters (@, :, /, ?, #, [, ]). Please choose another password."
-            continue
-        fi
-        break
-    done
+    DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
+    colorized_echo green "A secure database password has been generated automatically."
     colorized_echo green "This password will be recorded in the .env file for future use."
 
 }
 
 prompt_for_pgadmin_password() {
-    while true; do
-        # Prompt for password input
-        read -p "Enter the password for PGAdmin panel (or press Enter to generate a secure default password): " PGADMIN_PASSWORD
-
-        # Generate a 20-character password if the user leaves the input empty
-        if [ -z "$PGADMIN_PASSWORD" ]; then
-            PGADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
-            colorized_echo green "A secure password has been generated automatically."
-            break
-        fi
-
-        # Validate password
-        if [[ "$PGADMIN_PASSWORD" =~ [@:/?#\[\]] ]]; then
-            colorized_echo red "Error: Password contains restricted characters (@, :, /, ?, #, [, ]). Please choose another password."
-            continue
-        fi
-        break
-    done
+    PGADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
+    colorized_echo green "A secure PGAdmin password has been generated automatically."
     colorized_echo green "pgAdmin address: 0.0.0.0:8010"
     colorized_echo green "pgAdmin default email: pg@github.io"
     colorized_echo green "pgAdmin Password: $PGADMIN_PASSWORD"
