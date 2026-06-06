@@ -24,6 +24,25 @@ filter_backup_cron_entries() {
     grep -F -v "# pasarguard-backup-service" "$source_file" >"$target_file" || true
 }
 
+is_local_db_host() {
+    local host="${1:-}"
+
+    host="${host#[}"
+    host="${host%]}"
+    host="${host%.}"
+    host="${host,,}"
+
+    [[ -z "$host" ]] && return 1
+    [[ "$host" == "localhost" ]] && return 0
+    [[ "$host" == "localhost.localdomain" ]] && return 0
+    [[ "$host" == "127" ]] && return 0
+    [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]] && return 0
+    [[ "$host" == "::1" ]] && return 0
+    [[ "$host" == "0:0:0:0:0:0:0:1" ]] && return 0
+
+    return 1
+}
+
 send_backup_to_telegram() {
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do
@@ -1001,11 +1020,17 @@ backup_command() {
             fi
 
             # Extract host, port, and database
-            if [[ "$url_part" =~ ^([^:/]+)(:([0-9]+))?/(.+)$ ]]; then
+            if [[ "$url_part" =~ ^\[([^]]+)\](:([0-9]+))?/(.+)$ ]]; then
                 db_host="${BASH_REMATCH[1]}"
                 db_port="${BASH_REMATCH[3]:-}"
                 db_name="${BASH_REMATCH[4]}"
+            elif [[ "$url_part" =~ ^([^:/]+)(:([0-9]+))?/(.+)$ ]]; then
+                db_host="${BASH_REMATCH[1]}"
+                db_port="${BASH_REMATCH[3]:-}"
+                db_name="${BASH_REMATCH[4]}"
+            fi
 
+            if [ -n "$db_host" ]; then
                 # Remove query parameters from database name if any
                 db_name="${db_name%%\?*}"
                 db_name="${db_name%%#*}"
@@ -1026,7 +1051,7 @@ backup_command() {
             fi
 
             # For local databases, try to find container name from docker-compose
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+            if is_local_db_host "$db_host"; then
                 container_name=$(find_container "$db_type")
                 echo "Container name/ID for $db_type: $container_name" >>"$log_file"
             fi
@@ -1040,7 +1065,7 @@ backup_command() {
         colorized_echo blue "Backing up database..."
         case $db_type in
         mariadb)
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+            if is_local_db_host "$db_host"; then
                 if [ -z "$container_name" ]; then
                     colorized_echo red "Error: MariaDB container not found. Is the container running?"
                     echo "MariaDB container not found. Container name: ${container_name:-empty}" >>"$log_file"
@@ -1108,7 +1133,7 @@ backup_command() {
             fi
             ;;
         mysql)
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+            if is_local_db_host "$db_host"; then
                 if [ -z "$container_name" ]; then
                     colorized_echo red "Error: MySQL container not found. Is the container running?"
                     echo "MySQL container not found. Container name: ${container_name:-empty}" >>"$log_file"
@@ -1217,7 +1242,7 @@ backup_command() {
             fi
             ;;
         postgresql)
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+            if is_local_db_host "$db_host"; then
                 if [ -z "$container_name" ]; then
                     colorized_echo red "Error: PostgreSQL container not found. Is the container running?"
                     echo "PostgreSQL container not found. Container name: ${container_name:-empty}" >>"$log_file"
@@ -1257,7 +1282,7 @@ backup_command() {
             fi
             ;;
         timescaledb)
-            if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+            if is_local_db_host "$db_host"; then
                 if [ -z "$container_name" ]; then
                     colorized_echo red "Error: TimescaleDB container not found. Is the container running?"
                     echo "Container name detection failed. Checked for: timescaledb, postgresql" >>"$log_file"
