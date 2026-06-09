@@ -21,6 +21,10 @@ restore_command() {
     local current_db_name=""
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
+    local current_backup_custom_enabled="false"
+    local current_backup_db_type=""
+    local current_backup_db_container=""
+    local custom_restore_mode=false
     local sqlite_basename=""
 
     redact_database_url() {
@@ -58,6 +62,15 @@ restore_command() {
                 ;;
             SQLALCHEMY_DATABASE_URL)
                 current_sqlalchemy_url="$value"
+                ;;
+            BACKUP_CUSTOM_ENABLED)
+                current_backup_custom_enabled="$value"
+                ;;
+            BACKUP_DB_TYPE)
+                current_backup_db_type="$value"
+                ;;
+            BACKUP_DB_CONTAINER)
+                current_backup_db_container="$value"
                 ;;
             esac
         done <"$ENV_FILE"
@@ -426,14 +439,78 @@ restore_command() {
 
     colorized_echo green "✓ Loaded $env_vars_loaded environment variables"
 
-    if [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
+    if is_backup_custom_enabled; then
+        custom_restore_mode=true
+    fi
+
+    if [ "$custom_restore_mode" = true ]; then
+        colorized_echo blue "Custom database restore mode detected"
+        echo "Custom database restore mode enabled" >>"$log_file"
+
+        local custom_db_type_raw="${current_backup_db_type:-${BACKUP_DB_TYPE:-}}"
+        local custom_container="${current_backup_db_container:-${BACKUP_DB_CONTAINER:-}}"
+
+        if [ -z "$custom_db_type_raw" ]; then
+            colorized_echo red "BACKUP_DB_TYPE not found in backup or current .env file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if ! db_type=$(normalize_custom_db_type "$custom_db_type_raw"); then
+            colorized_echo red "Invalid BACKUP_DB_TYPE '$custom_db_type_raw' in backup configuration"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if [ -z "$custom_container" ]; then
+            colorized_echo red "BACKUP_DB_CONTAINER not found in backup or current .env file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        container_name="$custom_container"
+        db_name="${current_db_name:-${DB_NAME:-}}"
+        db_user="${current_db_user:-${DB_USER:-}}"
+        db_password=$(resolve_restore_db_password "$db_type" "$db_user" "${current_db_password:-${DB_PASSWORD:-}}" "${current_mysql_root_password:-${MYSQL_ROOT_PASSWORD:-}}")
+        db_host="127.0.0.1"
+
+        if [ -z "$db_name" ]; then
+            colorized_echo red "DB_NAME not found in backup or current .env file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if [ -z "$db_user" ]; then
+            colorized_echo red "DB_USER not found in backup or current .env file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if [ -z "$db_password" ]; then
+            colorized_echo red "Database password not found. Check DB_PASSWORD in .env"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if ! ensure_custom_backup_container_running "$container_name" "$log_file"; then
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if ! validate_custom_backup_credentials "$container_name" "$db_type" "$db_user" "$db_password" "$log_file"; then
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        colorized_echo green "✓ Custom restore target: $(custom_db_type_label "$db_type") database '$db_name' in container '$container_name'"
+        echo "Custom restore target: $db_type / $db_name / $container_name" >>"$log_file"
+    elif [ -z "$SQLALCHEMY_DATABASE_URL" ]; then
         colorized_echo red "SQLALCHEMY_DATABASE_URL not found in backup .env file"
         colorized_echo yellow "Available environment variables:"
         grep -v '^#' "$extracted_env" | grep '=' | cut -d'=' -f1 | head -10
         rm -rf "$temp_restore_dir"
         exit 1
-    fi
-
+    else
     colorized_echo green "✓ Found SQLALCHEMY_DATABASE_URL: $(redact_database_url "$SQLALCHEMY_DATABASE_URL")"
 
     # Parse database configuration (similar to backup function)
@@ -529,16 +606,26 @@ restore_command() {
     fi
 
     colorized_echo green "✓ Database configuration detected: $db_type"
+    fi
 
     # Confirm restore
-    colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
-    colorized_echo yellow "WARNING: This will overwrite your current $db_type database!"
-    colorized_echo blue "Database type: $db_type"
-    if [ -n "$db_name" ]; then
+    if [ "$custom_restore_mode" = true ]; then
+        colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite the custom database!"
+        colorized_echo yellow "WARNING: Custom restore will overwrite database '$db_name' in container '$container_name'"
+        colorized_echo blue "Database type: $(custom_db_type_label "$db_type")"
         colorized_echo blue "Database name: $db_name"
-    fi
-    if [ -n "$container_name" ]; then
         colorized_echo blue "Container: $container_name"
+        colorized_echo blue "User: $db_user"
+    else
+        colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
+        colorized_echo yellow "WARNING: This will overwrite your current $db_type database!"
+        colorized_echo blue "Database type: $db_type"
+        if [ -n "$db_name" ]; then
+            colorized_echo blue "Database name: $db_name"
+        fi
+        if [ -n "$container_name" ]; then
+            colorized_echo blue "Container: $container_name"
+        fi
     fi
 
     while true; do
@@ -617,7 +704,14 @@ restore_command() {
                 rm -rf "$temp_restore_dir"
                 exit 1
             else
-                local verified_container=$(verify_and_start_container "$container_name" "$db_type")
+                local verified_container=""
+                if [ "$custom_restore_mode" = true ]; then
+                    if ensure_custom_backup_container_running "$container_name" "$log_file"; then
+                        verified_container="$container_name"
+                    fi
+                else
+                    verified_container=$(verify_and_start_container "$container_name" "$db_type")
+                fi
                 if [ -z "$verified_container" ]; then
                     colorized_echo red "Failed to start database container. Please start it manually."
                     rm -rf "$temp_restore_dir"
@@ -640,8 +734,29 @@ restore_command() {
                 local restore_success=false
                 local backup_restore_user="${db_user:-${DB_USER:-}}"
                 local backup_restore_password="${db_password:-${DB_PASSWORD:-}}"
-                local app_db_target="${current_db_name:-${db_name:-}}"
+                local app_db_target="${current_db_name:-${db_name:-${DB_NAME:-}}}"
 
+                if [ "$custom_restore_mode" = true ]; then
+                    colorized_echo blue "Restoring custom $db_type_name database '$app_db_target' using user '$backup_restore_user'..."
+                    if [ -n "$app_db_target" ]; then
+                        if docker exec -i "$container_name" "$mysql_cmd" -u "$backup_restore_user" -p"$backup_restore_password" "$app_db_target" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                            restore_success=true
+                            colorized_echo green "$db_type_name database restored successfully."
+                        fi
+                    fi
+                    if [ "$restore_success" = false ]; then
+                        if docker exec -i "$container_name" "$mysql_cmd" -u "$backup_restore_user" -p"$backup_restore_password" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                            restore_success=true
+                            colorized_echo green "$db_type_name database restored successfully."
+                        fi
+                    fi
+                    if [ "$restore_success" = false ]; then
+                        colorized_echo red "Failed to restore custom $db_type_name database."
+                        colorized_echo yellow "Check log file for details: $log_file"
+                        rm -rf "$temp_restore_dir"
+                        exit 1
+                    fi
+                else
                 # Try root password from backup .env first
                 if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                     colorized_echo blue "Trying root user from backup .env..."
@@ -707,6 +822,7 @@ restore_command() {
                     rm -rf "$temp_restore_dir"
                     exit 1
                 fi
+                fi
             fi
         else
             colorized_echo red "Remote $db_type restore not supported yet."
@@ -738,7 +854,14 @@ restore_command() {
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
-            local verified_container=$(verify_and_start_container "$container_name" "$db_type")
+            local verified_container=""
+            if [ "$custom_restore_mode" = true ]; then
+                if ensure_custom_backup_container_running "$container_name" "$log_file"; then
+                    verified_container="$container_name"
+                fi
+            else
+                verified_container=$(verify_and_start_container "$container_name" "$db_type")
+            fi
             if [ -z "$verified_container" ]; then
                 colorized_echo red "Failed to start database container. Please start it manually."
                 rm -rf "$temp_restore_dir"
@@ -746,11 +869,18 @@ restore_command() {
             fi
             container_name="$verified_container"
 
-            colorized_echo blue "Restoring $db_type database from container: $container_name"
+            if [ "$custom_restore_mode" = true ]; then
+                colorized_echo blue "Restoring custom $(custom_db_type_label "$db_type") database from container: $container_name"
+            else
+                colorized_echo blue "Restoring $db_type database from container: $container_name"
+            fi
 
             # Prepare restore credentials, preferring the current installation values.
                 local restore_user="${current_db_user:-${db_user:-${DB_USER:-postgres}}}"
                 local restore_password="${current_db_password:-${db_password:-${DB_PASSWORD:-}}}"
+                if [ "$custom_restore_mode" = true ] && [ -z "$restore_password" ]; then
+                    restore_password=$(resolve_restore_db_password "$db_type" "$restore_user" "${current_db_password:-${DB_PASSWORD:-}}" "${current_mysql_root_password:-${MYSQL_ROOT_PASSWORD:-}}")
+                fi
                 local restore_db_name="${current_db_name:-${db_name:-${DB_NAME:-postgres}}}"
                 local admin_user="${current_db_user:-${db_user:-${DB_USER:-postgres}}}"
                 local admin_password="${current_db_password:-${db_password:-${DB_PASSWORD:-$restore_password}}}"

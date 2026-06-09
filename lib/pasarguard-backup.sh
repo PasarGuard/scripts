@@ -338,6 +338,7 @@ backup_service() {
             colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
             colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
             colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
+            colorized_echo cyan "Database Mode: $(get_backup_database_mode_label)"
             if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
                 colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
             else
@@ -471,12 +472,17 @@ backup_service() {
         backup_proxy_url=""
     fi
 
+    prompt_backup_database_mode
+
     sed -i '/^BACKUP_SERVICE_ENABLED/d' "$ENV_FILE"
     sed -i '/^BACKUP_TELEGRAM_BOT_KEY/d' "$ENV_FILE"
     sed -i '/^BACKUP_TELEGRAM_CHAT_ID/d' "$ENV_FILE"
     sed -i '/^BACKUP_CRON_SCHEDULE/d' "$ENV_FILE"
     sed -i '/^BACKUP_PROXY_ENABLED/d' "$ENV_FILE"
     sed -i '/^BACKUP_PROXY_URL/d' "$ENV_FILE"
+    sed -i '/^BACKUP_CUSTOM_ENABLED/d' "$ENV_FILE"
+    sed -i '/^BACKUP_DB_TYPE/d' "$ENV_FILE"
+    sed -i '/^BACKUP_DB_CONTAINER/d' "$ENV_FILE"
 
     {
         echo ""
@@ -487,7 +493,15 @@ backup_service() {
         echo "BACKUP_CRON_SCHEDULE=\"$cron_schedule\""
         echo "BACKUP_PROXY_ENABLED=$backup_proxy_enabled"
         echo "BACKUP_PROXY_URL=\"$backup_proxy_url\""
+        echo "BACKUP_CUSTOM_ENABLED=$backup_custom_enabled"
     } >>"$ENV_FILE"
+
+    if [ "$backup_custom_enabled" = "true" ]; then
+        {
+            echo "BACKUP_DB_TYPE=$backup_db_type"
+            echo "BACKUP_DB_CONTAINER=$backup_db_container"
+        } >>"$ENV_FILE"
+    fi
 
     colorized_echo green "Backup service configuration saved in $ENV_FILE."
 
@@ -573,6 +587,7 @@ view_backup_service() {
     else
         colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
     fi
+    colorized_echo cyan "Database Mode: $(get_backup_database_mode_label)"
     if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
         colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
     else
@@ -619,9 +634,10 @@ edit_backup_service() {
     colorized_echo cyan "2. Telegram Chat ID: $telegram_chat_id"
     colorized_echo cyan "3. Backup Interval: Every $interval_hours hour(s)"
     colorized_echo cyan "4. Proxy: $proxy_display"
-    colorized_echo yellow "5. Cancel"
+    colorized_echo cyan "5. Database Backup Mode: $(get_backup_database_mode_label)"
+    colorized_echo yellow "6. Cancel"
     echo ""
-    read -p "Which setting would you like to edit? (1-5): " edit_choice
+    read -p "Which setting would you like to edit? (1-6): " edit_choice
 
     case $edit_choice in
     1)
@@ -745,6 +761,11 @@ edit_backup_service() {
         colorized_echo green "Backup proxy configuration updated successfully."
         ;;
     5)
+        prompt_backup_database_mode
+        save_backup_database_mode_config "$backup_custom_enabled" "$backup_db_type" "$backup_db_container"
+        colorized_echo green "Database backup mode updated successfully."
+        ;;
+    6)
         colorized_echo yellow "Edit cancelled."
         return
         ;;
@@ -767,6 +788,9 @@ remove_backup_service() {
     sed -i '/BACKUP_CRON_SCHEDULE/d' "$ENV_FILE"
     sed -i '/BACKUP_PROXY_ENABLED/d' "$ENV_FILE"
     sed -i '/BACKUP_PROXY_URL/d' "$ENV_FILE"
+    sed -i '/BACKUP_CUSTOM_ENABLED/d' "$ENV_FILE"
+    sed -i '/BACKUP_DB_TYPE/d' "$ENV_FILE"
+    sed -i '/BACKUP_DB_CONTAINER/d' "$ENV_FILE"
 
     local temp_cron=$(mktemp)
     local filtered_cron="${temp_cron}.tmp"
@@ -786,6 +810,492 @@ remove_backup_service() {
     colorized_echo green "Backup service has been removed."
 }
 
+mask_database_password() {
+    printf '%s\n' "---"
+}
+
+is_backup_custom_enabled() {
+    [ "${BACKUP_CUSTOM_ENABLED:-false}" = "true" ]
+}
+
+read_backup_env_var() {
+    local key="$1"
+    local value=""
+
+    if [ ! -f "$ENV_FILE" ]; then
+        return 1
+    fi
+
+    value=$(awk -F= -v env_key="$key" '$1 == env_key { print substr($0, index($0, "=") + 1); exit }' "$ENV_FILE")
+    value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    printf '%s\n' "$value"
+}
+
+get_backup_database_mode_label() {
+    local custom_enabled=""
+    local db_type=""
+    local container=""
+    local db_type_label=""
+
+    custom_enabled=$(read_backup_env_var "BACKUP_CUSTOM_ENABLED" 2>/dev/null || true)
+    if [ "$custom_enabled" != "true" ]; then
+        printf '%s\n' "PasarGuard (SQLALCHEMY_DATABASE_URL)"
+        return 0
+    fi
+
+    db_type=$(read_backup_env_var "BACKUP_DB_TYPE" 2>/dev/null || true)
+    container=$(read_backup_env_var "BACKUP_DB_CONTAINER" 2>/dev/null || true)
+    db_type_label=$(custom_db_type_label "$(normalize_custom_db_type "$db_type" 2>/dev/null || echo "$db_type")")
+
+    if [ -n "$db_type" ] && [ -n "$container" ]; then
+        printf 'Custom %s (%s)\n' "$db_type_label" "$container"
+    elif [ -n "$container" ]; then
+        printf 'Custom (%s)\n' "$container"
+    else
+        printf '%s\n' "Custom (incomplete configuration)"
+    fi
+}
+
+save_backup_database_mode_config() {
+    local enabled="$1"
+    local db_type="${2:-}"
+    local container="${3:-}"
+
+    replace_or_append_env_var "BACKUP_CUSTOM_ENABLED" "$enabled"
+    if [ "$enabled" = "true" ]; then
+        replace_or_append_env_var "BACKUP_DB_TYPE" "$db_type"
+        replace_or_append_env_var "BACKUP_DB_CONTAINER" "$container"
+    else
+        delete_env_var "BACKUP_DB_TYPE" "$ENV_FILE"
+        delete_env_var "BACKUP_DB_CONTAINER" "$ENV_FILE"
+    fi
+}
+
+prompt_backup_database_mode() {
+    local mode_choice=""
+    local type_choice=""
+    local selected_type=""
+    local container_name=""
+    local running=""
+
+    backup_custom_enabled="false"
+    backup_db_type=""
+    backup_db_container=""
+
+    colorized_echo blue "====================================="
+    colorized_echo blue "      Database Backup Mode           "
+    colorized_echo blue "====================================="
+    echo "1. PasarGuard (default - uses SQLALCHEMY_DATABASE_URL)"
+    echo "2. Custom Database (backup from a specific Docker container)"
+    echo ""
+    colorized_echo cyan "Custom mode uses DB_NAME, DB_USER, and DB_PASSWORD from this .env file."
+    echo ""
+    read -p "Select database backup mode (1-2) [default: 1]: " mode_choice
+    mode_choice="${mode_choice:-1}"
+
+    case "$mode_choice" in
+    2)
+        backup_custom_enabled="true"
+        echo ""
+        echo "Select database type:"
+        echo "1. MariaDB"
+        echo "2. MySQL"
+        echo "3. PostgreSQL"
+        echo "4. TimescaleDB"
+        while true; do
+            read -p "Enter your choice (1-4): " type_choice
+            case "$type_choice" in
+            1)
+                selected_type="mariadb"
+                break
+                ;;
+            2)
+                selected_type="mysql"
+                break
+                ;;
+            3)
+                selected_type="postgresql"
+                break
+                ;;
+            4)
+                selected_type="timescaledb"
+                break
+                ;;
+            *)
+                colorized_echo red "Invalid choice. Please enter 1, 2, 3, or 4."
+                ;;
+            esac
+        done
+
+        while true; do
+            read -p "Enter the database container name or ID (e.g. pasarguard-mariadb-1): " container_name
+            container_name=$(echo "$container_name" | xargs)
+            if [ -z "$container_name" ]; then
+                colorized_echo red "Container name cannot be empty."
+                continue
+            fi
+
+            if ! docker inspect "$container_name" >/dev/null 2>&1; then
+                colorized_echo red "Container '$container_name' does not exist. Please try again."
+                continue
+            fi
+
+            running=$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo "false")
+            if [ "$running" != "true" ]; then
+                colorized_echo red "Container '$container_name' is not running. Please start it and try again."
+                continue
+            fi
+
+            backup_db_type="$selected_type"
+            backup_db_container="$container_name"
+            colorized_echo green "Custom database mode selected: $(custom_db_type_label "$selected_type") in container '$container_name'"
+            colorized_echo cyan "Credentials will be read from DB_NAME, DB_USER, and DB_PASSWORD in $ENV_FILE"
+            break
+        done
+        ;;
+    1 | "")
+        backup_custom_enabled="false"
+        backup_db_type=""
+        backup_db_container=""
+        colorized_echo green "PasarGuard database mode selected."
+        ;;
+    *)
+        colorized_echo red "Invalid choice. Using PasarGuard database mode."
+        backup_custom_enabled="false"
+        ;;
+    esac
+}
+
+resolve_custom_backup_db_password() {
+    local db_type="$1"
+
+    # Standard PasarGuard .env uses DB_USER (e.g. pasarguard) + DB_PASSWORD.
+    if [ -n "${DB_PASSWORD:-}" ]; then
+        printf '%s\n' "$DB_PASSWORD"
+        return 0
+    fi
+
+    case "$db_type" in
+    mariadb | mysql)
+        if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+            printf '%s\n' "$MYSQL_ROOT_PASSWORD"
+        fi
+        ;;
+    esac
+}
+
+normalize_custom_db_type() {
+    local raw="${1,,}"
+
+    case "$raw" in
+    mariadb)
+        printf '%s\n' "mariadb"
+        ;;
+    mysql)
+        printf '%s\n' "mysql"
+        ;;
+    postgresql | postgres)
+        printf '%s\n' "postgresql"
+        ;;
+    timescaledb | timescale)
+        printf '%s\n' "timescaledb"
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+custom_db_client_cmd() {
+    case "$1" in
+    mariadb)
+        printf '%s\n' "mariadb"
+        ;;
+    mysql)
+        printf '%s\n' "mysql"
+        ;;
+    postgresql | timescaledb)
+        printf '%s\n' "psql"
+        ;;
+    esac
+}
+
+custom_db_dump_cmd() {
+    case "$1" in
+    mariadb)
+        printf '%s\n' "mariadb-dump"
+        ;;
+    mysql)
+        printf '%s\n' "mysqldump"
+        ;;
+    postgresql | timescaledb)
+        printf '%s\n' "pg_dump"
+        ;;
+    esac
+}
+
+custom_db_type_label() {
+    case "$1" in
+    mariadb)
+        printf '%s\n' "MariaDB"
+        ;;
+    mysql)
+        printf '%s\n' "MySQL"
+        ;;
+    postgresql)
+        printf '%s\n' "PostgreSQL"
+        ;;
+    timescaledb)
+        printf '%s\n' "TimescaleDB"
+        ;;
+    *)
+        printf '%s\n' "$1"
+        ;;
+    esac
+}
+
+log_custom_backup_config() {
+    local log_file="$1"
+
+    echo "Custom Database Mode: enabled" >>"$log_file"
+    echo "BACKUP_DB_TYPE: ${BACKUP_DB_TYPE:-}" >>"$log_file"
+    echo "BACKUP_DB_CONTAINER: ${BACKUP_DB_CONTAINER:-}" >>"$log_file"
+    echo "DB_NAME: ${DB_NAME:-}" >>"$log_file"
+    echo "DB_USER: ${DB_USER:-}" >>"$log_file"
+    echo "Database password: $(mask_database_password)" >>"$log_file"
+}
+
+validate_custom_backup_container() {
+    local container="$1"
+    local log_file="$2"
+    local running=""
+
+    if [ -z "$container" ]; then
+        colorized_echo red "Error: BACKUP_DB_CONTAINER is not set"
+        echo "BACKUP_DB_CONTAINER is not set" >>"$log_file"
+        return 1
+    fi
+
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        colorized_echo red "Error: Container '$container' does not exist"
+        echo "Container does not exist: $container" >>"$log_file"
+        return 1
+    fi
+
+    running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || echo "false")
+    if [ "$running" != "true" ]; then
+        colorized_echo red "Error: Container '$container' is not running"
+        echo "Container is not running: $container" >>"$log_file"
+        return 1
+    fi
+
+    return 0
+}
+
+ensure_custom_backup_container_running() {
+    local container="$1"
+    local log_file="$2"
+
+    if validate_custom_backup_container "$container" "$log_file"; then
+        return 0
+    fi
+
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    colorized_echo yellow "Container '$container' is not running. Attempting to start..."
+    echo "Attempting to start container: $container" >>"$log_file"
+    if ! docker start "$container" >>"$log_file" 2>&1; then
+        colorized_echo red "Error: Failed to start container '$container'"
+        echo "Failed to start container: $container" >>"$log_file"
+        return 1
+    fi
+
+    sleep 2
+    validate_custom_backup_container "$container" "$log_file"
+}
+
+resolve_restore_db_password() {
+    local db_type="$1"
+    local preferred_password="${3:-}"
+
+    if [ -n "$preferred_password" ]; then
+        printf '%s\n' "$preferred_password"
+        return 0
+    fi
+
+    resolve_custom_backup_db_password "$db_type"
+}
+
+validate_custom_backup_credentials() {
+    local container="$1"
+    local db_type="$2"
+    local db_user="$3"
+    local db_password="$4"
+    local log_file="$5"
+    local client_cmd=""
+    local db_type_label=""
+
+    client_cmd=$(custom_db_client_cmd "$db_type")
+    db_type_label=$(custom_db_type_label "$db_type")
+
+    case "$db_type" in
+    mariadb | mysql)
+        if ! docker exec "$container" "$client_cmd" -u "$db_user" -p"$db_password" -e "SELECT 1" >/dev/null 2>>"$log_file"; then
+            colorized_echo red "Error: Invalid $db_type_label credentials for user '$db_user'"
+            echo "Database credential validation failed for user: $db_user" >>"$log_file"
+            return 1
+        fi
+        ;;
+    postgresql | timescaledb)
+        if ! docker exec -e PGPASSWORD="$db_password" "$container" psql -U "$db_user" -d postgres -tAc "SELECT 1" >/dev/null 2>>"$log_file"; then
+            colorized_echo red "Error: Invalid $db_type_label credentials for user '$db_user'"
+            echo "Database credential validation failed for user: $db_user" >>"$log_file"
+            return 1
+        fi
+        ;;
+    esac
+
+    return 0
+}
+
+validate_custom_backup_database_exists() {
+    local container="$1"
+    local db_type="$2"
+    local db_user="$3"
+    local db_password="$4"
+    local db_name="$5"
+    local log_file="$6"
+    local client_cmd=""
+    local escaped_db_name=""
+    local db_exists=""
+
+    client_cmd=$(custom_db_client_cmd "$db_type")
+    escaped_db_name="${db_name//\'/\'\'}"
+
+    case "$db_type" in
+    mariadb | mysql)
+        if ! docker exec "$container" "$client_cmd" -u "$db_user" -p"$db_password" -N -e "SHOW DATABASES LIKE '${escaped_db_name}';" 2>>"$log_file" | grep -qFx "$db_name"; then
+            colorized_echo red "Error: Database '$db_name' does not exist in container '$container'"
+            echo "Database does not exist: $db_name" >>"$log_file"
+            return 1
+        fi
+        ;;
+    postgresql | timescaledb)
+        db_exists=$(docker exec -e PGPASSWORD="$db_password" "$container" psql -U "$db_user" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${escaped_db_name}'" 2>>"$log_file" || true)
+        if [ "$db_exists" != "1" ]; then
+            colorized_echo red "Error: Database '$db_name' does not exist in container '$container'"
+            echo "Database does not exist: $db_name" >>"$log_file"
+            return 1
+        fi
+        ;;
+    esac
+
+    return 0
+}
+
+dump_custom_backup_database() {
+    local container="$1"
+    local db_type="$2"
+    local db_user="$3"
+    local db_password="$4"
+    local db_name="$5"
+    local output_file="$6"
+    local log_file="$7"
+    local dump_cmd=""
+    local db_type_label=""
+
+    dump_cmd=$(custom_db_dump_cmd "$db_type")
+    db_type_label=$(custom_db_type_label "$db_type")
+
+    case "$db_type" in
+    mariadb | mysql)
+        if ! docker exec "$container" "$dump_cmd" -u "$db_user" -p"$db_password" "$db_name" --events --triggers >"$output_file" 2>>"$log_file"; then
+            colorized_echo red "Error: $db_type_label dump failed. Check log file for details."
+            echo "$db_type_label dump failed for database: $db_name" >>"$log_file"
+            return 1
+        fi
+        ;;
+    postgresql | timescaledb)
+        if ! docker exec -e PGPASSWORD="$db_password" "$container" pg_dump -U "$db_user" -d "$db_name" --clean --if-exists >"$output_file" 2>>"$log_file"; then
+            colorized_echo red "Error: $db_type_label dump failed. Check log file for details."
+            echo "$db_type_label dump failed for database: $db_name" >>"$log_file"
+            return 1
+        fi
+        ;;
+    esac
+
+    return 0
+}
+
+perform_custom_database_backup() {
+    local output_file="$1"
+    local log_file="$2"
+    local db_type=""
+    local db_type_label=""
+    local container=""
+    local db_name=""
+    local db_user=""
+    local db_password=""
+
+    if [ -z "${BACKUP_DB_TYPE:-}" ]; then
+        colorized_echo red "Error: BACKUP_DB_TYPE is not set"
+        echo "BACKUP_DB_TYPE is not set" >>"$log_file"
+        return 1
+    fi
+
+    if ! db_type=$(normalize_custom_db_type "$BACKUP_DB_TYPE"); then
+        colorized_echo red "Error: Invalid BACKUP_DB_TYPE '$BACKUP_DB_TYPE'. Supported values: mariadb, mysql, postgresql, timescaledb"
+        echo "Invalid BACKUP_DB_TYPE: $BACKUP_DB_TYPE" >>"$log_file"
+        return 1
+    fi
+
+    container="${BACKUP_DB_CONTAINER:-}"
+    db_name="${DB_NAME:-}"
+    db_user="${DB_USER:-}"
+    db_password=$(resolve_custom_backup_db_password "$db_type")
+    db_type_label=$(custom_db_type_label "$db_type")
+
+    if [ -z "$db_name" ]; then
+        colorized_echo red "Error: DB_NAME is not set in $ENV_FILE"
+        echo "DB_NAME is not set in .env" >>"$log_file"
+        return 1
+    fi
+
+    if [ -z "$db_user" ]; then
+        colorized_echo red "Error: DB_USER is not set in $ENV_FILE"
+        echo "DB_USER is not set in .env" >>"$log_file"
+        return 1
+    fi
+
+    if [ -z "$db_password" ]; then
+        colorized_echo red "Error: Database password not found. Check DB_PASSWORD in $ENV_FILE"
+        echo "Database password not found in .env" >>"$log_file"
+        return 1
+    fi
+
+    if ! validate_custom_backup_container "$container" "$log_file"; then
+        return 1
+    fi
+
+    if ! validate_custom_backup_credentials "$container" "$db_type" "$db_user" "$db_password" "$log_file"; then
+        return 1
+    fi
+
+    if ! validate_custom_backup_database_exists "$container" "$db_type" "$db_user" "$db_password" "$db_name" "$log_file"; then
+        return 1
+    fi
+
+    colorized_echo blue "Backing up $db_type_label database '$db_name' from container: $container (user: $db_user)"
+    echo "Starting custom $db_type_label backup for database: $db_name" >>"$log_file"
+
+    if ! dump_custom_backup_database "$container" "$db_type" "$db_user" "$db_password" "$db_name" "$output_file" "$log_file"; then
+        return 1
+    fi
+
+    return 0
+}
 
 backup_command() {
     colorized_echo blue "Starting backup process..."
@@ -938,7 +1448,35 @@ backup_command() {
     local db_name=""
     local container_name=""
     local safe_sqlalchemy_url=""
+    local custom_backup_mode=false
 
+    if is_backup_custom_enabled; then
+        custom_backup_mode=true
+    fi
+
+    if [ "$custom_backup_mode" = true ]; then
+        colorized_echo blue "Custom Database Mode enabled"
+        log_custom_backup_config "$log_file"
+        colorized_echo blue "Database configuration:"
+        colorized_echo blue "  Type: ${BACKUP_DB_TYPE:-}"
+        colorized_echo blue "  Container: ${BACKUP_DB_CONTAINER:-}"
+        colorized_echo blue "  Database: ${DB_NAME:-}"
+        colorized_echo blue "  User: ${DB_USER:-}"
+        colorized_echo blue "  Password: $(mask_database_password)"
+
+        colorized_echo blue "Backing up custom database..."
+        if ! perform_custom_database_backup "$temp_dir/db_backup.sql" "$log_file"; then
+            error_messages+=("Custom database backup failed.")
+            colorized_echo yellow "Please check the log file for details: $log_file"
+            keep_log_file=true
+            send_backup_error_to_telegram "${error_messages[*]}" "$log_file"
+            cleanup_backup_command
+            return 1
+        fi
+
+        colorized_echo green "Custom database backup completed successfully"
+        db_type=$(normalize_custom_db_type "${BACKUP_DB_TYPE}" 2>/dev/null || true)
+    else
     safe_sqlalchemy_url=$(printf '%s' "${SQLALCHEMY_DATABASE_URL:-not set}" | sed -E 's#^([^:]+://)([^@/]+)@#\1REDACTED@#')
 
     # SQLALCHEMY_DATABASE_URL should already be loaded from .env above
@@ -1371,6 +1909,7 @@ backup_command() {
         colorized_echo yellow "Warning: No database type detected. Skipping database backup."
         echo "Warning: No database type detected." >>"$log_file"
         echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
+    fi
     fi
 
     colorized_echo blue "Copying app directory..."
