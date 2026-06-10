@@ -866,6 +866,10 @@ save_backup_database_mode_config() {
         if [ -n "$container" ]; then
             container=$(resolve_docker_container_name "$container")
         fi
+        if [ -z "$container" ]; then
+            colorized_echo red "Error: BACKUP_DB_CONTAINER could not be resolved."
+            return 1
+        fi
         replace_or_append_env_var "BACKUP_DB_TYPE" "$db_type"
         replace_or_append_env_var "BACKUP_DB_CONTAINER" "$container"
     else
