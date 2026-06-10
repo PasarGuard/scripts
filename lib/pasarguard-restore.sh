@@ -24,6 +24,7 @@ restore_command() {
     local current_backup_custom_enabled="false"
     local current_backup_db_type=""
     local current_backup_db_container=""
+    local had_current_env=false
     local custom_restore_mode=false
     local sqlite_basename=""
 
@@ -39,6 +40,7 @@ restore_command() {
     }
 
     if [ -f "$ENV_FILE" ]; then
+        had_current_env=true
         set +e
         while IFS='=' read -r key value || [ -n "$key" ]; do
             if [[ -z "$key" || "$key" =~ ^# ]]; then
@@ -439,7 +441,7 @@ restore_command() {
 
     colorized_echo green "✓ Loaded $env_vars_loaded environment variables"
 
-    if is_backup_custom_enabled; then
+    if [ "${current_backup_custom_enabled:-false}" = "true" ] || is_backup_custom_enabled; then
         custom_restore_mode=true
     fi
 
@@ -497,7 +499,7 @@ restore_command() {
             exit 1
         fi
 
-        if ! validate_custom_backup_credentials "$container_name" "$db_type" "$db_user" "$db_password" "$log_file"; then
+        if ! validate_custom_backup_credentials "$container_name" "$db_type" "$db_user" "$db_password" "$log_file" "$db_name"; then
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -1080,6 +1082,21 @@ restore_command() {
             fi
             if [ -n "$current_sqlalchemy_url" ]; then
                 replace_or_append_env_var "SQLALCHEMY_DATABASE_URL" "$current_sqlalchemy_url" true "$ENV_FILE"
+            fi
+        fi
+
+        if [ "$had_current_env" = true ]; then
+            replace_or_append_env_var "BACKUP_CUSTOM_ENABLED" "$current_backup_custom_enabled" false "$ENV_FILE"
+            if [ "$current_backup_custom_enabled" = "true" ]; then
+                if [ -n "$current_backup_db_type" ]; then
+                    replace_or_append_env_var "BACKUP_DB_TYPE" "$current_backup_db_type" false "$ENV_FILE"
+                fi
+                if [ -n "$current_backup_db_container" ]; then
+                    replace_or_append_env_var "BACKUP_DB_CONTAINER" "$current_backup_db_container" false "$ENV_FILE"
+                fi
+            else
+                delete_env_var "BACKUP_DB_TYPE" "$ENV_FILE"
+                delete_env_var "BACKUP_DB_CONTAINER" "$ENV_FILE"
             fi
         fi
     fi

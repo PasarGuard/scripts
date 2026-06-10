@@ -863,6 +863,9 @@ save_backup_database_mode_config() {
 
     replace_or_append_env_var "BACKUP_CUSTOM_ENABLED" "$enabled"
     if [ "$enabled" = "true" ]; then
+        if [ -n "$container" ]; then
+            container=$(resolve_docker_container_name "$container")
+        fi
         replace_or_append_env_var "BACKUP_DB_TYPE" "$db_type"
         replace_or_append_env_var "BACKUP_DB_CONTAINER" "$container"
     else
@@ -947,8 +950,12 @@ prompt_backup_database_mode() {
             fi
 
             backup_db_type="$selected_type"
-            backup_db_container="$container_name"
-            colorized_echo green "Custom database mode selected: $(custom_db_type_label "$selected_type") in container '$container_name'"
+            backup_db_container=$(resolve_docker_container_name "$container_name")
+            if [ -z "$backup_db_container" ]; then
+                colorized_echo red "Failed to resolve a stable container name for '$container_name'."
+                continue
+            fi
+            colorized_echo green "Custom database mode selected: $(custom_db_type_label "$selected_type") in container '$backup_db_container'"
             colorized_echo cyan "Credentials will be read from DB_NAME, DB_USER, and DB_PASSWORD in $ENV_FILE"
             break
         done
@@ -1065,6 +1072,15 @@ log_custom_backup_config() {
     echo "Database password: $(mask_database_password)" >>"$log_file"
 }
 
+resolve_docker_container_name() {
+    local ref="$1"
+    local name=""
+
+    name=$(docker inspect -f '{{.Name}}' "$ref" 2>/dev/null || true)
+    name="${name#/}"
+    printf '%s\n' "$name"
+}
+
 validate_custom_backup_container() {
     local container="$1"
     local log_file="$2"
@@ -1134,8 +1150,10 @@ validate_custom_backup_credentials() {
     local db_user="$3"
     local db_password="$4"
     local log_file="$5"
+    local db_name="${6:-}"
     local client_cmd=""
     local db_type_label=""
+    local connect_db=""
 
     client_cmd=$(custom_db_client_cmd "$db_type")
     db_type_label=$(custom_db_type_label "$db_type")
@@ -1149,9 +1167,10 @@ validate_custom_backup_credentials() {
         fi
         ;;
     postgresql | timescaledb)
-        if ! docker exec -e PGPASSWORD="$db_password" "$container" psql -U "$db_user" -d postgres -tAc "SELECT 1" >/dev/null 2>>"$log_file"; then
+        connect_db="${db_name:-postgres}"
+        if ! docker exec -e PGPASSWORD="$db_password" "$container" psql -U "$db_user" -d "$connect_db" -tAc "SELECT 1" >/dev/null 2>>"$log_file"; then
             colorized_echo red "Error: Invalid $db_type_label credentials for user '$db_user'"
-            echo "Database credential validation failed for user: $db_user" >>"$log_file"
+            echo "Database credential validation failed for user: $db_user (database: $connect_db)" >>"$log_file"
             return 1
         fi
         ;;
@@ -1169,7 +1188,6 @@ validate_custom_backup_database_exists() {
     local log_file="$6"
     local client_cmd=""
     local escaped_db_name=""
-    local db_exists=""
 
     client_cmd=$(custom_db_client_cmd "$db_type")
     escaped_db_name="${db_name//\'/\'\'}"
@@ -1183,10 +1201,9 @@ validate_custom_backup_database_exists() {
         fi
         ;;
     postgresql | timescaledb)
-        db_exists=$(docker exec -e PGPASSWORD="$db_password" "$container" psql -U "$db_user" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${escaped_db_name}'" 2>>"$log_file" || true)
-        if [ "$db_exists" != "1" ]; then
+        if ! docker exec -e PGPASSWORD="$db_password" "$container" psql -U "$db_user" -d "$db_name" -tAc "SELECT 1" >/dev/null 2>>"$log_file"; then
             colorized_echo red "Error: Database '$db_name' does not exist in container '$container'"
-            echo "Database does not exist: $db_name" >>"$log_file"
+            echo "Database does not exist or is not accessible: $db_name" >>"$log_file"
             return 1
         fi
         ;;
@@ -1279,7 +1296,7 @@ perform_custom_database_backup() {
         return 1
     fi
 
-    if ! validate_custom_backup_credentials "$container" "$db_type" "$db_user" "$db_password" "$log_file"; then
+    if ! validate_custom_backup_credentials "$container" "$db_type" "$db_user" "$db_password" "$log_file" "$db_name"; then
         return 1
     fi
 
