@@ -24,6 +24,22 @@ filter_backup_cron_entries() {
     grep -F -v "# pasarguard-backup-service" "$source_file" >"$target_file" || true
 }
 
+backup_interval_hours_from_cron() {
+    local cron_schedule="$1"
+
+    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
+        echo "24"
+        return 0
+    fi
+
+    if [[ "$cron_schedule" =~ ^0[[:space:]]+\*/([0-9]+)[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    echo ""
+}
+
 is_local_db_host() {
     local host="${1:-}"
 
@@ -328,7 +344,7 @@ backup_service() {
             if [[ "$cron_schedule" == "0 0 * * *" ]]; then
                 interval_hours=24
             else
-                interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
+                interval_hours=$(backup_interval_hours_from_cron "$cron_schedule")
             fi
 
             masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
@@ -556,7 +572,7 @@ view_backup_service() {
     if [[ "$cron_schedule" == "0 0 * * *" ]]; then
         interval_hours=24
     else
-        interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
+        interval_hours=$(backup_interval_hours_from_cron "$cron_schedule")
     fi
 
     masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
@@ -602,7 +618,7 @@ edit_backup_service() {
     if [[ "$cron_schedule" == "0 0 * * *" ]]; then
         interval_hours=24
     else
-        interval_hours=$(echo "$cron_schedule" | grep -oP '(?<=\*/)[0-9]+')
+        interval_hours=$(backup_interval_hours_from_cron "$cron_schedule")
     fi
 
     masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")

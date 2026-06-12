@@ -47,6 +47,10 @@ enable_epel_if_available() {
     colorized_echo yellow "Could not enable EPEL automatically; continuing with configured repositories."
 }
 
+warn_package_metadata_refresh_failed() {
+    colorized_echo yellow "Could not refresh package metadata; continuing with configured repositories."
+}
+
 detect_and_update_package_manager() {
     if [ -z "${OS:-}" ]; then
         detect_os
@@ -56,20 +60,20 @@ detect_and_update_package_manager() {
 
     if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
         PKG_MANAGER="apt-get"
-        $PKG_MANAGER update -qq >/dev/null 2>&1
+        $PKG_MANAGER update -qq >/dev/null 2>&1 || warn_package_metadata_refresh_failed
     elif is_redhat_family_os; then
         select_redhat_package_manager
-        $PKG_MANAGER update -y -q >/dev/null 2>&1
+        $PKG_MANAGER -y -q makecache >/dev/null 2>&1 || warn_package_metadata_refresh_failed
         enable_epel_if_available
     elif [[ "$OS" == "Fedora"* ]]; then
         PKG_MANAGER="dnf"
-        $PKG_MANAGER update -q -y >/dev/null 2>&1
+        $PKG_MANAGER -q -y makecache >/dev/null 2>&1 || warn_package_metadata_refresh_failed
     elif [[ "$OS" == "Arch Linux" ]] || [[ "$OS" == "Arch"* ]]; then
         PKG_MANAGER="pacman"
-        $PKG_MANAGER -Sy --noconfirm --quiet >/dev/null 2>&1
+        $PKG_MANAGER -Sy --noconfirm --quiet >/dev/null 2>&1 || warn_package_metadata_refresh_failed
     elif [[ "$OS" == "openSUSE"* ]]; then
         PKG_MANAGER="zypper"
-        $PKG_MANAGER refresh --quiet >/dev/null 2>&1
+        $PKG_MANAGER refresh --quiet >/dev/null 2>&1 || warn_package_metadata_refresh_failed
     else
         die "Unsupported operating system"
     fi
@@ -88,15 +92,15 @@ install_package() {
 
     colorized_echo blue "Installing $package"
     if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
-        $PKG_MANAGER -y -qq install "$package" >/dev/null 2>&1
+        $PKG_MANAGER -y -qq install "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
     elif is_redhat_family_os; then
-        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1
+        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
     elif [[ "$OS" == "Fedora"* ]]; then
-        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1
+        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
     elif [[ "$OS" == "Arch Linux" ]] || [[ "$OS" == "Arch"* ]]; then
-        $PKG_MANAGER -S --noconfirm --quiet "$package" >/dev/null 2>&1
+        $PKG_MANAGER -S --noconfirm --quiet "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
     elif [[ "$OS" == "openSUSE"* ]]; then
-        $PKG_MANAGER --quiet install -y "$package" >/dev/null 2>&1
+        $PKG_MANAGER --quiet install -y "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
     else
         die "Unsupported operating system"
     fi

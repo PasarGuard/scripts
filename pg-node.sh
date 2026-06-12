@@ -401,6 +401,13 @@ validate_san_entry() {
     fi
 }
 
+generate_uuid_v4() {
+    cat /proc/sys/kernel/random/uuid 2>/dev/null ||
+        uuidgen 2>/dev/null ||
+        python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null ||
+        python -c "import uuid; print(uuid.uuid4())" 2>/dev/null
+}
+
 openssl_supports_addext() {
     openssl req -help 2>&1 | grep -q -- '-addext'
 }
@@ -662,7 +669,7 @@ install_node() {
     fi
     if [[ -z "$API_KEY" ]]; then
         # Generate a valid UUIDv4
-        API_KEY=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python -c "import uuid; print(uuid.uuid4())")
+        API_KEY=$(generate_uuid_v4)
         colorized_echo green "No API Key provided. A random UUID version 4 has been generated"
     fi
     if [ "$AUTO_CONFIRM" = true ]; then

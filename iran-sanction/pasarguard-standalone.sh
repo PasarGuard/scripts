@@ -17,6 +17,8 @@ PASARGUARD_COMPOSE_DIR="$STANDALONE_ROOT_DIR/docker-compose"
 STANDALONE_INSTALL_ROOT="/usr/local/lib/pasarguard-scripts/pasarguard-standalone"
 APT_MIRROR_PREPARED=false
 APT_MIRROR_PROMPTED=false
+STANDALONE_PKG_MANAGER=""
+STANDALONE_PKG_MANAGER_UPDATED=false
 DOCKER_MIRROR_PREPARED=false
 DOCKER_MIRROR_PROMPTED=false
 COMMAND="${1:-}"
@@ -54,15 +56,31 @@ ensure_standalone_assets() {
     [ -f "$PASARGUARD_ENV_TEMPLATE" ] || die "Missing bundled env template: $PASARGUARD_ENV_TEMPLATE"
 }
 
-require_apt() {
-    command -v apt-get >/dev/null 2>&1 || die "This standalone installer currently supports Debian/Ubuntu systems with apt-get only."
+has_apt() {
+    command -v apt-get >/dev/null 2>&1
 }
 
-ensure_apt_prerequisites() {
+ensure_package_prerequisites() {
     local cmd=""
     for cmd in curl awk sort sed grep cp install tar; do
         command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
     done
+}
+
+detect_standalone_package_manager() {
+    if [ -n "$STANDALONE_PKG_MANAGER" ]; then
+        return
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        STANDALONE_PKG_MANAGER="apt-get"
+    elif command -v dnf >/dev/null 2>&1; then
+        STANDALONE_PKG_MANAGER="dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        STANDALONE_PKG_MANAGER="yum"
+    else
+        die "No supported package manager found. Install apt-get, dnf, or yum."
+    fi
 }
 
 prepare_apt_mirror() {
@@ -78,8 +96,12 @@ prepare_apt_mirror() {
         return
     fi
 
-    require_apt
-    ensure_apt_prerequisites
+    if ! has_apt; then
+        APT_MIRROR_PREPARED=true
+        return
+    fi
+
+    ensure_package_prerequisites
 
     current_mirror="$(get_current_apt_mirror 2>/dev/null || true)"
     if is_script_managed_apt_mirror "$current_mirror" && [ "$APT_MIRROR_PROMPTED" != "true" ]; then
@@ -99,16 +121,51 @@ prepare_apt_mirror() {
 
 apt_install_packages() {
     local packages=("$@")
-    require_apt
+    prepare_apt_mirror
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
 }
 
+prepare_standalone_package_manager() {
+    detect_standalone_package_manager
+
+    if [ "$STANDALONE_PKG_MANAGER_UPDATED" = true ]; then
+        return
+    fi
+
+    if [ "$STANDALONE_PKG_MANAGER" = "apt-get" ]; then
+        prepare_apt_mirror
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    else
+        "$STANDALONE_PKG_MANAGER" -y -q makecache >/dev/null 2>&1 || true
+        "$STANDALONE_PKG_MANAGER" install -y -q epel-release >/dev/null 2>&1 || true
+    fi
+
+    STANDALONE_PKG_MANAGER_UPDATED=true
+}
+
+standalone_install_packages() {
+    local packages=("$@")
+
+    prepare_standalone_package_manager
+    case "$STANDALONE_PKG_MANAGER" in
+    apt-get)
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+        ;;
+    dnf | yum)
+        "$STANDALONE_PKG_MANAGER" install -y -q "${packages[@]}"
+        ;;
+    *)
+        die "Unsupported package manager: $STANDALONE_PKG_MANAGER"
+        ;;
+    esac
+}
+
 install_package() {
     local package="$1"
-    prepare_apt_mirror
-    colorized_echo blue "Installing $package with apt"
-    apt_install_packages "$package"
+    detect_standalone_package_manager
+    colorized_echo blue "Installing $package with $STANDALONE_PKG_MANAGER"
+    standalone_install_packages "$package"
 }
 
 ensure_docker_running() {
@@ -116,7 +173,7 @@ ensure_docker_running() {
         return
     fi
     colorized_echo blue "Starting Docker daemon"
-    if command -v systemctl >/dev/null 2>&1; then
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         systemctl enable --now docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1 || true
     elif command -v service >/dev/null 2>&1; then
         service docker start >/dev/null 2>&1 || true
@@ -128,9 +185,17 @@ install_docker() {
     if command -v docker >/dev/null 2>&1; then
         ensure_docker_running
     else
-        prepare_apt_mirror
-        colorized_echo blue "Installing Docker with apt"
-        apt_install_packages docker.io docker-compose-v2
+        detect_standalone_package_manager
+        if [ "$STANDALONE_PKG_MANAGER" = "apt-get" ]; then
+            colorized_echo blue "Installing Docker with apt"
+            apt_install_packages docker.io docker-compose-v2
+        else
+            colorized_echo blue "Installing Docker with Docker's Linux installer"
+            command -v curl >/dev/null 2>&1 || standalone_install_packages curl
+            if ! bash -o pipefail -c 'curl -fsSL https://get.docker.com | sh'; then
+                die "Failed to install Docker"
+            fi
+        fi
         ensure_docker_running
     fi
     prepare_docker_mirror

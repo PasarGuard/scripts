@@ -65,6 +65,6 @@ pasarguard install --database timescaledb
 
 ## نکات
 
-- در حالت standalone، اسکریپت برای Ubuntu/Debian با `apt-get` در نظر گرفته شده است.
+- در حالت standalone، اسکریپت از Ubuntu/Debian با `apt-get` و CentOS/RHEL-compatible systems با `dnf` یا `yum` پشتیبانی می‌کند.
 - در حالت standalone، `pasarguard` از فایل‌های آماده `docker-compose` استفاده می‌کند و هنگام نصب نیازی به دانلود فایل compose ندارد.
 - دستور `pasarguard update` فقط کانتینر/ایمیج را به‌روزرسانی می‌کند و خود اسکریپت standalone را آپدیت نمی‌کند.
