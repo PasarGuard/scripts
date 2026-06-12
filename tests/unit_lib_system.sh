@@ -63,6 +63,18 @@ assert_eq "$OS" "Ubuntu" "detect_os: identifies Ubuntu from mocked awk"
 unset -f awk
 
 # -----------------------------------------------------------------------
+# is_redhat_family_os
+# -----------------------------------------------------------------------
+OS="CentOS Linux"
+assert_exit 0 "is_redhat_family_os: recognizes CentOS Linux" is_redhat_family_os
+
+OS="CentOS Stream"
+assert_exit 0 "is_redhat_family_os: recognizes CentOS Stream" is_redhat_family_os
+
+OS="Ubuntu"
+assert_exit 1 "is_redhat_family_os: rejects Ubuntu" is_redhat_family_os
+
+# -----------------------------------------------------------------------
 # identify_the_operating_system_and_architecture
 # -----------------------------------------------------------------------
 uname() {

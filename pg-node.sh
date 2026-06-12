@@ -400,6 +400,52 @@ validate_san_entry() {
         return 1
     fi
 }
+
+openssl_supports_addext() {
+    openssl req -help 2>&1 | grep -q -- '-addext'
+}
+
+generate_self_signed_cert_with_addext() {
+    local san_string="$1"
+
+    openssl req -x509 -newkey ec \
+        -pkeyopt ec_paramgen_curve:P-256 \
+        -keyout "$SSL_KEY_FILE" \
+        -out "$SSL_CERT_FILE" -days 3650 -nodes \
+        -subj "/CN=$NODE_IP" \
+        -addext "subjectAltName = $san_string" >/dev/null 2>&1
+}
+
+generate_self_signed_cert_with_config() {
+    local san_string="$1"
+    local openssl_config=""
+    local status=0
+
+    openssl_config=$(create_temp_file "pg-node-openssl" ".cnf")
+    {
+        echo "[req]"
+        echo "distinguished_name = req_distinguished_name"
+        echo "x509_extensions = v3_req"
+        echo "prompt = no"
+        echo ""
+        echo "[req_distinguished_name]"
+        echo "CN = $NODE_IP"
+        echo ""
+        echo "[v3_req]"
+        echo "subjectAltName = $san_string"
+    } >"$openssl_config"
+
+    openssl req -x509 -newkey ec \
+        -pkeyopt ec_paramgen_curve:P-256 \
+        -keyout "$SSL_KEY_FILE" \
+        -out "$SSL_CERT_FILE" -days 3650 -nodes \
+        -config "$openssl_config" \
+        -extensions v3_req >/dev/null 2>&1 || status=$?
+
+    rm -f "$openssl_config"
+    return "$status"
+}
+
 gen_self_signed_cert() {
     local san_entries=("DNS:localhost" "IP:127.0.0.1")
     local extra_san=""
@@ -535,12 +581,23 @@ gen_self_signed_cert() {
     # Generate certificate
     colorized_echo blue "Generating self-signed certificate..."
     colorized_echo cyan "  Command: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 ..."
-    if openssl req -x509 -newkey ec \
-        -pkeyopt ec_paramgen_curve:P-256 \
-        -keyout "$SSL_KEY_FILE" \
-        -out "$SSL_CERT_FILE" -days 3650 -nodes \
-        -subj "/CN=$NODE_IP" \
-        -addext "subjectAltName = $san_string" >/dev/null 2>&1; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        colorized_echo yellow "OpenSSL not found. Attempting to install openssl."
+        detect_os
+        install_package openssl
+    fi
+    local cert_generated=false
+    if openssl_supports_addext; then
+        if generate_self_signed_cert_with_addext "$san_string"; then
+            cert_generated=true
+        fi
+    else
+        colorized_echo yellow "  OpenSSL -addext is unavailable; using config-file SAN fallback."
+        if generate_self_signed_cert_with_config "$san_string"; then
+            cert_generated=true
+        fi
+    fi
+    if [ "$cert_generated" = true ]; then
         colorized_echo green "✓ Certificate generated successfully!"
         colorized_echo green "  Certificate: $SSL_CERT_FILE"
         colorized_echo green "  Private Key: $SSL_KEY_FILE"
@@ -1440,6 +1497,11 @@ update_command() {
 get_xray_core() {
     local requested_version="${1:-}"
     identify_the_operating_system_and_architecture
+    if ! command -v curl >/dev/null 2>&1; then
+        colorized_echo yellow "curl is required. Attempting to install curl."
+        detect_os
+        install_package curl
+    fi
     # Systemd/non-TTY environments may not have TERM set; ignore clear failures to avoid exiting under set -e
     safe_clear() { clear 2>/dev/null || true; }
     safe_clear
@@ -1484,7 +1546,7 @@ get_xray_core() {
         echo -e "\033[1;32m==============================\033[0m"
     }
     latest_releases=$(curl -s "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=$LAST_XRAY_CORES")
-    versions=($(echo "$latest_releases" | grep -oP '"tag_name": "\K(.*?)(?=")'))
+    versions=($(echo "$latest_releases" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'))
     if [ ${#versions[@]} -eq 0 ]; then
         echo -e "\033[1;31mNo Xray-core releases found.\033[0m"
         exit 1
@@ -1535,22 +1597,20 @@ get_xray_core() {
         done
     fi
     echo -e "\033[1;32mSelected version $selected_version for installation.\033[0m"
-    if ! dpkg -s unzip >/dev/null 2>&1; then
+    if ! command -v unzip >/dev/null 2>&1; then
         echo -e "\033[1;33mInstalling required packages...\033[0m"
         detect_os
         install_package unzip
     fi
-    mkdir -p $DATA_DIR/xray-core
-    cd $DATA_DIR/xray-core
+    mkdir -p "$DATA_DIR/xray-core"
+    cd "$DATA_DIR/xray-core"
     xray_filename="Xray-linux-$ARCH.zip"
     xray_download_url="https://github.com/XTLS/Xray-core/releases/download/${selected_version}/${xray_filename}"
-    echo -e "\033[1;33mDownloading Xray-core version ${selected_version} in the background...\033[0m"
-    wget "${xray_download_url}" -q &
-    wait
-    echo -e "\033[1;33mExtracting Xray-core in the background...\033[0m"
-    unzip -o "${xray_filename}" >/dev/null 2>&1 &
-    wait
-    rm "${xray_filename}"
+    echo -e "\033[1;33mDownloading Xray-core version ${selected_version}...\033[0m"
+    curl -fsSL "$xray_download_url" -o "$xray_filename" || die "Failed to download Xray-core from $xray_download_url"
+    echo -e "\033[1;33mExtracting Xray-core...\033[0m"
+    unzip -o "$xray_filename" >/dev/null 2>&1 || die "Failed to extract $xray_filename"
+    rm -f "$xray_filename"
 }
 get_current_xray_core_version() {
     XRAY_BINARY="$DATA_DIR/xray-core/xray"

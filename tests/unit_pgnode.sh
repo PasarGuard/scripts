@@ -87,6 +87,30 @@ assert_false "validate_san_entry: empty"            validate_san_entry ""
 assert_false "validate_san_entry: whitespace only"  validate_san_entry "   "
 
 # -----------------------------------------------------------------------
+# openssl_supports_addext
+# -----------------------------------------------------------------------
+openssl() {
+    if [ "${1:-}" = "req" ] && [ "${2:-}" = "-help" ]; then
+        echo "Usage: openssl req [-addext ext]"
+        return 0
+    fi
+    return 1
+}
+export -f openssl
+assert_true "openssl_supports_addext: detects -addext support" openssl_supports_addext
+
+openssl() {
+    if [ "${1:-}" = "req" ] && [ "${2:-}" = "-help" ]; then
+        echo "Usage: openssl req"
+        return 0
+    fi
+    return 1
+}
+export -f openssl
+assert_false "openssl_supports_addext: handles older OpenSSL help" openssl_supports_addext
+unset -f openssl
+
+# -----------------------------------------------------------------------
 # detect_node_serviced_platform
 # -----------------------------------------------------------------------
 # Mock uname
