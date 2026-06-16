@@ -53,6 +53,62 @@ check_if_running_as_root() {
     fi
 }
 
+detect_package_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        PACKAGE_MANAGER="apt-get"
+    elif command -v dnf >/dev/null 2>&1; then
+        PACKAGE_MANAGER="dnf"
+    elif command -v yum >/dev/null 2>&1; then
+        PACKAGE_MANAGER="yum"
+    else
+        echo "error: No supported package manager found. Install curl and unzip manually."
+        exit 1
+    fi
+}
+
+install_package() {
+    local package="$1"
+
+    if [[ -z "${PACKAGE_MANAGER:-}" ]]; then
+        detect_package_manager
+    fi
+
+    echo "Installing missing dependency: $package"
+    case "$PACKAGE_MANAGER" in
+        apt-get)
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
+            ;;
+        dnf | yum)
+            "$PACKAGE_MANAGER" install -y -q "$package"
+            ;;
+        *)
+            echo "error: Unsupported package manager: $PACKAGE_MANAGER"
+            exit 1
+            ;;
+    esac
+}
+
+ensure_command() {
+    local command_name="$1"
+    local package_name="$2"
+
+    if command -v "$command_name" >/dev/null 2>&1; then
+        return
+    fi
+
+    install_package "$package_name"
+    command -v "$command_name" >/dev/null 2>&1 || {
+        echo "error: Required command not found after installing $package_name: $command_name"
+        exit 1
+    }
+}
+
+ensure_dependencies() {
+    ensure_command curl curl
+    ensure_command unzip unzip
+}
+
 identify_the_operating_system_and_architecture() {
     if [[ -n "$TARGET_OS" && "$TARGET_OS" != "linux" ]]; then
         echo "error: This operating system is not supported (supported: linux)."
@@ -189,6 +245,7 @@ place_xray() {
 
 check_if_running_as_root
 identify_the_operating_system_and_architecture
+ensure_dependencies
 
 TMP_DIRECTORY="$(mktemp -d)"
 ZIP_FILE="${TMP_DIRECTORY}/Xray-linux-$ARCH.zip"

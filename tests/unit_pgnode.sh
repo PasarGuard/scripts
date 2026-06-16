@@ -87,6 +87,47 @@ assert_false "validate_san_entry: empty"            validate_san_entry ""
 assert_false "validate_san_entry: whitespace only"  validate_san_entry "   "
 
 # -----------------------------------------------------------------------
+# generate_uuid_v4
+# -----------------------------------------------------------------------
+cat() { return 1; }
+uuidgen() { return 1; }
+python3() {
+    if [ "${1:-}" = "-c" ]; then
+        echo "11111111-2222-4333-8444-555555555555"
+        return 0
+    fi
+    return 1
+}
+export -f cat uuidgen python3
+assert_eq "$(generate_uuid_v4)" "11111111-2222-4333-8444-555555555555" \
+    "generate_uuid_v4: falls back to python3"
+unset -f cat uuidgen python3
+
+# -----------------------------------------------------------------------
+# openssl_supports_addext
+# -----------------------------------------------------------------------
+openssl() {
+    if [ "${1:-}" = "req" ] && [ "${2:-}" = "-help" ]; then
+        echo "Usage: openssl req [-addext ext]"
+        return 0
+    fi
+    return 1
+}
+export -f openssl
+assert_true "openssl_supports_addext: detects -addext support" openssl_supports_addext
+
+openssl() {
+    if [ "${1:-}" = "req" ] && [ "${2:-}" = "-help" ]; then
+        echo "Usage: openssl req"
+        return 0
+    fi
+    return 1
+}
+export -f openssl
+assert_false "openssl_supports_addext: handles older OpenSSL help" openssl_supports_addext
+unset -f openssl
+
+# -----------------------------------------------------------------------
 # detect_node_serviced_platform
 # -----------------------------------------------------------------------
 # Mock uname

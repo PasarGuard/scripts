@@ -380,7 +380,7 @@ if command -v socat >/dev/null 2>&1; then
     EXEC:"'$0' --handle-connection"
 else
   log "socat not available, using openssl s_server"
-  log "Install socat for better performance: sudo apt-get install socat"
+  log "Install socat with your system package manager for better performance"
   
   # Main server loop with openssl s_server
   log "Bash REST API listening on https://localhost:${API_PORT}"

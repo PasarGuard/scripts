@@ -63,6 +63,30 @@ assert_eq "$OS" "Ubuntu" "detect_os: identifies Ubuntu from mocked awk"
 unset -f awk
 
 # -----------------------------------------------------------------------
+# is_redhat_family_os
+# -----------------------------------------------------------------------
+OS="CentOS Linux"
+assert_exit 0 "is_redhat_family_os: recognizes CentOS Linux" is_redhat_family_os
+
+OS="CentOS Stream"
+assert_exit 0 "is_redhat_family_os: recognizes CentOS Stream" is_redhat_family_os
+
+OS="Ubuntu"
+assert_exit 1 "is_redhat_family_os: rejects Ubuntu" is_redhat_family_os
+
+# -----------------------------------------------------------------------
+# detect_and_update_package_manager
+# -----------------------------------------------------------------------
+OS="CentOS Linux"
+unset PKG_MANAGER
+yum() { return 1; }
+export -f yum
+assert_exit 0 "detect_and_update_package_manager: CentOS metadata refresh failure is nonfatal" detect_and_update_package_manager
+detect_and_update_package_manager >/dev/null 2>&1
+assert_eq "$PKG_MANAGER" "yum" "detect_and_update_package_manager: CentOS selects yum"
+unset -f yum
+
+# -----------------------------------------------------------------------
 # identify_the_operating_system_and_architecture
 # -----------------------------------------------------------------------
 uname() {
