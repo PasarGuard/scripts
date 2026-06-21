@@ -149,6 +149,35 @@ assert_false "openssl_supports_addext: handles older OpenSSL help" openssl_suppo
 unset -f openssl
 
 # -----------------------------------------------------------------------
+# gen_self_signed_cert  (must leave the private key owner-readable only)
+# -----------------------------------------------------------------------
+if command -v openssl >/dev/null 2>&1; then
+    cert_test_dir="$WORK_DIR/certtest/certs"
+    mkdir -p "$cert_test_dir"
+    SSL_CERT_FILE="$cert_test_dir/ssl_cert.pem"
+    SSL_KEY_FILE="$cert_test_dir/ssl_key.pem"
+    AUTO_CONFIRM=true
+    INSTALL_SAN_ENTRIES=""
+    # Simulate a re-install/renew over a previously world-readable key:
+    # openssl -keyout truncates in place and preserves the existing 0644 mode,
+    # so the key would stay world-readable without explicit hardening.
+    install -m 644 /dev/null "$SSL_KEY_FILE"
+    gen_self_signed_cert >/dev/null 2>&1
+    if [ -f "$SSL_KEY_FILE" ]; then
+        pass "gen_self_signed_cert: key generated"
+        assert_eq "$(stat -c '%a' "$SSL_KEY_FILE")" "600" "gen_self_signed_cert: private key is 0600"
+    else
+        fail "gen_self_signed_cert: key generated"
+    fi
+    AUTO_CONFIRM=false
+    # Restore globals to source-time values for later tests
+    SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
+    SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
+else
+    echo "(skipped gen_self_signed_cert: openssl not available)"
+fi
+
+# -----------------------------------------------------------------------
 # detect_node_serviced_platform
 # -----------------------------------------------------------------------
 # Mock uname

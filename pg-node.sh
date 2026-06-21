@@ -642,6 +642,9 @@ gen_self_signed_cert() {
         fi
     fi
     if [ "$cert_generated" = true ]; then
+        # openssl -keyout preserves a pre-existing file's mode, so tighten the
+        # private key to owner-only after every (re)generation.
+        harden_secret_file "$SSL_KEY_FILE"
         colorized_echo green "✓ Certificate generated successfully!"
         colorized_echo green "  Certificate: $SSL_CERT_FILE"
         colorized_echo green "  Private Key: $SSL_KEY_FILE"
@@ -681,6 +684,8 @@ install_node() {
     colorized_echo cyan "  Command: mkdir -p $DATA_DIR $DATA_DIR/certs $APP_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$DATA_DIR/certs"
+    # The certs dir holds the TLS private key; keep it owner-only.
+    chmod 700 "$DATA_DIR/certs" 2>/dev/null || true
     mkdir -p "$APP_DIR"
     colorized_echo green "  ✓ Directories created"
     colorized_echo cyan ""
@@ -710,6 +715,8 @@ install_node() {
             read_and_save_file "Please paste the content OR the path to the Private Key file." "$SSL_KEY_FILE" 1
             colorized_echo blue "Private key saved to $SSL_KEY_FILE"
         fi
+        # cp/paste create the key with the default umask (0644); restrict it.
+        harden_secret_file "$SSL_KEY_FILE"
     else
         gen_self_signed_cert
         colorized_echo blue "self-signed certificate successfully generated"
