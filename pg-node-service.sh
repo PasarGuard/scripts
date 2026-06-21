@@ -23,6 +23,76 @@ load_env_file() {
   done < "$ENV_FILE"
 }
 
+# Enhanced certificate validation.
+# Returns: 0 = CA-signed, 2 = self-signed, 1 = invalid/unreadable.
+check_certificate() {
+  local cert_file="$1"
+
+  if ! openssl x509 -in "$cert_file" -noout >/dev/null 2>&1; then
+    log "Error: Invalid certificate file: $cert_file"
+    return 1
+  fi
+
+  # Check if certificate is self-signed
+  if openssl x509 -in "$cert_file" -noout -subject | grep -q "subject= *CN *= *" && \
+     openssl x509 -in "$cert_file" -noout -issuer | grep -q "issuer= *CN *= *" && \
+     [[ $(openssl x509 -in "$cert_file" -noout -subject) == $(openssl x509 -in "$cert_file" -noout -issuer) ]]; then
+    log "Certificate is self-signed: $cert_file"
+    return 2
+  else
+    log "Certificate appears to be CA-signed: $cert_file"
+
+    # Check certificate expiration
+    local not_after
+    not_after=$(openssl x509 -in "$cert_file" -noout -enddate | cut -d= -f2)
+    local expire_date
+    expire_date=$(date -d "$not_after" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$not_after" +%s 2>/dev/null || echo "unknown")
+    local current_date
+    current_date=$(date +%s)
+
+    if [[ "$expire_date" != "unknown" ]] && (( current_date > expire_date )); then
+      log "Warning: Certificate has expired: $cert_file"
+      log "Expiration: $not_after"
+    elif [[ "$expire_date" != "unknown" ]]; then
+      local days_until_expire=$(( (expire_date - current_date) / 86400 ))
+      log "Certificate valid for $days_until_expire more days (expires: $not_after)"
+    fi
+    return 0
+  fi
+}
+
+# Log which kind of certificate is in use. Capture check_certificate's status
+# explicitly: reading $? inside `if check_certificate; then` always sees 0, so
+# the self-signed/invalid branches were previously unreachable. Always returns
+# 0 — certificate type is informational and must not abort startup under set -e.
+describe_certificate() {
+  local cert_file="$1"
+  local cert_status=0
+  check_certificate "$cert_file" || cert_status=$?
+  case $cert_status in
+    0) log "Using CA-signed TLS certificate: $cert_file" ;;
+    2) log "Using self-signed TLS certificate: $cert_file" ;;
+    *) log "Certificate validation failed, but continuing anyway..." ;;
+  esac
+  return 0
+}
+
+# Decide the socat client-certificate verification level: require a client cert
+# only for CA-signed certificates.
+tls_verify_level() {
+  local cert_file="$1"
+  if check_certificate "$cert_file" >/dev/null 2>&1; then
+    echo "verify=1"
+  else
+    echo "verify=0"
+  fi
+}
+
+# When sourced for testing, stop here with the functions defined.
+if [[ "${PG_NODE_SERVICE_SOURCE_ONLY:-false}" == "true" ]]; then
+  return 0
+fi
+
 APP_NAME="pg-node"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_ENV_FILE="/opt/$APP_NAME/.env"
@@ -66,53 +136,8 @@ if ! command -v openssl >/dev/null 2>&1; then
   exit 1
 fi
 
-# Enhanced certificate validation
-check_certificate() {
-  local cert_file="$1"
-  
-  if ! openssl x509 -in "$cert_file" -noout >/dev/null 2>&1; then
-    log "Error: Invalid certificate file: $cert_file"
-    return 1
-  fi
-  
-  # Check if certificate is self-signed
-  if openssl x509 -in "$cert_file" -noout -subject | grep -q "subject= *CN *= *" && \
-     openssl x509 -in "$cert_file" -noout -issuer | grep -q "issuer= *CN *= *" && \
-     [[ $(openssl x509 -in "$cert_file" -noout -subject) == $(openssl x509 -in "$cert_file" -noout -issuer) ]]; then
-    log "Certificate is self-signed: $cert_file"
-    return 2
-  else
-    log "Certificate appears to be CA-signed: $cert_file"
-    
-    # Check certificate expiration
-    local not_after
-    not_after=$(openssl x509 -in "$cert_file" -noout -enddate | cut -d= -f2)
-    local expire_date
-    expire_date=$(date -d "$not_after" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$not_after" +%s 2>/dev/null || echo "unknown")
-    local current_date
-    current_date=$(date +%s)
-    
-    if [[ "$expire_date" != "unknown" ]] && (( current_date > expire_date )); then
-      log "Warning: Certificate has expired: $cert_file"
-      log "Expiration: $not_after"
-    elif [[ "$expire_date" != "unknown" ]]; then
-      local days_until_expire=$(( (expire_date - current_date) / 86400 ))
-      log "Certificate valid for $days_until_expire more days (expires: $not_after)"
-    fi
-    return 0
-  fi
-}
-
 # Validate certificate
-if check_certificate "$SSL_CERT_FILE"; then
-  case $? in
-    0) log "Using CA-signed TLS certificate: $SSL_CERT_FILE" ;;
-    2) log "Using self-signed TLS certificate: $SSL_CERT_FILE" ;;
-    *) log "Using TLS certificate: $SSL_CERT_FILE" ;;
-  esac
-else
-  log "Certificate validation failed, but continuing anyway..."
-fi
+describe_certificate "$SSL_CERT_FILE"
 
 log "TLS enabled on port $API_PORT with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE"
 log "API key protection enabled"
@@ -367,9 +392,8 @@ if command -v socat >/dev/null 2>&1; then
   fi
   
   # Determine verify level based on certificate type
-  verify_level="verify=0"
-  if check_certificate "$SSL_CERT_FILE" && [[ $? -eq 0 ]]; then
-    verify_level="verify=1"
+  verify_level=$(tls_verify_level "$SSL_CERT_FILE")
+  if [[ "$verify_level" == "verify=1" ]]; then
     log "Enabling client certificate verification (CA-signed certificate detected)"
   else
     log "Disabling client certificate verification (self-signed or invalid certificate)"

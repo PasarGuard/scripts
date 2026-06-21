@@ -6,18 +6,21 @@ on:
       - ".github/workflows/command-tests.yml"
       - "pasarguard.sh"
       - "pg-node.sh"
+      - "pg-node-service.sh"
       - "lib/**"
       - "tests/unit_lib_common.sh"
       - "tests/unit_lib_env.sh"
       - "tests/unit_lib_github.sh"
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
+      - "tests/unit_pgnode_service.sh"
       - "tests/unit_lib_system.sh"
   pull_request:
     paths:
       - ".github/workflows/command-tests.yml"
       - "pasarguard.sh"
       - "pg-node.sh"
+      - "pg-node-service.sh"
       - "lib/**"
       - "tests/unit_lib_common.sh"
       - "tests/unit_lib_env.sh"
@@ -25,6 +28,7 @@ on:
       - "tests/unit_lib_system.sh"
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
+      - "tests/unit_pgnode_service.sh"
   workflow_dispatch:
 
 jobs:
@@ -46,3 +50,5 @@ jobs:
         run: bash tests/unit_pasarguard.sh
       - name: Run pg-node.sh unit tests
         run: bash tests/unit_pgnode.sh
+      - name: Run pg-node-service.sh unit tests
+        run: bash tests/unit_pgnode_service.sh
