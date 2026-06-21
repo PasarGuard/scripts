@@ -87,6 +87,27 @@ assert_false "validate_san_entry: empty"            validate_san_entry ""
 assert_false "validate_san_entry: whitespace only"  validate_san_entry "   "
 
 # -----------------------------------------------------------------------
+# validate_app_name  (guards --name against path/systemd/sed/yq injection)
+# -----------------------------------------------------------------------
+assert_true  "validate_app_name: simple"            validate_app_name "pg-node"
+assert_true  "validate_app_name: with digit"        validate_app_name "Node2"
+assert_true  "validate_app_name: underscore"        validate_app_name "my_node"
+assert_true  "validate_app_name: single char"       validate_app_name "a"
+assert_true  "validate_app_name: digit start"       validate_app_name "2node"
+assert_false "validate_app_name: empty"             validate_app_name ""
+assert_false "validate_app_name: slash traversal"   validate_app_name "../etc/cron.d/x"
+assert_false "validate_app_name: embedded slash"    validate_app_name "a/b"
+assert_false "validate_app_name: space"             validate_app_name "a b"
+assert_false "validate_app_name: newline"           validate_app_name $'a\nb'
+assert_false "validate_app_name: pipe"              validate_app_name "a|b"
+assert_false "validate_app_name: ampersand"         validate_app_name "a&b"
+assert_false "validate_app_name: semicolon"         validate_app_name "a;b"
+assert_false "validate_app_name: command sub"       validate_app_name 'a$(id)'
+assert_false "validate_app_name: leading dash"      validate_app_name "-node"
+assert_false "validate_app_name: dot"               validate_app_name "a.b"
+assert_false "validate_app_name: too long"          validate_app_name "$(printf 'a%.0s' {1..64})"
+
+# -----------------------------------------------------------------------
 # generate_uuid_v4
 # -----------------------------------------------------------------------
 cat() { return 1; }

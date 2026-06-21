@@ -64,6 +64,15 @@ source "$SHARED_LIB_DIR/docker.sh"
 # shellcheck source=lib/github.sh
 source "$SHARED_LIB_DIR/github.sh"
 
+# Validate a user-supplied instance name (--name). The value flows into
+# filesystem paths, the systemd unit (body + filename), sed/yq programs and
+# the network service's command word, so it must be restricted to a safe
+# character set to prevent path traversal and command/directive injection.
+validate_app_name() {
+    local name="$1"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$ ]]
+}
+
 # Handle global options
 AUTO_CONFIRM=false
 APP_NAME=""
@@ -80,6 +89,10 @@ while [[ $# -gt 0 ]]; do
             echo "Error: --name requires a value." >&2
             exit 1
         fi
+        if ! validate_app_name "$2"; then
+            echo "Error: invalid --name '$2'. Use 1-63 chars: letters, digits, '_' or '-', starting with a letter or digit." >&2
+            exit 1
+        fi
         APP_NAME="$2"
         CUSTOM_NAME_SET=true
         shift 2
@@ -88,6 +101,10 @@ while [[ $# -gt 0 ]]; do
         APP_NAME="${1#*=}"
         if [[ -z "$APP_NAME" ]]; then
             echo "Error: --name requires a value." >&2
+            exit 1
+        fi
+        if ! validate_app_name "$APP_NAME"; then
+            echo "Error: invalid --name '$APP_NAME'. Use 1-63 chars: letters, digits, '_' or '-', starting with a letter or digit." >&2
             exit 1
         fi
         CUSTOM_NAME_SET=true
