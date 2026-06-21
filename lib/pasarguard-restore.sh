@@ -1,5 +1,31 @@
 #!/usr/bin/env bash
 
+# Reject archives whose members would escape the extraction directory — an
+# absolute path or a '..' component (zip-slip / tar path traversal). Backups
+# are later rsynced into $DATA_DIR/$APP_DIR as root, so a tampered archive must
+# not be extracted unchecked. $2 is the archive kind: "zip" or "tar".
+archive_entries_are_safe() {
+    local archive="$1"
+    local kind="$2"
+    local entries=""
+
+    case "$kind" in
+        zip) entries=$(unzip -Z1 "$archive" 2>/dev/null) ;;
+        tar) entries=$(tar -tzf "$archive" 2>/dev/null) ;;
+        *) return 1 ;;
+    esac
+    [ -n "$entries" ] || return 1
+
+    local entry
+    while IFS= read -r entry; do
+        [ -z "$entry" ] && continue
+        case "$entry" in
+            /* | ../* | */../* | */.. | ..) return 1 ;;
+        esac
+    done <<<"$entries"
+    return 0
+}
+
 restore_command() {
     colorized_echo blue "Starting restore process..."
 
@@ -323,6 +349,12 @@ restore_command() {
                 exit 1
             fi
         fi
+        if ! archive_entries_are_safe "$archive_to_extract" zip; then
+            colorized_echo red "ERROR: The backup archive contains unsafe paths (absolute or '..'). Refusing to extract."
+            echo "Unsafe archive paths detected in $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
         if ! unzip -oq "$archive_to_extract" -d "$temp_restore_dir" 2>>"$log_file"; then
             colorized_echo red "Failed to extract backup file."
             echo "Failed to extract $archive_to_extract" >>"$log_file"
@@ -333,6 +365,12 @@ restore_command() {
         if ! gzip -t "$archive_to_extract" 2>/dev/null; then
             colorized_echo red "ERROR: The backup file is not a valid gzip archive."
             echo "File is not a valid gzip archive: $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        if ! archive_entries_are_safe "$archive_to_extract" tar; then
+            colorized_echo red "ERROR: The backup archive contains unsafe paths (absolute or '..'). Refusing to extract."
+            echo "Unsafe archive paths detected in $archive_to_extract" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
         fi

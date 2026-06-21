@@ -14,6 +14,7 @@ on:
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
       - "tests/unit_pgnode_service.sh"
+      - "tests/unit_restore_archive_safety.sh"
       - "tests/unit_lib_system.sh"
   pull_request:
     paths:
@@ -29,6 +30,7 @@ on:
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
       - "tests/unit_pgnode_service.sh"
+      - "tests/unit_restore_archive_safety.sh"
   workflow_dispatch:
 
 jobs:
@@ -38,6 +40,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Install archive tooling for restore-safety tests
+        run: sudo apt-get update && sudo apt-get install -y zip unzip
       - name: Run lib/common.sh unit tests
         run: bash tests/unit_lib_common.sh
       - name: Run lib/env.sh unit tests
@@ -52,3 +56,5 @@ jobs:
         run: bash tests/unit_pgnode.sh
       - name: Run pg-node-service.sh unit tests
         run: bash tests/unit_pgnode_service.sh
+      - name: Run restore archive-safety unit tests
+        run: bash tests/unit_restore_archive_safety.sh
