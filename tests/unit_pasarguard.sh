@@ -379,6 +379,17 @@ mkdir -p "$PGL_DIR/pg_dump"
 touch "$PGL_DIR/pg_dump/manifest.tsv"
 assert_eq "$(pg_backup_layout "$PGL_DIR")" "multi"  "layout: manifest present -> multi (precedence)"
 
+# -----------------------------------------------------------------------
+# pg_filter_timescaledb_extension_lines
+# -----------------------------------------------------------------------
+_ts_out=$(printf '%s\n' \
+    "CREATE EXTENSION IF NOT EXISTS timescaledb;" \
+    "CREATE TABLE foo (id int);" \
+    "DROP EXTENSION timescaledb;" \
+    "INSERT INTO foo VALUES (1);" | pg_filter_timescaledb_extension_lines)
+_ts_expected=$(printf '%s\n' "CREATE TABLE foo (id int);" "INSERT INTO foo VALUES (1);")
+assert_eq "$_ts_out" "$_ts_expected" "ts_filter: removes timescaledb extension lines, keeps rest"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
