@@ -1098,7 +1098,7 @@ backup_command() {
                 # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
                 if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                     colorized_echo blue "Backing up all MariaDB databases from container: $container_name (using root user)"
-                    if docker exec "$container_name" mariadb-dump -u root -p"$MYSQL_ROOT_PASSWORD" --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    if docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "MariaDB backup completed successfully (all databases)"
                     else
                         # Fallback to SQL URL credentials for specific database
@@ -1111,7 +1111,7 @@ backup_command() {
                             error_messages+=("MariaDB backup failed - root backup failed and fallback credentials incomplete.")
                         else
                             colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
-                            if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" mariadb-dump -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                 colorized_echo red "MariaDB dump failed. Check log file for details."
                                 error_messages+=("MariaDB dump failed.")
                             else
@@ -1132,7 +1132,7 @@ backup_command() {
                         error_messages+=("MariaDB database name not found.")
                     else
                         colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
-                        if ! docker exec "$container_name" mariadb-dump -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" mariadb-dump -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                             colorized_echo red "MariaDB dump failed. Check log file for details."
                             error_messages+=("MariaDB dump failed.")
                         else
@@ -1182,7 +1182,7 @@ backup_command() {
                                 fi
 
                                 colorized_echo blue "Backing up all $db_type_name databases from container: $container_name (using root user)"
-                                databases=$(docker exec "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$" || true)
+                                databases=$(docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$mysql_cmd" -u root -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$" || true)
                         if [ -z "$databases" ]; then
                             colorized_echo yellow "No user databases found, falling back to specific database backup"
                             # Fallback to SQL URL credentials
@@ -1194,14 +1194,14 @@ backup_command() {
                                 error_messages+=("MySQL backup failed - no databases found and fallback credentials incomplete.")
                             else
                                         colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
-                                        if ! docker exec "$container_name" "$dump_cmd" -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                             colorized_echo red "$db_type_name dump failed. Check log file for details."
                                             error_messages+=("$db_type_name dump failed.")
                                         else
                                             colorized_echo green "$db_type_name backup completed successfully"
                                         fi
                                     fi
-                                elif ! docker exec "$container_name" "$dump_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                elif ! docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$dump_cmd" -u root --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                             # Root backup failed, fallback to SQL URL credentials
                             colorized_echo yellow "Root backup failed, falling back to app user for specific database"
                             local backup_user="${db_user:-${DB_USER:-}}"
@@ -1212,7 +1212,7 @@ backup_command() {
                                 error_messages+=("MySQL backup failed - root backup failed and fallback credentials incomplete.")
                             else
                                         colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
-                                        if ! docker exec "$container_name" "$dump_cmd" -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                             colorized_echo red "$db_type_name dump failed. Check log file for details."
                                             error_messages+=("$db_type_name dump failed.")
                                         else
@@ -1241,7 +1241,7 @@ backup_command() {
                             error_messages+=("MySQL database name not found.")
                         else
                                     colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
-                                    if ! docker exec "$container_name" "$dump_cmd" -u "$backup_user" -p"$backup_password" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                    if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                         colorized_echo red "$db_type_name dump failed. Check log file for details."
                                         error_messages+=("$db_type_name dump failed.")
                                     else

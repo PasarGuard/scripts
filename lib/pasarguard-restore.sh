@@ -645,7 +645,7 @@ restore_command() {
                 # Try root password from backup .env first
                 if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                     colorized_echo blue "Trying root user from backup .env..."
-                    if docker exec -i "$container_name" "$mysql_cmd" -u root -p"$MYSQL_ROOT_PASSWORD" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    if docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$mysql_cmd" -u root < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         restore_success=true
                         colorized_echo green "$db_type_name database restored successfully."
                     else
@@ -657,7 +657,7 @@ restore_command() {
                 # If root password changed after backup, try current installation value
                 if [ "$restore_success" = false ] && [ -n "$current_mysql_root_password" ] && [ "$current_mysql_root_password" != "${MYSQL_ROOT_PASSWORD:-}" ]; then
                     colorized_echo blue "Trying root user from current installation .env..."
-                    if docker exec -i "$container_name" "$mysql_cmd" -u root -p"$current_mysql_root_password" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    if docker exec -i -e MYSQL_PWD="$current_mysql_root_password" "$container_name" "$mysql_cmd" -u root < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         restore_success=true
                         colorized_echo green "$db_type_name database restored successfully."
                     else
@@ -670,12 +670,12 @@ restore_command() {
                 if [ "$restore_success" = false ] && [ -n "$backup_restore_user" ] && [ -n "$backup_restore_password" ]; then
                     colorized_echo blue "Trying app user '$backup_restore_user' from backup credentials..."
                     if [ -n "$app_db_target" ]; then
-                        if docker exec -i "$container_name" "$mysql_cmd" -u "$backup_restore_user" -p"$backup_restore_password" "$app_db_target" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                        if docker exec -i -e MYSQL_PWD="$backup_restore_password" "$container_name" "$mysql_cmd" -u "$backup_restore_user" "$app_db_target" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                             restore_success=true
                             colorized_echo green "$db_type_name database restored successfully."
                         fi
                     fi
-                    if [ "$restore_success" = false ] && docker exec -i "$container_name" "$mysql_cmd" -u "$backup_restore_user" -p"$backup_restore_password" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    if [ "$restore_success" = false ] && docker exec -i -e MYSQL_PWD="$backup_restore_password" "$container_name" "$mysql_cmd" -u "$backup_restore_user" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         restore_success=true
                         colorized_echo green "$db_type_name database restored successfully."
                     elif [ "$restore_success" = false ]; then
@@ -688,12 +688,12 @@ restore_command() {
                 if [ "$restore_success" = false ] && [ -n "$current_db_user" ] && [ -n "$current_db_password" ] && { [ "$current_db_user" != "$backup_restore_user" ] || [ "$current_db_password" != "$backup_restore_password" ] || [ "${current_db_name:-}" != "${db_name:-}" ]; }; then
                     colorized_echo blue "Trying app user '$current_db_user' from current installation .env..."
                     if [ -n "$app_db_target" ]; then
-                        if docker exec -i "$container_name" "$mysql_cmd" -u "$current_db_user" -p"$current_db_password" "$app_db_target" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                        if docker exec -i -e MYSQL_PWD="$current_db_password" "$container_name" "$mysql_cmd" -u "$current_db_user" "$app_db_target" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                             restore_success=true
                             colorized_echo green "$db_type_name database restored successfully."
                         fi
                     fi
-                    if [ "$restore_success" = false ] && docker exec -i "$container_name" "$mysql_cmd" -u "$current_db_user" -p"$current_db_password" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                    if [ "$restore_success" = false ] && docker exec -i -e MYSQL_PWD="$current_db_password" "$container_name" "$mysql_cmd" -u "$current_db_user" < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         restore_success=true
                         colorized_echo green "$db_type_name database restored successfully."
                     elif [ "$restore_success" = false ]; then
