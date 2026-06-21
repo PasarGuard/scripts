@@ -219,10 +219,15 @@ assert_eq "$_m_file"  "db-001.sql" "manifest: filename field"
 _mline2=$(pg_manifest_encode "my db" "own er" "1" "db-002.sql")
 IFS=$'\t' read -r _n_db _n_owner _n_ts _n_file <<<"$_mline2"
 assert_eq "$_n_db"  "my db" "manifest: dbname with space"
+assert_eq "$_n_owner" "own er" "manifest: owner with space"
 assert_eq "$_n_ts"  "1"     "manifest: has_ts=1"
 assert_eq "$_n_file" "db-002.sql" "manifest: filename with spaced fields"
 
 assert_false "manifest: rejects tab in dbname" pg_manifest_encode "$(printf 'a\tb')" "o" "0" "f.sql"
+assert_false "manifest: rejects tab in owner" pg_manifest_encode "db" "$(printf 'a\tb')" "0" "f.sql"
+assert_false "manifest: rejects tab in filename" pg_manifest_encode "db" "owner" "0" "$(printf 'a\tb')"
+assert_false "manifest: rejects newline in dbname" pg_manifest_encode "$(printf 'a\nb')" "owner" "0" "f.sql"
+assert_eq "$(pg_manifest_encode "$(printf 'a\tb')" "owner" "0" "f.sql")" "" "manifest: rejection emits nothing"
 
 # -----------------------------------------------------------------------
 # get_acme_sh_binary
