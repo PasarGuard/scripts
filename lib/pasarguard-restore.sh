@@ -26,6 +26,18 @@ archive_entries_are_safe() {
     return 0
 }
 
+# Heuristic check that a plain-SQL pg_dump file is restorable before a
+# destructive DROP DATABASE (the TimescaleDB path drops the live DB before
+# restoring). Catches the realistic bad-backup cases — empty/truncated dumps or
+# an HTTP error body saved as the backup — that would otherwise wipe the
+# database with nothing to restore. It is not a guarantee the restore succeeds.
+postgres_dump_looks_restorable() {
+    local dump_file="$1"
+    [ -s "$dump_file" ] || return 1
+    # Require at least one real schema/data statement, not just comments/SET.
+    grep -qiE '^[[:space:]]*(CREATE|COPY|INSERT|ALTER)[[:space:]]' "$dump_file"
+}
+
 restore_command() {
     colorized_echo blue "Starting restore process..."
 
@@ -766,6 +778,16 @@ restore_command() {
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
+
+        # Validate dump content *before* any destructive step (the TimescaleDB
+        # path drops the live database), so an empty/truncated/garbage dump can
+        # never wipe the database with nothing to restore.
+        if ! postgres_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
+            colorized_echo red "Database backup does not look like a valid SQL dump; aborting before any changes."
+            echo "Dump content validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
 
         local backup_size=$(du -h "$temp_restore_dir/db_backup.sql" | cut -f1)
         colorized_echo blue "Backup file size: $backup_size"

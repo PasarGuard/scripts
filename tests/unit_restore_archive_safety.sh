@@ -56,6 +56,36 @@ fi
 assert_false "archive_entries_are_safe: unknown kind rejected" archive_entries_are_safe safe.tgz bogus
 assert_false "archive_entries_are_safe: missing archive rejected" archive_entries_are_safe /no/such.tgz tar
 
+# -----------------------------------------------------------------------
+# postgres_dump_looks_restorable
+# Gate the destructive DROP DATABASE (TimescaleDB restore) on the dump
+# actually looking like a pg_dump, not just being non-empty.
+# -----------------------------------------------------------------------
+good_dump="$WORK_DIR/good.sql"
+cat > "$good_dump" <<'EOF'
+--
+-- PostgreSQL database dump
+--
+SET statement_timeout = 0;
+CREATE TABLE public.users (id integer NOT NULL);
+COPY public.users (id) FROM stdin;
+1
+\.
+EOF
+assert_true "postgres_dump_looks_restorable: real dump accepted" postgres_dump_looks_restorable "$good_dump"
+
+empty_dump="$WORK_DIR/empty.sql"; : > "$empty_dump"
+assert_false "postgres_dump_looks_restorable: empty file rejected" postgres_dump_looks_restorable "$empty_dump"
+
+html_dump="$WORK_DIR/html.sql"; printf '404: Not Found\n' > "$html_dump"
+assert_false "postgres_dump_looks_restorable: HTTP error body rejected" postgres_dump_looks_restorable "$html_dump"
+
+comments_only="$WORK_DIR/comments.sql"
+printf -- '-- only comments\nSET statement_timeout = 0;\n' > "$comments_only"
+assert_false "postgres_dump_looks_restorable: no DDL/data rejected" postgres_dump_looks_restorable "$comments_only"
+
+assert_false "postgres_dump_looks_restorable: missing file rejected" postgres_dump_looks_restorable "$WORK_DIR/nope.sql"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
