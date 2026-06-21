@@ -38,6 +38,21 @@ postgres_dump_looks_restorable() {
     grep -qiE '^[[:space:]]*(CREATE|COPY|INSERT|ALTER)[[:space:]]' "$dump_file"
 }
 
+# Detect the dump layout inside an extracted backup directory.
+# "multi"  -> new per-database layout (pg_dump/manifest.tsv present)
+# "single" -> legacy single-file layout (db_backup.sql present)
+# "none"   -> neither
+pg_backup_layout() {
+    local dir="$1"
+    if [ -f "$dir/pg_dump/manifest.tsv" ]; then
+        echo "multi"
+    elif [ -f "$dir/db_backup.sql" ]; then
+        echo "single"
+    else
+        echo "none"
+    fi
+}
+
 restore_command() {
     colorized_echo blue "Starting restore process..."
 

@@ -367,6 +367,18 @@ rm -rf "$APP_DIR"
 assert_false "is_pasarguard_installed: APP_DIR removed"   is_pasarguard_installed
 mkdir -p "$APP_DIR"
 
+# -----------------------------------------------------------------------
+# pg_backup_layout
+# -----------------------------------------------------------------------
+PGL_DIR="$WORK_DIR/pglayout"
+mkdir -p "$PGL_DIR"
+assert_eq "$(pg_backup_layout "$PGL_DIR")" "none"   "layout: empty -> none"
+touch "$PGL_DIR/db_backup.sql"
+assert_eq "$(pg_backup_layout "$PGL_DIR")" "single" "layout: db_backup.sql -> single"
+mkdir -p "$PGL_DIR/pg_dump"
+touch "$PGL_DIR/pg_dump/manifest.tsv"
+assert_eq "$(pg_backup_layout "$PGL_DIR")" "multi"  "layout: manifest present -> multi (precedence)"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
