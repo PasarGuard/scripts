@@ -74,6 +74,34 @@ backup_cron_from_interval_minutes() {
     return 1
 }
 
+# Convert a backup cron schedule back into an interval in minutes.
+# Echoes the minutes, or an empty string for an unrecognized schedule.
+backup_interval_minutes_from_cron() {
+    local cron_schedule="$1"
+
+    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
+        echo "1440"
+        return 0
+    fi
+
+    if [[ "$cron_schedule" == "0 * * * *" ]]; then
+        echo "60"
+        return 0
+    fi
+
+    if [[ "$cron_schedule" =~ ^0[[:space:]]+\*/([0-9]+)[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*$ ]]; then
+        echo "$(( ${BASH_REMATCH[1]} * 60 ))"
+        return 0
+    fi
+
+    if [[ "$cron_schedule" =~ ^\*/([0-9]+)[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    echo ""
+}
+
 is_local_db_host() {
     local host="${1:-}"
 
