@@ -227,6 +227,8 @@ assert_false "manifest: rejects tab in dbname" pg_manifest_encode "$(printf 'a\t
 assert_false "manifest: rejects tab in owner" pg_manifest_encode "db" "$(printf 'a\tb')" "0" "f.sql"
 assert_false "manifest: rejects tab in filename" pg_manifest_encode "db" "owner" "0" "$(printf 'a\tb')"
 assert_false "manifest: rejects newline in dbname" pg_manifest_encode "$(printf 'a\nb')" "owner" "0" "f.sql"
+assert_false "manifest: rejects newline in owner"    pg_manifest_encode "db" "$(printf 'a\nb')" "0" "f.sql"
+assert_false "manifest: rejects newline in filename" pg_manifest_encode "db" "owner" "0" "$(printf 'a\nb')"
 assert_eq "$(pg_manifest_encode "$(printf 'a\tb')" "owner" "0" "f.sql")" "" "manifest: rejection emits nothing"
 
 # -----------------------------------------------------------------------
