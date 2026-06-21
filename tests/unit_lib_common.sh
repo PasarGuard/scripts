@@ -61,6 +61,27 @@ rm -f "$f3"
 troot=$(temp_root_dir)
 assert_eq "$troot" "$APP_TMP_DIR" "temp_root_dir: returns APP_TMP_DIR when set"
 
+# --- harden_secret_file ---
+# Tightens an existing world-readable file to 0600.
+secret_existing="$WORK_DIR/existing.env"
+: >"$secret_existing"
+chmod 644 "$secret_existing"
+harden_secret_file "$secret_existing"
+assert_eq "$(stat -c '%a' "$secret_existing")" "600" "harden_secret_file: tightens existing file to 600"
+
+# Creates the file 0600 when it does not yet exist (so caller can write into it).
+secret_new="$WORK_DIR/new.env"
+harden_secret_file "$secret_new"
+if [ -f "$secret_new" ]; then pass "harden_secret_file: creates missing file"; else fail "harden_secret_file: creates missing file"; fi
+assert_eq "$(stat -c '%a' "$secret_new")" "600" "harden_secret_file: creates missing file as 600"
+
+# Content written after hardening keeps 0600 (truncate-in-place preserves perms).
+printf 'SECRET=value\n' >>"$secret_new"
+assert_eq "$(stat -c '%a' "$secret_new")" "600" "harden_secret_file: appended content stays 600"
+
+# Empty path is rejected without creating anything.
+if harden_secret_file ""; then fail "harden_secret_file: rejects empty path"; else pass "harden_secret_file: rejects empty path"; fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

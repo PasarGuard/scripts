@@ -35,6 +35,20 @@ die() {
     exit 1
 }
 
+# Ensure a secret-bearing file (e.g. .env, TLS private key) is only readable by
+# its owner. Creates the file with 0600 if it is missing so callers can harden
+# it *before* writing secrets; tightens it to 0600 if it already exists. A
+# truncating writer such as `curl -o` preserves the inode's mode, so writing
+# into the pre-created file keeps it private.
+harden_secret_file() {
+    local path="$1"
+    [ -n "$path" ] || return 1
+    if [ ! -e "$path" ]; then
+        (umask 077 && : >"$path") || return 1
+    fi
+    chmod 600 "$path"
+}
+
 temp_root_dir() {
     local root=""
 

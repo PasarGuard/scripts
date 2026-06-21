@@ -313,6 +313,8 @@ install_pasarguard() {
     mkdir -p "$DATA_DIR" "$APP_DIR"
     colorized_echo blue "Copying bundled .env file"
     cp "$PASARGUARD_ENV_TEMPLATE" "$APP_DIR/.env"
+    # Restrict .env to owner-only before writing DB/pgAdmin/MySQL-root secrets.
+    harden_secret_file "$APP_DIR/.env"
     colorized_echo green "File saved in $APP_DIR/.env"
 
     if [[ "$database_type" =~ ^(mysql|mariadb|postgresql|timescaledb)$ ]]; then

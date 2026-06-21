@@ -780,6 +780,9 @@ install_node() {
     fi
     colorized_echo blue "Fetching .env and compose file"
     colorized_echo cyan "  Command: curl -sL $FILES_URL_PREFIX/.env.example -o $APP_DIR/.env"
+    # Pre-create .env as 0600 (and tighten any pre-existing copy) so the node
+    # API_KEY written below is never world-readable.
+    harden_secret_file "$APP_DIR/.env"
     if curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"; then
         colorized_echo green "  ✓ File saved: $APP_DIR/.env"
     else

@@ -940,6 +940,9 @@ install_pasarguard() {
     mkdir -p "$APP_DIR"
 
     colorized_echo blue "Fetching .env file"
+    # Pre-create .env as 0600 (and tighten any pre-existing copy) so the DB,
+    # pgAdmin and MySQL-root secrets written below are never world-readable.
+    harden_secret_file "$APP_DIR/.env"
     curl -sL "$FILES_URL_PREFIX/main/.env.example" -o "$APP_DIR/.env"
 
     colorized_echo green "File saved in $APP_DIR/.env"

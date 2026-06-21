@@ -400,6 +400,8 @@ install_node() {
     fi
     colorized_echo blue "Copying bundled .env and compose file"
     cp "$LOCAL_ENV_TEMPLATE" "$APP_DIR/.env"
+    # Restrict .env to owner-only before writing the node API_KEY.
+    harden_secret_file "$APP_DIR/.env"
     cp "$LOCAL_COMPOSE_TEMPLATE" "$APP_DIR/docker-compose.yml"
     sed -i "s/^SERVICE_PORT *= *.*/SERVICE_PORT= ${SERVICE_PORT}/" "$APP_DIR/.env"
     sed -i "s/^API_KEY *= *.*/API_KEY= ${API_KEY}/" "$APP_DIR/.env"
