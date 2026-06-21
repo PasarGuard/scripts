@@ -845,6 +845,100 @@ remove_backup_service() {
 }
 
 
+# Dump every real user database (plus cluster globals) from a local
+# PostgreSQL/TimescaleDB container into <temp_dir>/pg_dump/.
+# Layout: globals.sql, db-NNN.sql per database, manifest.tsv
+# (dbname<TAB>owner<TAB>has_timescaledb<TAB>filename).
+# Returns 0 when at least one database was dumped; otherwise removes the
+# pg_dump dir and returns 1 so the caller can fall back to single-database mode.
+pg_dump_all_user_databases() {
+    local container_name="$1"
+    local backup_user="$2"
+    local backup_password="$3"
+    local temp_dir="$4"
+    local log_file="$5"
+
+    local out_dir="$temp_dir/pg_dump"
+    local manifest="$out_dir/manifest.tsv"
+    mkdir -p "$out_dir" || return 1
+
+    # Cluster-wide roles/grants so owners exist on restore.
+    if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+        pg_dumpall -U "$backup_user" --globals-only >"$out_dir/globals.sql" 2>>"$log_file"; then
+        echo "pg_dumpall --globals-only failed" >>"$log_file"
+        rm -rf "$out_dir"
+        return 1
+    fi
+
+    # Enumerate real user databases (skip templates and the postgres maintenance DB).
+    local databases=""
+    databases=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+        psql -U "$backup_user" -d postgres -At \
+        -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres';" \
+        2>>"$log_file")
+    if [ -z "$databases" ]; then
+        echo "No user databases enumerated for multi-DB backup" >>"$log_file"
+        rm -rf "$out_dir"
+        return 1
+    fi
+
+    : >"$manifest"
+    local index=0
+    local dumped=0
+    local dbname=""
+    while IFS= read -r dbname; do
+        [ -n "$dbname" ] || continue
+        index=$((index + 1))
+        local filename
+        filename=$(pg_dump_index_filename "$index")
+
+        # Owner of this database.
+        local owner=""
+        owner=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+            psql -U "$backup_user" -d postgres -At \
+            -c "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${dbname//\'/\'\'}';" \
+            2>>"$log_file")
+
+        # Whether the timescaledb extension is installed in this database.
+        local has_ts="0"
+        if docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+            psql -U "$backup_user" -d "$dbname" -At \
+            -c "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb';" 2>>"$log_file" | grep -q '^1$'; then
+            has_ts="1"
+        fi
+
+        # Dump this database.
+        if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+            pg_dump -U "$backup_user" -d "$dbname" --clean --if-exists >"$out_dir/$filename" 2>>"$log_file"; then
+            echo "pg_dump failed for database '$dbname'" >>"$log_file"
+            rm -f "$out_dir/$filename"
+            continue
+        fi
+
+        # Never trust an empty/garbage dump.
+        if ! postgres_dump_looks_restorable "$out_dir/$filename"; then
+            echo "Dump for database '$dbname' failed content validation; skipping" >>"$log_file"
+            rm -f "$out_dir/$filename"
+            continue
+        fi
+
+        local line
+        if ! line=$(pg_manifest_encode "$dbname" "$owner" "$has_ts" "$filename"); then
+            echo "Database name '$dbname' is not manifest-safe; skipping" >>"$log_file"
+            rm -f "$out_dir/$filename"
+            continue
+        fi
+        printf '%s\n' "$line" >>"$manifest"
+        dumped=$((dumped + 1))
+    done <<<"$databases"
+
+    if [ "$dumped" -eq 0 ]; then
+        rm -rf "$out_dir"
+        return 1
+    fi
+    return 0
+}
+
 backup_command() {
     colorized_echo blue "Starting backup process..."
 
@@ -1329,12 +1423,17 @@ backup_command() {
                             colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
                             error_messages+=("PostgreSQL database name not found.")
                         else
-                            colorized_echo blue "Backing up PostgreSQL database '$db_name' from container: $container_name (using user: $backup_user)"
-                            if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                colorized_echo red "PostgreSQL dump failed. Check log file for details."
-                                error_messages+=("PostgreSQL dump failed.")
+                            colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using user: $backup_user)"
+                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file"; then
+                                colorized_echo green "PostgreSQL backup completed successfully (all databases)"
                             else
-                                colorized_echo green "PostgreSQL backup completed successfully"
+                                colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
+                                if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                    colorized_echo red "PostgreSQL dump failed. Check log file for details."
+                                    error_messages+=("PostgreSQL dump failed.")
+                                else
+                                    colorized_echo green "PostgreSQL backup completed successfully"
+                                fi
                             fi
                         fi
                     fi
@@ -1395,12 +1494,17 @@ backup_command() {
                             colorized_echo red "Error: Database name not found in SQLALCHEMY_DATABASE_URL"
                             error_messages+=("TimescaleDB database name not found.")
                         else
-                            colorized_echo blue "Backing up TimescaleDB database '$db_name' from container: $container_name (using user: $backup_user)"
-                            if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
-                                colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
-                                error_messages+=("TimescaleDB dump failed for database '$db_name'.")
+                            colorized_echo blue "Backing up all TimescaleDB databases from container: $container_name (using user: $backup_user)"
+                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file"; then
+                                colorized_echo green "TimescaleDB backup completed successfully (all databases)"
                             else
-                                colorized_echo green "TimescaleDB backup completed successfully"
+                                colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
+                                if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                    colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
+                                    error_messages+=("TimescaleDB dump failed for database '$db_name'.")
+                                else
+                                    colorized_echo green "TimescaleDB backup completed successfully"
+                                fi
                             fi
                         fi
                     fi
