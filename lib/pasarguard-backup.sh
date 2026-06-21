@@ -132,6 +132,16 @@ pg_dump_index_filename() {
     printf 'db-%03d.sql' "$1"
 }
 
+# Encode one manifest line: dbname<TAB>owner<TAB>has_ts<TAB>filename.
+# Rejects (returns 1) any field that would corrupt the TSV (tab or newline).
+pg_manifest_encode() {
+    local dbname="$1" owner="$2" has_ts="$3" filename="$4"
+    case "${dbname}${owner}${filename}" in
+        *$'\t'* | *$'\n'*) return 1 ;;
+    esac
+    printf '%s\t%s\t%s\t%s' "$dbname" "$owner" "$has_ts" "$filename"
+}
+
 send_backup_to_telegram() {
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do

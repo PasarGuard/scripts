@@ -207,6 +207,24 @@ assert_eq "$(pg_dump_index_filename 42)"  "db-042.sql" "index_filename: 42"
 assert_eq "$(pg_dump_index_filename 100)" "db-100.sql" "index_filename: 100"
 
 # -----------------------------------------------------------------------
+# pg_manifest_encode  (round-trip via IFS=$'\t' read)
+# -----------------------------------------------------------------------
+_mline=$(pg_manifest_encode "mydb" "appuser" "0" "db-001.sql")
+IFS=$'\t' read -r _m_db _m_owner _m_ts _m_file <<<"$_mline"
+assert_eq "$_m_db"    "mydb"       "manifest: dbname field"
+assert_eq "$_m_owner" "appuser"    "manifest: owner field"
+assert_eq "$_m_ts"    "0"          "manifest: has_ts field"
+assert_eq "$_m_file"  "db-001.sql" "manifest: filename field"
+
+_mline2=$(pg_manifest_encode "my db" "own er" "1" "db-002.sql")
+IFS=$'\t' read -r _n_db _n_owner _n_ts _n_file <<<"$_mline2"
+assert_eq "$_n_db"  "my db" "manifest: dbname with space"
+assert_eq "$_n_ts"  "1"     "manifest: has_ts=1"
+assert_eq "$_n_file" "db-002.sql" "manifest: filename with spaced fields"
+
+assert_false "manifest: rejects tab in dbname" pg_manifest_encode "$(printf 'a\tb')" "o" "0" "f.sql"
+
+# -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
 MOCK_HOME="$WORK_DIR/mock_home"
