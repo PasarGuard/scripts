@@ -1,5 +1,8 @@
 name: Backup Restore
 
+permissions:
+  contents: read
+
 on:
   push:
     paths:

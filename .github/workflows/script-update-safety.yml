@@ -1,5 +1,8 @@
 name: Script Update Safety
 
+permissions:
+  contents: read
+
 on:
   push:
     paths:

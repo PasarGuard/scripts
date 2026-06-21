@@ -49,5 +49,6 @@ jobs:
         if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" dist/pg-node-standalone.tar.gz --clobber
+          gh release upload "$TAG" dist/pg-node-standalone.tar.gz --clobber
