@@ -200,6 +200,18 @@ assert_eq "$(backup_interval_minutes_from_cron "*/30 * * * *")" "30"  "minutes_f
 assert_eq "$(backup_interval_minutes_from_cron "15 */6 * * *")" ""    "minutes_from_cron: unsupported -> empty"
 
 # -----------------------------------------------------------------------
+# format_backup_interval
+# -----------------------------------------------------------------------
+assert_eq "$(format_backup_interval 1440)" "Daily at midnight (every 24 hours)" "format: 1440"
+assert_eq "$(format_backup_interval 120)"  "Every 2 hours"                       "format: 120"
+assert_eq "$(format_backup_interval 360)"  "Every 6 hours"                       "format: 360"
+assert_eq "$(format_backup_interval 60)"   "Every hour"                          "format: 60"
+assert_eq "$(format_backup_interval 30)"   "Every 30 minutes"                    "format: 30"
+assert_eq "$(format_backup_interval 5)"    "Every 5 minutes"                     "format: 5"
+assert_eq "$(format_backup_interval "" "0 7 * * *")" "0 7 * * *"                 "format: empty -> raw cron fallback"
+assert_eq "$(format_backup_interval "")"   "Unknown"                             "format: empty -> Unknown default"
+
+# -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
 MOCK_HOME="$WORK_DIR/mock_home"

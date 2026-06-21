@@ -102,6 +102,28 @@ backup_interval_minutes_from_cron() {
     echo ""
 }
 
+# Render a backup interval (in minutes) as a human-readable string.
+# Invalid/empty input echoes the optional fallback (default "Unknown").
+format_backup_interval() {
+    local minutes="$1"
+    local fallback="${2:-Unknown}"
+
+    if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [[ "$minutes" -lt 1 ]]; then
+        echo "$fallback"
+        return 0
+    fi
+
+    if [[ "$minutes" -eq 1440 ]]; then
+        echo "Daily at midnight (every 24 hours)"
+    elif [[ "$minutes" -ge 120 && $((minutes % 60)) -eq 0 ]]; then
+        echo "Every $((minutes / 60)) hours"
+    elif [[ "$minutes" -eq 60 ]]; then
+        echo "Every hour"
+    else
+        echo "Every $minutes minutes"
+    fi
+}
+
 is_local_db_host() {
     local host="${1:-}"
 
