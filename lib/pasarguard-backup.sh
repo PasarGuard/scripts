@@ -1183,6 +1183,12 @@ backup_command() {
 
                                 colorized_echo blue "Backing up all $db_type_name databases from container: $container_name (using root user)"
                                 databases=$(docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$mysql_cmd" -u root -e "SHOW DATABASES;" 2>>"$log_file" | grep -Ev "^(Database|mysql|performance_schema|information_schema|sys)$" || true)
+                                # Collect DB names into an array so each is passed as one argument
+                                # (a name containing a space must not be word-split).
+                                local -a database_list=()
+                                while IFS= read -r _db_line; do
+                                    [ -n "$_db_line" ] && database_list+=("$_db_line")
+                                done <<<"$databases"
                         if [ -z "$databases" ]; then
                             colorized_echo yellow "No user databases found, falling back to specific database backup"
                             # Fallback to SQL URL credentials
@@ -1201,7 +1207,7 @@ backup_command() {
                                             colorized_echo green "$db_type_name backup completed successfully"
                                         fi
                                     fi
-                                elif ! docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$dump_cmd" -u root --databases $databases --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                elif ! docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$dump_cmd" -u root --databases "${database_list[@]}" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                             # Root backup failed, fallback to SQL URL credentials
                             colorized_echo yellow "Root backup failed, falling back to app user for specific database"
                             local backup_user="${db_user:-${DB_USER:-}}"
