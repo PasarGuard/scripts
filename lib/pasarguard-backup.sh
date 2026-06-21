@@ -24,22 +24,6 @@ filter_backup_cron_entries() {
     grep -F -v "# pasarguard-backup-service" "$source_file" >"$target_file" || true
 }
 
-backup_interval_hours_from_cron() {
-    local cron_schedule="$1"
-
-    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
-        echo "24"
-        return 0
-    fi
-
-    if [[ "$cron_schedule" =~ ^0[[:space:]]+\*/([0-9]+)[[:space:]]+\*[[:space:]]+\*[[:space:]]+\*$ ]]; then
-        echo "${BASH_REMATCH[1]}"
-        return 0
-    fi
-
-    echo ""
-}
-
 # Convert a backup interval expressed in minutes into a cron schedule.
 # Echoes the schedule and returns 0 when the value maps to an evenly-spaced
 # schedule; echoes nothing and returns 1 otherwise.
@@ -406,7 +390,7 @@ backup_service() {
     local telegram_bot_key=""
     local telegram_chat_id=""
     local cron_schedule=""
-    local interval_hours=""
+    local interval_minutes=""
     local backup_proxy_enabled="false"
     local backup_proxy_url=""
 
@@ -425,11 +409,7 @@ backup_service() {
             [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
             local masked_telegram_bot_key=""
 
-            if [[ "$cron_schedule" == "0 0 * * *" ]]; then
-                interval_hours=24
-            else
-                interval_hours=$(backup_interval_hours_from_cron "$cron_schedule")
-            fi
+            interval_minutes=$(backup_interval_minutes_from_cron "$cron_schedule")
 
             masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
 
@@ -437,7 +417,7 @@ backup_service() {
             colorized_echo green "Current Backup Configuration:"
             colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
             colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
-            colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
+            colorized_echo cyan "Backup Interval: $(format_backup_interval "$interval_minutes" "$cron_schedule")"
             if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
                 colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
             else
@@ -513,26 +493,14 @@ backup_service() {
     done
 
     while true; do
-        printf "Set up the backup interval in hours (1-24):\n"
-        read interval_hours
+        printf "How often should backups run? Enter minutes\n(e.g. 30 = every 30 min, 60 = hourly, 1440 = once a day): "
+        read interval_minutes
 
-        if ! [[ "$interval_hours" =~ ^[0-9]+$ ]]; then
-            colorized_echo red "Invalid input. Please enter a valid number."
-            continue
-        fi
-
-        if [[ "$interval_hours" -eq 24 ]]; then
-            cron_schedule="0 0 * * *"
-            colorized_echo green "Setting backup to run daily at midnight."
-            break
-        fi
-
-        if [[ "$interval_hours" -ge 1 && "$interval_hours" -le 23 ]]; then
-            cron_schedule="0 */$interval_hours * * *"
-            colorized_echo green "Setting backup to run every $interval_hours hour(s)."
+        if cron_schedule=$(backup_cron_from_interval_minutes "$interval_minutes"); then
+            colorized_echo green "Backups will run: $(format_backup_interval "$interval_minutes")."
             break
         else
-            colorized_echo red "Invalid input. Please enter a number between 1-24."
+            colorized_echo red "Please enter a number that divides evenly into an hour (5, 10, 15, 20, 30) or a whole number of hours (60, 120, 180 ... up to 1440 for once a day)."
         fi
     done
 
@@ -610,11 +578,7 @@ backup_service() {
     else
         colorized_echo yellow "Initial backup completed with warnings. Check logs if needed."
     fi
-    if [[ "$interval_hours" -eq 24 ]]; then
-        colorized_echo cyan "Backups will be sent to Telegram daily (every 24 hours at midnight)."
-    else
-        colorized_echo cyan "Backups will be sent to Telegram every $interval_hours hour(s)."
-    fi
+    colorized_echo cyan "Backups will be sent to Telegram: $(format_backup_interval "$interval_minutes")."
     colorized_echo green "====================================="
 }
 
@@ -650,14 +614,10 @@ view_backup_service() {
     local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
     backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
     [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
-    local interval_hours=""
+    local interval_minutes=""
     local masked_telegram_bot_key=""
 
-    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
-        interval_hours=24
-    else
-        interval_hours=$(backup_interval_hours_from_cron "$cron_schedule")
-    fi
+    interval_minutes=$(backup_interval_minutes_from_cron "$cron_schedule")
 
     masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
 
@@ -668,11 +628,7 @@ view_backup_service() {
     colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
     colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
     colorized_echo cyan "Cron Schedule: $cron_schedule"
-    if [[ "$interval_hours" -eq 24 ]]; then
-        colorized_echo cyan "Backup Interval: Daily at midnight (every 24 hours)"
-    else
-        colorized_echo cyan "Backup Interval: Every $interval_hours hour(s)"
-    fi
+    colorized_echo cyan "Backup Interval: $(format_backup_interval "$interval_minutes" "$cron_schedule")"
     if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
         colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
     else
@@ -696,14 +652,10 @@ edit_backup_service() {
     local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
     backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
     [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
-    local interval_hours=""
+    local interval_minutes=""
     local masked_telegram_bot_key=""
 
-    if [[ "$cron_schedule" == "0 0 * * *" ]]; then
-        interval_hours=24
-    else
-        interval_hours=$(backup_interval_hours_from_cron "$cron_schedule")
-    fi
+    interval_minutes=$(backup_interval_minutes_from_cron "$cron_schedule")
 
     masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
 
@@ -717,7 +669,7 @@ edit_backup_service() {
     fi
     colorized_echo cyan "1. Telegram Bot API Key: $masked_telegram_bot_key"
     colorized_echo cyan "2. Telegram Chat ID: $telegram_chat_id"
-    colorized_echo cyan "3. Backup Interval: Every $interval_hours hour(s)"
+    colorized_echo cyan "3. Backup Interval: $(format_backup_interval "$interval_minutes" "$cron_schedule")"
     colorized_echo cyan "4. Proxy: $proxy_display"
     colorized_echo yellow "5. Cancel"
     echo ""
@@ -752,23 +704,14 @@ edit_backup_service() {
         ;;
     3)
         while true; do
-            printf "Set new backup interval in hours (1-24) [current: $interval_hours]:\n"
-            read new_interval_hours
-
-            if ! [[ "$new_interval_hours" =~ ^[0-9]+$ ]]; then
-                colorized_echo red "Invalid input. Please enter a valid number."
-                continue
-            fi
+            printf "How often should backups run? Enter minutes\n(e.g. 30 = every 30 min, 60 = hourly, 1440 = once a day) [current: %s]: " "$(format_backup_interval "$interval_minutes" "$cron_schedule")"
+            read new_interval_minutes
 
             local new_cron_schedule=""
-            if [[ "$new_interval_hours" -eq 24 ]]; then
-                new_cron_schedule="0 0 * * *"
-                colorized_echo green "Setting backup to run daily at midnight."
-            elif [[ "$new_interval_hours" -ge 1 && "$new_interval_hours" -le 23 ]]; then
-                new_cron_schedule="0 */$new_interval_hours * * *"
-                colorized_echo green "Setting backup to run every $new_interval_hours hour(s)."
+            if new_cron_schedule=$(backup_cron_from_interval_minutes "$new_interval_minutes"); then
+                colorized_echo green "Backups will run: $(format_backup_interval "$new_interval_minutes")."
             else
-                colorized_echo red "Invalid input. Please enter a number between 1-24."
+                colorized_echo red "Please enter a number that divides evenly into an hour (5, 10, 15, 20, 30) or a whole number of hours (60, 120, 180 ... up to 1440 for once a day)."
                 continue
             fi
 

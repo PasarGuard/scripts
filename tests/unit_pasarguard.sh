@@ -161,18 +161,6 @@ else
 fi
 
 # -----------------------------------------------------------------------
-# backup_interval_hours_from_cron
-# -----------------------------------------------------------------------
-assert_eq "$(backup_interval_hours_from_cron "0 0 * * *")" "24" \
-    "backup_interval_hours_from_cron: daily schedule -> 24"
-assert_eq "$(backup_interval_hours_from_cron "0 */6 * * *")" "6" \
-    "backup_interval_hours_from_cron: every 6 hours"
-assert_eq "$(backup_interval_hours_from_cron "0 */23 * * *")" "23" \
-    "backup_interval_hours_from_cron: every 23 hours"
-assert_eq "$(backup_interval_hours_from_cron "15 */6 * * *")" "" \
-    "backup_interval_hours_from_cron: unsupported schedule -> empty"
-
-# -----------------------------------------------------------------------
 # backup_cron_from_interval_minutes
 # -----------------------------------------------------------------------
 assert_eq "$(backup_cron_from_interval_minutes 5)"    "*/5 * * * *"  "cron_from_minutes: 5 -> */5"
