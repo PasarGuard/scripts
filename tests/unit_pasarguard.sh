@@ -173,6 +173,22 @@ assert_eq "$(backup_interval_hours_from_cron "15 */6 * * *")" "" \
     "backup_interval_hours_from_cron: unsupported schedule -> empty"
 
 # -----------------------------------------------------------------------
+# backup_cron_from_interval_minutes
+# -----------------------------------------------------------------------
+assert_eq "$(backup_cron_from_interval_minutes 5)"    "*/5 * * * *"  "cron_from_minutes: 5 -> */5"
+assert_eq "$(backup_cron_from_interval_minutes 15)"   "*/15 * * * *" "cron_from_minutes: 15 -> */15"
+assert_eq "$(backup_cron_from_interval_minutes 30)"   "*/30 * * * *" "cron_from_minutes: 30 -> */30"
+assert_eq "$(backup_cron_from_interval_minutes 60)"   "0 */1 * * *"  "cron_from_minutes: 60 -> hourly"
+assert_eq "$(backup_cron_from_interval_minutes 120)"  "0 */2 * * *"  "cron_from_minutes: 120 -> every 2h"
+assert_eq "$(backup_cron_from_interval_minutes 360)"  "0 */6 * * *"  "cron_from_minutes: 360 -> every 6h"
+assert_eq "$(backup_cron_from_interval_minutes 1440)" "0 0 * * *"    "cron_from_minutes: 1440 -> daily"
+assert_false "cron_from_minutes: 7 invalid"    backup_cron_from_interval_minutes 7
+assert_false "cron_from_minutes: 90 invalid"   backup_cron_from_interval_minutes 90
+assert_false "cron_from_minutes: 1441 invalid" backup_cron_from_interval_minutes 1441
+assert_false "cron_from_minutes: 0 invalid"    backup_cron_from_interval_minutes 0
+assert_false "cron_from_minutes: abc invalid"  backup_cron_from_interval_minutes abc
+
+# -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
 MOCK_HOME="$WORK_DIR/mock_home"

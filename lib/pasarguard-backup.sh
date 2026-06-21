@@ -40,6 +40,40 @@ backup_interval_hours_from_cron() {
     echo ""
 }
 
+# Convert a backup interval expressed in minutes into a cron schedule.
+# Echoes the schedule and returns 0 when the value maps to an evenly-spaced
+# schedule; echoes nothing and returns 1 otherwise.
+backup_cron_from_interval_minutes() {
+    local minutes="$1"
+
+    if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [[ "$minutes" -lt 1 ]]; then
+        return 1
+    fi
+
+    # Sub-hour: must divide evenly into 60 minutes.
+    if [[ "$minutes" -lt 60 ]]; then
+        if [[ $((60 % minutes)) -eq 0 ]]; then
+            echo "*/$minutes * * * *"
+            return 0
+        fi
+        return 1
+    fi
+
+    # Exactly one day: keep the existing daily-at-midnight format.
+    if [[ "$minutes" -eq 1440 ]]; then
+        echo "0 0 * * *"
+        return 0
+    fi
+
+    # Between one hour and one day: must be a whole number of hours.
+    if [[ "$minutes" -lt 1440 && $((minutes % 60)) -eq 0 ]]; then
+        echo "0 */$((minutes / 60)) * * *"
+        return 0
+    fi
+
+    return 1
+}
+
 is_local_db_host() {
     local host="${1:-}"
 
