@@ -741,9 +741,9 @@ install_node() {
         if [ "$AUTO_CONFIRM" = true ]; then
             use_rest=""
         else
-            read -p "GRPC is recommended by default. Do you want to use REST protocol instead? (Y/n): " -r use_rest
+            read -p "GRPC is recommended by default. Do you want to use REST protocol instead? (y/N): " -r use_rest
         fi
-        # Default to "Y" if the user just presses ENTER
+        # Default to GRPC (the recommended default) when the user just presses ENTER
         if [[ "$use_rest" =~ ^[Yy]$ ]]; then
             USE_REST=1
         else
