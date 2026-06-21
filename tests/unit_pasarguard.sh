@@ -200,6 +200,13 @@ assert_eq "$(format_backup_interval "" "0 7 * * *")" "0 7 * * *"                
 assert_eq "$(format_backup_interval "")"   "Unknown"                             "format: empty -> Unknown default"
 
 # -----------------------------------------------------------------------
+# pg_dump_index_filename
+# -----------------------------------------------------------------------
+assert_eq "$(pg_dump_index_filename 1)"   "db-001.sql" "index_filename: 1"
+assert_eq "$(pg_dump_index_filename 42)"  "db-042.sql" "index_filename: 42"
+assert_eq "$(pg_dump_index_filename 100)" "db-100.sql" "index_filename: 100"
+
+# -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
 MOCK_HOME="$WORK_DIR/mock_home"

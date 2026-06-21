@@ -127,6 +127,11 @@ is_local_db_host() {
     return 1
 }
 
+# Stable per-database dump filename for index N (1-based): db-001.sql, db-002.sql ...
+pg_dump_index_filename() {
+    printf 'db-%03d.sql' "$1"
+}
+
 send_backup_to_telegram() {
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do
