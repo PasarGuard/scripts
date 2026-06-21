@@ -892,19 +892,30 @@ pg_dump_all_user_databases() {
         local filename
         filename=$(pg_dump_index_filename "$index")
 
-        # Owner of this database.
+        # Owner of this database (empty if it can't be determined; restore
+        # falls back to the admin role).
         local owner=""
-        owner=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+        if ! owner=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             psql -U "$backup_user" -d postgres -At \
             -c "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${dbname//\'/\'\'}';" \
-            2>>"$log_file")
+            2>>"$log_file") || [ -z "$owner" ]; then
+            echo "Could not determine owner for database '$dbname'; restore will fall back to the admin role" >>"$log_file"
+            owner=""
+        fi
 
         # Whether the timescaledb extension is installed in this database.
+        # Check psql's own exit status (not grep's) so a connection failure is
+        # not silently recorded as "extension absent".
         local has_ts="0"
-        if docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+        local ext_check=""
+        if ext_check=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             psql -U "$backup_user" -d "$dbname" -At \
-            -c "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb';" 2>>"$log_file" | grep -q '^1$'; then
-            has_ts="1"
+            -c "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb';" 2>>"$log_file"); then
+            if printf '%s' "$ext_check" | grep -q '^1$'; then
+                has_ts="1"
+            fi
+        else
+            echo "Could not check timescaledb extension for database '$dbname'; assuming not present" >>"$log_file"
         fi
 
         # Dump this database.
