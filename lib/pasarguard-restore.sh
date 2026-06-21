@@ -59,6 +59,103 @@ pg_filter_timescaledb_extension_lines() {
     grep -v -E '^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b' || true
 }
 
+# Restore every database listed in <pg_dump_dir>/manifest.tsv. Globals are
+# restored first (without ON_ERROR_STOP so pre-existing roles don't abort it);
+# each database is then DROP/CREATEd with its recorded owner and loaded, using
+# the TimescaleDB-safe procedure when has_timescaledb=1. Per-database failures
+# are isolated and reported. Returns 0 only if every database restored.
+pg_restore_all_user_databases() {
+    local container_name="$1"
+    local restore_user="$2"
+    local restore_password="$3"
+    local admin_user="$4"
+    local admin_password="$5"
+    local pg_dump_dir="$6"
+    local log_file="$7"
+
+    local manifest="$pg_dump_dir/manifest.tsv"
+    if [ ! -s "$manifest" ]; then
+        echo "Manifest missing or empty: $manifest" >>"$log_file"
+        return 1
+    fi
+
+    if [ -s "$pg_dump_dir/globals.sql" ]; then
+        colorized_echo blue "Restoring global roles and grants..."
+        docker exec -i -e PGPASSWORD="$admin_password" "$container_name" \
+            psql -U "$admin_user" -d postgres < "$pg_dump_dir/globals.sql" >>"$log_file" 2>&1 || true
+    fi
+
+    local total=0 ok=0
+    local dbname owner has_ts filename
+    while IFS=$'\t' read -r dbname owner has_ts filename; do
+        [ -n "$dbname" ] || continue
+        total=$((total + 1))
+        local dump_path="$pg_dump_dir/$filename"
+
+        if ! postgres_dump_looks_restorable "$dump_path"; then
+            colorized_echo red "Dump for database '$dbname' is missing or invalid; skipping."
+            echo "Validation failed for $dump_path" >>"$log_file"
+            continue
+        fi
+
+        local db_ident="${dbname//\"/\"\"}"
+        local db_sql="${dbname//\'/\'\'}"
+        local owner_ident="${owner//\"/\"\"}"
+        [ -n "$owner_ident" ] || owner_ident="$admin_user"
+
+        colorized_echo blue "Restoring database '$dbname'..."
+        docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
+            -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db_sql' AND pid <> pg_backend_pid();" \
+            >>"$log_file" 2>&1
+        docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
+            -c "DROP DATABASE IF EXISTS \"$db_ident\";" >>"$log_file" 2>&1
+        if ! docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
+            -c "CREATE DATABASE \"$db_ident\" OWNER \"$owner_ident\";" >>"$log_file" 2>&1; then
+            colorized_echo red "Failed to create database '$dbname'; skipping."
+            echo "CREATE DATABASE failed for '$dbname'" >>"$log_file"
+            continue
+        fi
+
+        local restored=false
+        if [ "$has_ts" = "1" ]; then
+            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$dbname" \
+                -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >>"$log_file" 2>&1
+            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$dbname" \
+                -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1
+            local filtered="$pg_dump_dir/${filename}.filtered"
+            pg_filter_timescaledb_extension_lines < "$dump_path" > "$filtered" 2>>"$log_file"
+            if docker exec -i -e PGPASSWORD="$restore_password" "$container_name" \
+                psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$dbname" < "$filtered" >>"$log_file" 2>&1; then
+                restored=true
+            elif docker exec -i -e PGPASSWORD="$admin_password" "$container_name" \
+                psql -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$dbname" < "$filtered" >>"$log_file" 2>&1; then
+                restored=true
+            fi
+            rm -f "$filtered"
+            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$dbname" \
+                -c "SELECT timescaledb_post_restore();" >>"$log_file" 2>&1
+        else
+            if docker exec -i -e PGPASSWORD="$restore_password" "$container_name" \
+                psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$dbname" < "$dump_path" >>"$log_file" 2>&1; then
+                restored=true
+            elif docker exec -i -e PGPASSWORD="$admin_password" "$container_name" \
+                psql -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$dbname" < "$dump_path" >>"$log_file" 2>&1; then
+                restored=true
+            fi
+        fi
+
+        if [ "$restored" = true ]; then
+            colorized_echo green "Database '$dbname' restored."
+            ok=$((ok + 1))
+        else
+            colorized_echo red "Database '$dbname' restore failed. Check log: $log_file"
+        fi
+    done < "$manifest"
+
+    colorized_echo blue "Restored $ok of $total databases."
+    [ "$total" -gt 0 ] && [ "$ok" -eq "$total" ]
+}
+
 restore_command() {
     colorized_echo blue "Starting restore process..."
 
@@ -787,31 +884,36 @@ restore_command() {
         ;;
 
     postgresql|timescaledb)
-        if [ ! -f "$temp_restore_dir/db_backup.sql" ]; then
-            colorized_echo red "Database backup file not found in backup archive."
+        local pg_layout
+        pg_layout=$(pg_backup_layout "$temp_restore_dir")
+
+        if [ "$pg_layout" = "none" ]; then
+            colorized_echo red "Database backup not found in backup archive."
             rm -rf "$temp_restore_dir"
             exit 1
         fi
 
-        # Verify backup file is not empty and is readable
-        if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
-            colorized_echo red "Database backup file is empty or unreadable."
+        if [ "$pg_layout" = "single" ]; then
+            # Verify backup file is not empty and is readable
+            if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
+                colorized_echo red "Database backup file is empty or unreadable."
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
 
-        # Validate dump content *before* any destructive step (the TimescaleDB
-        # path drops the live database), so an empty/truncated/garbage dump can
-        # never wipe the database with nothing to restore.
-        if ! postgres_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
-            colorized_echo red "Database backup does not look like a valid SQL dump; aborting before any changes."
-            echo "Dump content validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
-        fi
+            # Validate dump content *before* any destructive step (the TimescaleDB
+            # path drops the live database), so an empty/truncated/garbage dump can
+            # never wipe the database with nothing to restore.
+            if ! postgres_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
+                colorized_echo red "Database backup does not look like a valid SQL dump; aborting before any changes."
+                echo "Dump content validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
 
-        local backup_size=$(du -h "$temp_restore_dir/db_backup.sql" | cut -f1)
-        colorized_echo blue "Backup file size: $backup_size"
+            local backup_size=$(du -h "$temp_restore_dir/db_backup.sql" | cut -f1)
+            colorized_echo blue "Backup file size: $backup_size"
+        fi
 
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
             if [ -z "$container_name" ]; then
@@ -844,7 +946,14 @@ restore_command() {
 
             local restore_success=false
 
-            if [ "$db_type" = "timescaledb" ]; then
+            if [ "$pg_layout" = "multi" ]; then
+                if pg_restore_all_user_databases "$container_name" "$restore_user" "$restore_password" "$admin_user" "$admin_password" "$temp_restore_dir/pg_dump" "$log_file"; then
+                    colorized_echo green "All $db_type databases restored successfully."
+                    restore_success=true
+                else
+                    colorized_echo red "One or more databases failed to restore. Check log: $log_file"
+                fi
+            elif [ "$db_type" = "timescaledb" ]; then
                 # TimescaleDB requires special restore procedure to handle version mismatches.
                 # A plain psql restore fails when the backup was taken with a different
                 # TimescaleDB version because DROP EXTENSION / CREATE EXTENSION cycles
@@ -883,8 +992,6 @@ restore_command() {
                     -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1
 
                 # Filter out extension DROP/CREATE statements from the dump.
-                # pg_dump --clean --if-exists generates DROP EXTENSION / CREATE EXTENSION
-                # lines that would undo the pre_restore() setup above.
                 colorized_echo blue "Preparing dump (filtering extension statements)..."
                 pg_filter_timescaledb_extension_lines < "$temp_restore_dir/db_backup.sql" \
                     > "$temp_restore_dir/db_backup_filtered.sql" 2>>"$log_file"
