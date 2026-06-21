@@ -786,18 +786,18 @@ install_node() {
         done
     fi
     colorized_echo blue "Fetching .env and compose file"
-    colorized_echo cyan "  Command: curl -sL $FILES_URL_PREFIX/.env.example -o $APP_DIR/.env"
+    colorized_echo cyan "  Command: curl -fsL $FILES_URL_PREFIX/.env.example -o $APP_DIR/.env"
     # Pre-create .env as 0600 (and tighten any pre-existing copy) so the node
     # API_KEY written below is never world-readable.
     harden_secret_file "$APP_DIR/.env"
-    if curl -sL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"; then
+    if curl -fsL "$FILES_URL_PREFIX/.env.example" -o "$APP_DIR/.env"; then
         colorized_echo green "  ✓ File saved: $APP_DIR/.env"
     else
         colorized_echo red "  ✗ Failed to download .env.example"
         exit 1
     fi
-    colorized_echo cyan "  Command: curl -sL $COMPOSE_FILES_URL_PREFIX/node.yml -o $APP_DIR/docker-compose.yml"
-    if curl -sL "$COMPOSE_FILES_URL_PREFIX/node.yml" -o "$APP_DIR/docker-compose.yml"; then
+    colorized_echo cyan "  Command: curl -fsL $COMPOSE_FILES_URL_PREFIX/node.yml -o $APP_DIR/docker-compose.yml"
+    if curl -fsL "$COMPOSE_FILES_URL_PREFIX/node.yml" -o "$APP_DIR/docker-compose.yml"; then
         colorized_echo green "  ✓ File saved: $APP_DIR/docker-compose.yml"
     else
         colorized_echo red "  ✗ Failed to download node.yml"

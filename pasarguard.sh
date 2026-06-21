@@ -943,7 +943,7 @@ install_pasarguard() {
     # Pre-create .env as 0600 (and tighten any pre-existing copy) so the DB,
     # pgAdmin and MySQL-root secrets written below are never world-readable.
     harden_secret_file "$APP_DIR/.env"
-    curl -sL "$FILES_URL_PREFIX/main/.env.example" -o "$APP_DIR/.env"
+    curl -fsL "$FILES_URL_PREFIX/main/.env.example" -o "$APP_DIR/.env"
 
     colorized_echo green "File saved in $APP_DIR/.env"
 
@@ -960,7 +960,7 @@ install_pasarguard() {
         colorized_echo red "Using $db_name as database"
         echo "----------------------------"
         colorized_echo blue "Fetching compose file for pasarguard+$db_name"
-        curl -sL "$COMPOSE_FILES_URL_PREFIX/pasarguard-$database_type.yml" -o "$COMPOSE_FILE"
+        curl -fsL "$COMPOSE_FILES_URL_PREFIX/pasarguard-$database_type.yml" -o "$COMPOSE_FILE"
 
         # Comment out the SQLite line
         sed -i 's~^SQLALCHEMY_DATABASE_URL = "sqlite~#&~' "$APP_DIR/.env"
@@ -1011,7 +1011,7 @@ install_pasarguard() {
         colorized_echo red "Using SQLite as database"
         echo "----------------------------"
         colorized_echo blue "Fetching compose file"
-        curl -sL "$FILES_URL_PREFIX/main/docker-compose.yml" -o "$COMPOSE_FILE"
+        curl -fsL "$FILES_URL_PREFIX/main/docker-compose.yml" -o "$COMPOSE_FILE"
 
         sed -i 's/^# \(SQLALCHEMY_DATABASE_URL = .*\)$/\1/' "$APP_DIR/.env"
 
