@@ -40,12 +40,15 @@ set_or_uncomment_env_var() {
     target_dir=$(dirname "$target_file")
     tmp_file=$(create_temp_file_in_dir "$target_dir" "env-edit" ".tmp")
 
-    awk -v env_key="$key" -v env_line="${key} = ${formatted_value}" '
-        BEGIN { replaced = 0 }
+    # Pass key/value through the environment and read them via ENVIRON so awk
+    # does not interpret backslash escapes (-v would turn \t, \n, etc. in the
+    # value into a tab/newline).
+    env_key="$key" env_line="${key} = ${formatted_value}" awk '
+        BEGIN { ekey = ENVIRON["env_key"]; eline = ENVIRON["env_line"]; replaced = 0 }
         {
-            if ($0 ~ "^[[:space:]]*#?[[:space:]]*" env_key "[[:space:]]*=") {
+            if ($0 ~ "^[[:space:]]*#?[[:space:]]*" ekey "[[:space:]]*=") {
                 if (replaced == 0) {
-                    print env_line
+                    print eline
                     replaced = 1
                 }
                 next
@@ -54,7 +57,7 @@ set_or_uncomment_env_var() {
         }
         END {
             if (replaced == 0) {
-                print env_line
+                print eline
             }
         }
     ' "$target_file" >"$tmp_file"

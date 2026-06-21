@@ -73,6 +73,13 @@ assert_grep "NEWKEY = newval" "$ENV_FILE" "set_or_uncomment: appends missing key
 set_or_uncomment_env_var "QKEY" "val with spaces" true "$ENV_FILE"
 assert_grep 'QKEY = "val with spaces"' "$ENV_FILE" "set_or_uncomment: quotes value when asked"
 
+# Backslash sequences in the value must be written literally, not interpreted
+# as awk escapes (\t -> tab, \n -> newline). Regression for awk -v handling.
+: > "$ENV_FILE"
+set_or_uncomment_env_var "BSLASH" 'a\tb\nc' false "$ENV_FILE"
+assert_grep 'BSLASH = a\tb\nc' "$ENV_FILE" "set_or_uncomment: backslashes kept literal"
+assert_eq "$(wc -l < "$ENV_FILE")" "1" "set_or_uncomment: no spurious newline from \\n in value"
+
 # -----------------------------------------------------------------------
 # comment_out_env_var
 # -----------------------------------------------------------------------
