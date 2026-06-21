@@ -88,6 +88,13 @@ tls_verify_level() {
   fi
 }
 
+# Byte length of a string. ${#s} counts characters, so a multibyte UTF-8 body
+# would advertise a Content-Length smaller than the bytes actually sent and
+# truncate the response; wc -c counts bytes.
+byte_length() {
+  printf '%s' "$1" | wc -c | tr -d '[:space:]'
+}
+
 # When sourced for testing, stop here with the functions defined.
 if [[ "${PG_NODE_SERVICE_SOURCE_ONLY:-false}" == "true" ]]; then
   return 0
@@ -167,7 +174,7 @@ respond() {
   local text body_len
   LAST_STATUS=$code
   text=$(status_text "$code")
-  body_len=${#body}
+  body_len=$(byte_length "$body")
   printf 'HTTP/1.1 %s %s\r\n' "$code" "$text"
   printf 'Content-Type: application/json\r\n'
   printf 'Content-Length: %s\r\n' "$body_len"
@@ -339,7 +346,10 @@ handle_connection() {
       log "Body rejected: $content_length bytes (too large)"
       return 0
     fi
-    if ! IFS= read -r -N "$content_length" body; then
+    # Content-Length is a byte count, but `read -N` counts characters; force a
+    # byte-wise locale so exactly content_length bytes are consumed (otherwise a
+    # multibyte body over-reads and the request stalls).
+    if ! LC_ALL=C IFS= read -r -N "$content_length" body; then
       log "Failed to read request body"
       respond 400 '{"detail":"Failed to read request body"}'
       return 0

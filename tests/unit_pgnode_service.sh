@@ -52,6 +52,16 @@ assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=0" "tls_verify_level: self
 check_certificate() { return 1; }
 assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=0" "tls_verify_level: invalid -> verify=0"
 
+# byte_length must count bytes (for Content-Length), not characters: a
+# multibyte UTF-8 body otherwise advertises a too-small length and truncates.
+assert_eq "$(byte_length "hello")" "5" "byte_length: ASCII counts bytes"
+assert_eq "$(byte_length "")" "0" "byte_length: empty is 0"
+# 'é' is 2 bytes in UTF-8, so "café" is 5 bytes though ${#} reports 4 chars.
+assert_eq "$(byte_length "café")" "5" "byte_length: multibyte UTF-8 counts bytes"
+# A JSON body with an embedded multibyte error message.
+multibyte_body='{"detail":"versión inválida"}'
+assert_eq "$(byte_length "$multibyte_body")" "$(printf '%s' "$multibyte_body" | wc -c | tr -d '[:space:]')" "byte_length: matches wc -c"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
