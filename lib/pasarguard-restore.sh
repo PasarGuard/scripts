@@ -119,8 +119,8 @@ pg_restore_all_user_databases() {
     fi
 
     local total=0 ok=0
-    local dbname owner has_ts filename
-    while IFS=$'\t' read -r dbname owner has_ts filename; do
+    local dbname owner has_ts filename ts_version
+    while IFS=$'\t' read -r dbname owner has_ts filename ts_version; do
         [ -n "$dbname" ] || continue
         total=$((total + 1))
         local dump_path="$pg_dump_dir/$filename"
@@ -135,6 +135,29 @@ pg_restore_all_user_databases() {
         local db_sql="${dbname//\'/\'\'}"
         local owner_ident="${owner//\"/\"\"}"
         [ -n "$owner_ident" ] || owner_ident="$admin_user"
+
+        # TimescaleDB cross-version safety gate. If this backup recorded a
+        # timescaledb version, refuse to touch the database unless THIS server's
+        # bundled version matches. Runs BEFORE any terminate/DROP so a mismatch
+        # never wipes or half-restores data. (Empty ts_version = legacy backup =
+        # no gate; the single-DB legacy path is unaffected.)
+        if [ "$has_ts" = "1" ] && [ -n "$ts_version" ]; then
+            local target_ts=""
+            target_ts=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
+                psql -U "$admin_user" -d postgres -At \
+                -c "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb';" \
+                2>>"$log_file") || target_ts=""
+            if ! timescaledb_version_matches "$ts_version" "$target_ts"; then
+                local svn="" pg_major=""
+                svn=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
+                    psql -U "$admin_user" -d postgres -At -c "SHOW server_version_num;" \
+                    2>>"$log_file") || svn=""
+                [ -n "$svn" ] && pg_major=$(( svn / 10000 ))
+                colorized_echo red "$(format_timescaledb_mismatch_help "$dbname" "$ts_version" "$target_ts" "$pg_major" "${APP_NAME:-pasarguard}")"
+                echo "TimescaleDB version mismatch for '$dbname' (backup=$ts_version target=${target_ts:-unavailable}); skipped before any destructive change" >>"$log_file"
+                continue
+            fi
+        fi
 
         colorized_echo blue "Restoring database '$dbname'..."
         docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
