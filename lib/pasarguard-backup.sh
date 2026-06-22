@@ -850,7 +850,7 @@ remove_backup_service() {
 # Dump every real user database (plus cluster globals) from a local
 # PostgreSQL/TimescaleDB container into <temp_dir>/pg_dump/.
 # Layout: globals.sql, db-NNN.sql per database, manifest.tsv
-# (dbname<TAB>owner<TAB>has_timescaledb<TAB>filename).
+# (dbname<TAB>owner<TAB>has_timescaledb<TAB>filename<TAB>ts_version).
 # Returns 0 when at least one database was dumped; otherwise removes the
 # pg_dump dir and returns 1 so the caller can fall back to single-database mode.
 pg_dump_all_user_databases() {
@@ -905,16 +905,20 @@ pg_dump_all_user_databases() {
             owner=""
         fi
 
-        # Whether the timescaledb extension is installed in this database.
-        # Check psql's own exit status (not grep's) so a connection failure is
-        # not silently recorded as "extension absent".
+        # TimescaleDB presence + version for this database. One query gives both:
+        # a non-empty result means the extension is installed, and the value is
+        # its version (recorded so restore can detect a version mismatch before
+        # doing anything destructive). Check psql's own exit status so a
+        # connection failure isn't silently recorded as "not installed".
         local has_ts="0"
+        local ts_version=""
         local ext_check=""
         if ext_check=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             psql -U "$backup_user" -d "$dbname" -At \
-            -c "SELECT 1 FROM pg_extension WHERE extname = 'timescaledb';" 2>>"$log_file"); then
-            if printf '%s' "$ext_check" | grep -q '^1$'; then
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';" 2>>"$log_file"); then
+            if [ -n "$ext_check" ]; then
                 has_ts="1"
+                ts_version="$ext_check"
             fi
         else
             echo "Could not check timescaledb extension for database '$dbname'; assuming not present" >>"$log_file"
@@ -936,7 +940,7 @@ pg_dump_all_user_databases() {
         fi
 
         local line
-        if ! line=$(pg_manifest_encode "$dbname" "$owner" "$has_ts" "$filename"); then
+        if ! line=$(pg_manifest_encode "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"); then
             echo "Database name '$dbname' is not manifest-safe; skipping" >>"$log_file"
             rm -f "$out_dir/$filename"
             continue
