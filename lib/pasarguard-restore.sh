@@ -142,12 +142,24 @@ pg_restore_all_user_databases() {
         # never wipes or half-restores data. (Empty ts_version = legacy backup =
         # no gate; the single-DB legacy path is unaffected.)
         if [ "$has_ts" = "1" ] && [ -n "$ts_version" ]; then
-            local target_ts=""
-            target_ts=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
+            # Read THIS server's bundled timescaledb version (read-only). Separate
+            # a probe that FAILED (transient docker/psql error -> non-zero exit)
+            # from one that SUCCEEDED but returned nothing (the target genuinely
+            # has no timescaledb available). Only a successful probe gates the
+            # restore: a failed probe falls back to best-effort (we cannot gate on
+            # information we do not have), while a successful empty result is a
+            # real mismatch (target lacks the extension) and is skipped before any
+            # destructive step.
+            local target_ts="" probe_ok=0
+            if target_ts=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
                 psql -U "$admin_user" -d postgres -At \
                 -c "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb';" \
-                2>>"$log_file") || target_ts=""
-            if ! timescaledb_version_matches "$ts_version" "$target_ts"; then
+                2>>"$log_file"); then
+                probe_ok=1
+            else
+                target_ts=""
+            fi
+            if [ "$probe_ok" = "1" ] && ! timescaledb_version_matches "$ts_version" "$target_ts"; then
                 local svn="" pg_major=""
                 svn=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
                     psql -U "$admin_user" -d postgres -At -c "SHOW server_version_num;" \
@@ -156,6 +168,8 @@ pg_restore_all_user_databases() {
                 colorized_echo red "$(format_timescaledb_mismatch_help "$dbname" "$ts_version" "$target_ts" "$pg_major" "${APP_NAME:-pasarguard}")"
                 echo "TimescaleDB version mismatch for '$dbname' (backup=$ts_version target=${target_ts:-unavailable}); skipped before any destructive change" >>"$log_file"
                 continue
+            elif [ "$probe_ok" != "1" ]; then
+                echo "Could not read target timescaledb version for '$dbname'; proceeding best-effort (probe failed)" >>"$log_file"
             fi
         fi
 
