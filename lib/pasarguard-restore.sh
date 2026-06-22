@@ -66,6 +66,32 @@ timescaledb_version_matches() {
     [ "$1" = "$2" ]
 }
 
+# Operator-facing guidance shown when a backup's timescaledb version does not
+# match this server's. Values are filled in so the output is copy-pasteable.
+# Empty tgt_ver -> "not installed"; empty pg_major -> a pgNN placeholder.
+format_timescaledb_mismatch_help() {
+    local dbname="$1" src_ver="$2" tgt_ver="$3" pg_major="$4" app_name="$5"
+    local tgt_display="${tgt_ver:-not installed}"
+    local tag_suffix="pg${pg_major}"
+    if [ -z "$pg_major" ]; then
+        tag_suffix="pgNN   (replace NN with your PostgreSQL major version)"
+    fi
+    printf '%s\n' \
+"TimescaleDB version mismatch for database '$dbname':" \
+"  this backup was taken with timescaledb $src_ver" \
+"  but THIS server has timescaledb $tgt_display" \
+"The restore was stopped BEFORE changing anything - your current data is untouched." \
+"" \
+"To fix, on THIS server (the one you are restoring to):" \
+"  1. Run:  $app_name edit" \
+"  2. Set the timescaledb image to the backup's version:" \
+"         image: timescale/timescaledb:${src_ver}-${tag_suffix}" \
+"  3. Reset ONLY this server's database volume (do NOT run this on your main server):" \
+"         rm -rf /var/lib/postgresql/pasarguard" \
+"  4. Restart:  $app_name restart" \
+"  5. Run the restore again."
+}
+
 # Restore every database listed in <pg_dump_dir>/manifest.tsv. Globals are
 # restored first (without ON_ERROR_STOP so pre-existing roles don't abort it);
 # each database is then DROP/CREATEd with its recorded owner and loaded, using

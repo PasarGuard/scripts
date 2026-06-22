@@ -418,6 +418,23 @@ assert_false "ts_match: differ"          timescaledb_version_matches "2.27.2" "2
 assert_false "ts_match: source vs empty" timescaledb_version_matches "2.27.2" ""
 
 # -----------------------------------------------------------------------
+# format_timescaledb_mismatch_help
+# -----------------------------------------------------------------------
+contains() { [[ "$1" == *"$2"* ]]; }
+_help=$(format_timescaledb_mismatch_help "pasarguard" "2.27.2" "2.15.0" "17" "pasarguard")
+assert_true "help: shows source version"  contains "$_help" "timescaledb 2.27.2"
+assert_true "help: shows target version"  contains "$_help" "timescaledb 2.15.0"
+assert_true "help: exact image tag"       contains "$_help" "timescale/timescaledb:2.27.2-pg17"
+assert_true "help: data untouched"        contains "$_help" "untouched"
+assert_true "help: this-server warning"   contains "$_help" "do NOT run this on your main server"
+assert_true "help: uses edit subcommand"  contains "$_help" "pasarguard edit"
+assert_true "help: uses restart subcmd"   contains "$_help" "pasarguard restart"
+
+_help2=$(format_timescaledb_mismatch_help "db" "2.27.2" "" "" "pasarguard")
+assert_true "help: target not installed"  contains "$_help2" "not installed"
+assert_true "help: pgNN placeholder"      contains "$_help2" "pgNN"
+
+# -----------------------------------------------------------------------
 # get_cron_package_name
 # -----------------------------------------------------------------------
 _saved_os="${OS:-}"
