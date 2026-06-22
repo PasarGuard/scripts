@@ -231,6 +231,26 @@ assert_false "manifest: rejects newline in owner"    pg_manifest_encode "db" "$(
 assert_false "manifest: rejects newline in filename" pg_manifest_encode "db" "owner" "0" "$(printf 'a\nb')"
 assert_eq "$(pg_manifest_encode "$(printf 'a\tb')" "owner" "0" "f.sql")" "" "manifest: rejection emits nothing"
 
+# ts_version (5th field)
+_tsline=$(pg_manifest_encode "tsdb" "owner" "1" "db-003.sql" "2.27.2")
+IFS=$'\t' read -r _t_db _t_owner _t_ts _t_file _t_ver <<<"$_tsline"
+assert_eq "$_t_db"   "tsdb"        "manifest: ts dbname"
+assert_eq "$_t_ts"   "1"           "manifest: ts has_ts"
+assert_eq "$_t_file" "db-003.sql"  "manifest: ts filename"
+assert_eq "$_t_ver"  "2.27.2"      "manifest: ts_version field round-trips"
+
+_ntline=$(pg_manifest_encode "plain" "owner" "0" "db-004.sql" "")
+IFS=$'\t' read -r _p_db _p_owner _p_ts _p_file _p_ver <<<"$_ntline"
+assert_eq "$_p_ver" "" "manifest: empty ts_version for non-timescale db"
+
+# legacy 4-field line read back with 5 vars -> ts_version empty, has_ts preserved
+IFS=$'\t' read -r _l_db _l_owner _l_ts _l_file _l_ver <<<"$(printf 'olddb\towner\t1\tdb-001.sql')"
+assert_eq "$_l_ver" ""  "manifest: legacy 4-field line -> empty ts_version"
+assert_eq "$_l_ts"  "1" "manifest: legacy has_ts preserved"
+
+assert_false "manifest: rejects tab in ts_version"     pg_manifest_encode "db" "o" "1" "f.sql" "$(printf '2\t7')"
+assert_false "manifest: rejects newline in ts_version" pg_manifest_encode "db" "o" "1" "f.sql" "$(printf '2\n7')"
+
 # -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------

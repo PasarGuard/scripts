@@ -132,14 +132,16 @@ pg_dump_index_filename() {
     printf 'db-%03d.sql' "$1"
 }
 
-# Encode one manifest line: dbname<TAB>owner<TAB>has_ts<TAB>filename.
-# Rejects (returns 1) any field that would corrupt the TSV (tab or newline).
+# Encode one manifest line:
+#   dbname<TAB>owner<TAB>has_ts<TAB>filename<TAB>ts_version
+# ts_version is the source timescaledb extension version (empty for non-timescale
+# databases). Rejects (returns 1) any field that would corrupt the TSV.
 pg_manifest_encode() {
-    local dbname="$1" owner="$2" has_ts="$3" filename="$4"
-    case "${dbname}${owner}${filename}" in
+    local dbname="$1" owner="$2" has_ts="$3" filename="$4" ts_version="${5:-}"
+    case "${dbname}${owner}${filename}${ts_version}" in
         *$'\t'* | *$'\n'*) return 1 ;;
     esac
-    printf '%s\t%s\t%s\t%s' "$dbname" "$owner" "$has_ts" "$filename"
+    printf '%s\t%s\t%s\t%s\t%s' "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"
 }
 
 send_backup_to_telegram() {
