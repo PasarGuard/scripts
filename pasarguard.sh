@@ -179,16 +179,51 @@ is_port_in_use() {
     return 1
 }
 
+# Map the detected OS to its cron daemon package name, mirroring the OS matrix
+# in lib/system.sh: Debian/Ubuntu ship "cron"; the Red Hat family, Fedora,
+# Arch and openSUSE ship "cronie". Returns non-zero for an unrecognized OS.
+get_cron_package_name() {
+    if [ -z "${OS:-}" ]; then
+        detect_os
+    fi
+    if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
+        echo "cron"
+    elif is_redhat_family_os ||
+        [[ "$OS" == "Fedora"* ]] ||
+        [[ "$OS" == "Arch Linux" ]] || [[ "$OS" == "Arch"* ]] ||
+        [[ "$OS" == "openSUSE"* ]]; then
+        echo "cronie"
+    else
+        return 1
+    fi
+}
+
 ensure_acme_dependencies() {
     command -v socat >/dev/null 2>&1 || install_package socat
     command -v openssl >/dev/null 2>&1 || install_package openssl
+
+    # acme.sh's installer pre-check requires crontab to schedule auto-renewal.
+    if ! command -v crontab >/dev/null 2>&1; then
+        local cron_pkg
+        if cron_pkg="$(get_cron_package_name)"; then
+            install_package "$cron_pkg"
+        else
+            colorized_echo yellow "Could not determine the cron package for this OS; skipping. acme.sh auto-renewal may not be scheduled."
+        fi
+    fi
 }
 
 install_acme() {
     colorized_echo blue "Installing acme.sh for SSL certificate management..."
+    # curl | sh exits 0 even when acme.sh's own installer bails (e.g. a failed
+    # pre-check), so confirm the binary actually landed before claiming success.
     if curl -s https://get.acme.sh | sh >/dev/null 2>&1; then
-        colorized_echo green "acme.sh installed successfully"
-        return 0
+        local acme_bin=""
+        acme_bin="$(get_acme_sh_binary)" || true
+        if [ -n "$acme_bin" ] && [ -x "$acme_bin" ]; then
+            colorized_echo green "acme.sh installed successfully"
+            return 0
+        fi
     fi
     colorized_echo red "Failed to install acme.sh"
     return 1

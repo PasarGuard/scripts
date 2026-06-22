@@ -390,6 +390,20 @@ _ts_out=$(printf '%s\n' \
 _ts_expected=$(printf '%s\n' "CREATE TABLE foo (id int);" "INSERT INTO foo VALUES (1);")
 assert_eq "$_ts_out" "$_ts_expected" "ts_filter: removes timescaledb extension lines, keeps rest"
 
+# -----------------------------------------------------------------------
+# get_cron_package_name
+# -----------------------------------------------------------------------
+_saved_os="${OS:-}"
+OS="Ubuntu";               assert_eq "$(get_cron_package_name)" "cron"   "cron_pkg: Ubuntu -> cron"
+OS="Debian GNU/Linux";     assert_eq "$(get_cron_package_name)" "cron"   "cron_pkg: Debian -> cron"
+OS="CentOS Linux";         assert_eq "$(get_cron_package_name)" "cronie" "cron_pkg: CentOS -> cronie"
+OS="Rocky Linux";          assert_eq "$(get_cron_package_name)" "cronie" "cron_pkg: Rocky -> cronie"
+OS="Fedora Linux";         assert_eq "$(get_cron_package_name)" "cronie" "cron_pkg: Fedora -> cronie"
+OS="Arch Linux";           assert_eq "$(get_cron_package_name)" "cronie" "cron_pkg: Arch -> cronie"
+OS="openSUSE Tumbleweed";  assert_eq "$(get_cron_package_name)" "cronie" "cron_pkg: openSUSE -> cronie"
+OS="Plan 9";               assert_false "cron_pkg: unknown OS -> non-zero" get_cron_package_name
+OS="$_saved_os"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
