@@ -438,6 +438,11 @@ verify_backup_archive_contents() {
 
     if [ "$DB_TYPE" = "sqlite" ]; then
         expected_files=$'.env\n'"$sqlite_basename"$'\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
+    elif [ "$DB_TYPE" = "postgresql" ] || [ "$DB_TYPE" = "timescaledb" ]; then
+        # PostgreSQL/TimescaleDB back up every user database under pg_dump/
+        # (globals + one db-NNN.sql per database + a manifest). The CI fixture
+        # has exactly one user database (appdb), so it lands in db-001.sql.
+        expected_files=$'.env\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt\npg_dump/\npg_dump/db-001.sql\npg_dump/globals.sql\npg_dump/manifest.tsv'
     else
         expected_files=$'.env\ndb_backup.sql\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
     fi
@@ -459,6 +464,8 @@ verify_backup_archive_contents() {
             assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename"
             assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename")" "$ORIGINAL_SQLITE_DUMP_SHA" "Archived SQLite data-dir database logical contents changed."
         fi
+    elif [ "$DB_TYPE" = "postgresql" ] || [ "$DB_TYPE" = "timescaledb" ]; then
+        assert_file_contains "$EXTRACTED_BACKUP_DIR/pg_dump/db-001.sql" "ci_roundtrip"
     else
         assert_file_contains "$EXTRACTED_BACKUP_DIR/db_backup.sql" "ci_roundtrip"
     fi
