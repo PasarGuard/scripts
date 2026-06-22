@@ -411,6 +411,13 @@ _ts_expected=$(printf '%s\n' "CREATE TABLE foo (id int);" "INSERT INTO foo VALUE
 assert_eq "$_ts_out" "$_ts_expected" "ts_filter: removes timescaledb extension lines, keeps rest"
 
 # -----------------------------------------------------------------------
+# timescaledb_version_matches
+# -----------------------------------------------------------------------
+assert_true  "ts_match: equal"           timescaledb_version_matches "2.27.2" "2.27.2"
+assert_false "ts_match: differ"          timescaledb_version_matches "2.27.2" "2.15.0"
+assert_false "ts_match: source vs empty" timescaledb_version_matches "2.27.2" ""
+
+# -----------------------------------------------------------------------
 # get_cron_package_name
 # -----------------------------------------------------------------------
 _saved_os="${OS:-}"

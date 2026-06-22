@@ -59,6 +59,13 @@ pg_filter_timescaledb_extension_lines() {
     grep -v -E '^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b' || true
 }
 
+# True (0) when two timescaledb version strings are identical. Restore uses this
+# to gate a destructive cross-version restore. The caller treats an empty source
+# version (legacy backup) as "do not gate".
+timescaledb_version_matches() {
+    [ "$1" = "$2" ]
+}
+
 # Restore every database listed in <pg_dump_dir>/manifest.tsv. Globals are
 # restored first (without ON_ERROR_STOP so pre-existing roles don't abort it);
 # each database is then DROP/CREATEd with its recorded owner and loaded, using
