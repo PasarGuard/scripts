@@ -1113,6 +1113,7 @@ install_command() {
     if ! command -v docker >/dev/null 2>&1; then
         install_docker
     fi
+    ensure_docker_compose
     if ! command -v yq >/dev/null 2>&1; then
         install_yq
     fi

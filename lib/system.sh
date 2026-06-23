@@ -79,7 +79,11 @@ detect_and_update_package_manager() {
     fi
 }
 
-install_package() {
+# Attempt to install a package, returning non-zero on failure instead of
+# aborting. Use this when the caller wants to handle a failed install itself
+# (e.g. fall back to an alternative package name); most callers want
+# install_package, which aborts on failure.
+try_install_package() {
     local package="$1"
 
     if [ -z "${OS:-}" ]; then
@@ -92,18 +96,22 @@ install_package() {
 
     colorized_echo blue "Installing $package"
     if [[ "$OS" == "Ubuntu"* ]] || [[ "$OS" == "Debian"* ]]; then
-        $PKG_MANAGER -y -qq install "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
+        $PKG_MANAGER -y -qq install "$package" >/dev/null 2>&1
     elif is_redhat_family_os; then
-        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
+        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1
     elif [[ "$OS" == "Fedora"* ]]; then
-        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
+        $PKG_MANAGER install -y -q "$package" >/dev/null 2>&1
     elif [[ "$OS" == "Arch Linux" ]] || [[ "$OS" == "Arch"* ]]; then
-        $PKG_MANAGER -S --noconfirm --quiet "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
+        $PKG_MANAGER -S --noconfirm --quiet "$package" >/dev/null 2>&1
     elif [[ "$OS" == "openSUSE"* ]]; then
-        $PKG_MANAGER --quiet install -y "$package" >/dev/null 2>&1 || die "Failed to install $package with $PKG_MANAGER. Check your package repositories and try again."
+        $PKG_MANAGER --quiet install -y "$package" >/dev/null 2>&1
     else
         die "Unsupported operating system"
     fi
+}
+
+install_package() {
+    try_install_package "$1" || die "Failed to install $1 with ${PKG_MANAGER:-the package manager}. Check your package repositories and try again."
 }
 
 check_editor() {
