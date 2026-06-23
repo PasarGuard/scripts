@@ -1536,7 +1536,10 @@ backup_command() {
             if [ -f "$sqlite_file" ]; then
                 if ! command -v sqlite3 >/dev/null 2>&1; then
                     detect_os
-                    install_package sqlite3 || true
+                    # Best-effort: if sqlite3 can't be installed, continue (the
+                    # presence check below skips the snapshot). install_package
+                    # aborts on failure, so use the non-aborting variant here.
+                    try_install_package sqlite3 || true
                 fi
 
                 local sqlite_basename=$(basename "$sqlite_file")
