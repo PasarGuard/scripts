@@ -4,10 +4,19 @@ set -e
 SCRIPT_DIR="${PG_NODE_SCRIPT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
 REQUIRED_SHARED_LIBS="common.sh system.sh docker.sh github.sh"
+# Running from a local checkout/bundle (libs sit next to this script) vs. an
+# installed copy (libs live under /usr/local/lib). Only the installed copy is
+# auto-refreshed below; a checkout's libs are used as-is.
+running_from_checkout=true
 if [ ! -f "$SHARED_LIB_DIR/common.sh" ]; then
     SHARED_LIB_DIR="/usr/local/lib/pasarguard-scripts/lib"
+    running_from_checkout=false
 fi
 
+# Refresh every shared library from the repo into the install dir. All files are
+# downloaded to a staging dir first and only swapped in if EVERY download
+# succeeds, so a partial/failed refresh never leaves a half-updated set and any
+# existing copy is preserved on failure.
 bootstrap_pg_node_shared_libs() {
     local fetch_repo="PasarGuard/scripts"
     local bootstrap_dir="/usr/local/lib/pasarguard-scripts/lib"
@@ -15,16 +24,19 @@ bootstrap_pg_node_shared_libs() {
     local shared_lib=""
 
     tmp_dir=$(mktemp -d) || return 1
-    mkdir -p "$bootstrap_dir" || {
-        rm -rf "$tmp_dir"
-        return 1
-    }
 
     for shared_lib in $REQUIRED_SHARED_LIBS; do
         if ! curl -fsSL "https://github.com/${fetch_repo}/raw/main/lib/${shared_lib}" -o "$tmp_dir/$shared_lib"; then
             rm -rf "$tmp_dir"
             return 1
         fi
+    done
+
+    mkdir -p "$bootstrap_dir" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    for shared_lib in $REQUIRED_SHARED_LIBS; do
         if ! install -m 644 "$tmp_dir/$shared_lib" "$bootstrap_dir/$shared_lib"; then
             rm -rf "$tmp_dir"
             return 1
@@ -36,16 +48,12 @@ bootstrap_pg_node_shared_libs() {
     return 0
 }
 
-missing_shared_lib=false
-for shared_lib in $REQUIRED_SHARED_LIBS; do
-    if [ ! -f "$SHARED_LIB_DIR/$shared_lib" ]; then
-        missing_shared_lib=true
-        break
-    fi
-done
-
-if [ "$missing_shared_lib" = true ]; then
-    bootstrap_pg_node_shared_libs
+# For an installed copy, always refresh the shared libraries from the repo so an
+# outdated copy can never be sourced (the files are small). Best-effort: if the
+# refresh fails (e.g. no network) any existing copy is kept and the presence
+# check below still guards against a genuinely missing library.
+if [ "$running_from_checkout" = false ]; then
+    bootstrap_pg_node_shared_libs || true
 fi
 
 for shared_lib in $REQUIRED_SHARED_LIBS; do
