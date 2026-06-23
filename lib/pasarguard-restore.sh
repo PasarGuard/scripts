@@ -169,6 +169,7 @@ pg_restore_all_user_databases() {
                 echo "TimescaleDB version mismatch for '$dbname' (backup=$ts_version target=${target_ts:-unavailable}); skipped before any destructive change" >>"$log_file"
                 continue
             elif [ "$probe_ok" != "1" ]; then
+                colorized_echo yellow "Could not read this server's timescaledb version for '$dbname'; the cross-version safety check was skipped and restore will proceed best-effort."
                 echo "Could not read target timescaledb version for '$dbname'; proceeding best-effort (probe failed)" >>"$log_file"
             fi
         fi
@@ -223,6 +224,10 @@ pg_restore_all_user_databases() {
     done < "$manifest"
 
     colorized_echo blue "Restored $ok of $total databases."
+    # A skipped database (failed dump validation OR a version-gate mismatch)
+    # increments 'total' but never 'ok', so this yields non-zero whenever any
+    # database was skipped. Do not "simplify" these counters — that guarantee
+    # depends on it.
     [ "$total" -gt 0 ] && [ "$ok" -eq "$total" ]
 }
 
