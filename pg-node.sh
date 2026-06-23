@@ -26,7 +26,7 @@ bootstrap_pg_node_shared_libs() {
     tmp_dir=$(mktemp -d) || return 1
 
     for shared_lib in $REQUIRED_SHARED_LIBS; do
-        if ! curl -fsSL "https://github.com/${fetch_repo}/raw/main/lib/${shared_lib}" -o "$tmp_dir/$shared_lib"; then
+        if ! curl -fsSL --connect-timeout 5 "https://github.com/${fetch_repo}/raw/main/lib/${shared_lib}" -o "$tmp_dir/$shared_lib"; then
             rm -rf "$tmp_dir"
             return 1
         fi
