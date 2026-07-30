@@ -144,8 +144,27 @@ pg_manifest_encode() {
     printf '%s\t%s\t%s\t%s\t%s' "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"
 }
 
+escape_markdown_v2() {
+    local text="$1"
+    local chars='_*[]()~`>#+-=|{}.!\'
+    local escaped=""
+    local i char
+    for (( i=0; i<${#text}; i++ )); do
+        char="${text:$i:1}"
+        if [[ "$chars" == *"$char"* ]]; then
+            escaped+="\\$char"
+        else
+            escaped+="$char"
+        fi
+    done
+    printf '%s' "$escaped"
+}
+
 send_backup_to_telegram() {
     if [ -f "$ENV_FILE" ]; then
+        if grep -q "^BACKUP_TELEGRAM_CHAT_ID=" "$ENV_FILE"; then
+            sed -i 's/^BACKUP_TELEGRAM_CHAT_ID=/BACKUP_TELEGRAM_CHAT_IDS=/' "$ENV_FILE"
+        fi
         while IFS='=' read -r key value; do
             if [[ -z "$key" || "$key" =~ ^# ]]; then
                 continue
@@ -175,8 +194,8 @@ send_backup_to_telegram() {
         return 1
     fi
 
-    if [ -z "$BACKUP_TELEGRAM_CHAT_ID" ]; then
-        colorized_echo red "Error: BACKUP_TELEGRAM_CHAT_ID is not set in .env file"
+    if [ -z "$BACKUP_TELEGRAM_CHAT_IDS" ]; then
+        colorized_echo red "Error: BACKUP_TELEGRAM_CHAT_IDS is not set in .env file"
         return 1
     fi
 
@@ -272,78 +291,82 @@ send_backup_to_telegram() {
 
     local backup_time=$(date "+%Y-%m-%d %H:%M:%S %Z")
 
+    local files_list=""
+    for file_path in "${backup_paths[@]}"; do
+        files_list+="- $(basename "$file_path")"$'\n'
+    done
+    files_list="${files_list%$'\n'}"
+
+    local info_message=$'📤 Backup Upload Summary\n'
+    info_message+=$'──────────────────────\n'
+    info_message+="⏳ Time: $backup_time"$'\n'
+    info_message+=$'\n✅ Files Uploaded:\n'
+    info_message+="$files_list"$'\n'
+    info_message+=$'\n📂 Extraction Guide:\n'
+    if [ "$extraction_mode" = "part_zip" ]; then
+        info_message+=$'🪟 Windows: Rebuild the archive first, e.g. copy /b backup_xxx.part01.zip+backup_xxx.part02.zip+... backup_xxx.zip, then extract backup_xxx.zip with 7-Zip.\n'
+        info_message+=$'🐧 Linux: Run cat backup_xxx.part*.zip > backup_xxx.zip && unzip backup_xxx.zip.\n'
+        info_message+=$'🍎 macOS: Run cat backup_xxx.part*.zip > backup_xxx.zip && unzip backup_xxx.zip.\n'
+        info_message+=$'⚠️ Always download every .partNN.zip file before rebuilding the archive.'
+    elif [ "$extraction_mode" = "split_zip" ]; then
+        info_message+=$'🪟 Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
+        info_message+=$'🐧 Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
+        info_message+=$'🍎 macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
+        info_message+=$'⚠️ Always download the .zip and every .zXX part before extracting.'
+    else
+        info_message+=$'🪟 Windows: Extract the uploaded archive with 7-Zip.\n'
+        info_message+=$'🐧 Linux: Run unzip backup_xxx.zip.\n'
+        info_message+=$'🍎 macOS: Open the archive with Archive Utility or run unzip backup_xxx.zip.\n'
+        info_message+=$'⚠️ Download the complete archive before extracting.'
+    fi
+
+    local escaped_info_message=$(escape_markdown_v2 "$info_message")
+
+    IFS=',' read -ra chat_ids <<< "$BACKUP_TELEGRAM_CHAT_IDS"
     for part in "${backup_paths[@]}"; do
         local part_name=$(basename "$part")
         local custom_filename="$part_name"
 
-        local escaped_server_ip=$(printf '%s' "$server_ip" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
-        local escaped_filename=$(printf '%s' "$custom_filename" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
-        local escaped_time=$(printf '%s' "$backup_time" | sed 's/[_*\[\]()~`>#+\-=|{}!.]/\\&/g')
-        local caption="📦 *Backup Information*\n🌐 *Server IP*: \`$escaped_server_ip\`\n📁 *Backup File*: \`$escaped_filename\`\n⏰ *Backup Time*: \`$escaped_time\`"
+        local escaped_server_ip=$(escape_markdown_v2 "$server_ip")
+        local escaped_filename=$(escape_markdown_v2 "$custom_filename")
+        local escaped_time=$(escape_markdown_v2 "$backup_time")
+        local caption=$'📦 *Backup Information*\n'
+        caption+="🌐 *Server IP*: \`$escaped_server_ip\`"$'\n'
+        caption+="📁 *Backup File*: \`$escaped_filename\`"$'\n'
+        caption+="⏰ *Backup Time*: \`$escaped_time\`"$'\n\n'
+        caption+="$escaped_info_message"
 
-        local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-            -F document=@"$part;filename=$custom_filename" \
-            -F caption="$(printf '%b' "$caption")" \
-            -F parse_mode="MarkdownV2" \
-            "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
+        for chat_id in "${chat_ids[@]}"; do
+            chat_id=$(echo "$chat_id" | xargs)
+            [ -z "$chat_id" ] && continue
 
-        local http_code=$(echo "$response" | tail -n1)
-        local response_body=$(echo "$response" | sed '$d')
+            local response=$(curl "${curl_proxy_args[@]}" -s -w "\n%{http_code}" -F chat_id="$chat_id" \
+                -F document=@"$part;filename=$custom_filename" \
+                -F caption="$caption" \
+                -F parse_mode="MarkdownV2" \
+                "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument" 2>&1)
 
-        if [ "$http_code" == "200" ]; then
-            # Check if response contains "ok":true
-            if echo "$response_body" | grep -q '"ok":true'; then
-                uploaded_files+=("$custom_filename")
-                colorized_echo green "Backup part $custom_filename successfully sent to Telegram."
+            local http_code=$(echo "$response" | tail -n1)
+            local response_body=$(echo "$response" | sed '$d')
+
+            if [ "$http_code" == "200" ]; then
+                # Check if response contains "ok":true
+                if echo "$response_body" | grep -q '"ok":true'; then
+                    colorized_echo green "Backup part $custom_filename successfully sent to Telegram chat $chat_id."
+                else
+                    # Extract error message from Telegram response
+                    local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "Unknown error")
+                    colorized_echo red "Failed to send backup part $custom_filename to Telegram chat $chat_id: $error_msg"
+                    echo "Telegram API status: $http_code" >&2
+                    echo "Telegram API Response: $response_body" >&2
+                fi
             else
-                # Extract error message from Telegram response
-                local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "Unknown error")
-                colorized_echo red "Failed to send backup part $custom_filename to Telegram: $error_msg"
-                echo "Telegram API status: $http_code" >&2
+                local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "HTTP $http_code")
+                colorized_echo red "Failed to send backup part $custom_filename to Telegram chat $chat_id: $error_msg"
                 echo "Telegram API Response: $response_body" >&2
             fi
-        else
-            local error_msg=$(echo "$response_body" | grep -o '"description":"[^"]*"' | cut -d'"' -f4 || echo "HTTP $http_code")
-            colorized_echo red "Failed to send backup part $custom_filename to Telegram: $error_msg"
-            echo "Telegram API Response: $response_body" >&2
-        fi
-    done
-
-    if [ ${#uploaded_files[@]} -gt 0 ]; then
-        local files_list=""
-        for file in "${uploaded_files[@]}"; do
-            files_list+="- $file"$'\n'
         done
-        files_list="${files_list%$'\n'}"
-
-        local info_message=$'📦 Backup Upload Summary\n'
-        info_message+=$'──────────────────────\n'
-        info_message+="🌐 Server IP: $server_ip"$'\n'
-        info_message+="⏰ Time: $backup_time"$'\n'
-        info_message+=$'\n✅ Files Uploaded:\n'
-        info_message+="$files_list"$'\n'
-        info_message+=$'\n📂 Extraction Guide:\n'
-        if [ "$extraction_mode" = "part_zip" ]; then
-            info_message+=$'🪟 Windows: Rebuild the archive first, e.g. copy /b backup_xxx.part01.zip+backup_xxx.part02.zip+... backup_xxx.zip, then extract backup_xxx.zip with 7-Zip.\n'
-            info_message+=$'🐧 Linux: Run cat backup_xxx.part*.zip > backup_xxx.zip && unzip backup_xxx.zip.\n'
-            info_message+=$'🍎 macOS: Run cat backup_xxx.part*.zip > backup_xxx.zip && unzip backup_xxx.zip.\n'
-            info_message+=$'⚠️ Always download every .partNN.zip file before rebuilding the archive.'
-        elif [ "$extraction_mode" = "split_zip" ]; then
-            info_message+=$'🪟 Windows: Install and use 7-Zip. Place the .zip and every .zXX part together, then start extraction from the .zip file.\n'
-            info_message+=$'🐧 Linux: Run unzip (e.g., unzip backup_xxx.zip) with all .zXX parts in the same directory.\n'
-            info_message+=$'🍎 macOS: Use Archive Utility or run unzip backup_xxx.zip from Terminal with the .zXX parts beside the .zip file.\n'
-            info_message+=$'⚠️ Always download the .zip and every .zXX part before extracting.'
-        else
-            info_message+=$'🪟 Windows: Extract the uploaded archive with 7-Zip.\n'
-            info_message+=$'🐧 Linux: Run unzip backup_xxx.zip.\n'
-            info_message+=$'🍎 macOS: Open the archive with Archive Utility or run unzip backup_xxx.zip.\n'
-            info_message+=$'⚠️ Download the complete archive before extracting.'
-        fi
-
-        curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
-            -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-            -d text="$info_message" >/dev/null 2>&1 || true
-    fi
+    done
 
     if [ -n "$cleanup_dir" ]; then
         rm -rf "$cleanup_dir"
@@ -377,35 +400,44 @@ send_backup_error_to_telegram() {
 [Message truncated]"
     fi
 
-    curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
-        -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-        -d text="$message" >/dev/null 2>&1 &&
-        colorized_echo green "Backup error notification sent to Telegram." ||
-        colorized_echo red "Failed to send error notification to Telegram."
+    IFS=',' read -ra chat_ids <<< "$BACKUP_TELEGRAM_CHAT_IDS"
+    for chat_id in "${chat_ids[@]}"; do
+        chat_id=$(echo "$chat_id" | xargs)
+        [ -z "$chat_id" ] && continue
 
-    if [ -f "$log_file" ]; then
+        curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
+            -d chat_id="$chat_id" \
+            -d text="$message" >/dev/null 2>&1 &&
+            colorized_echo green "Backup error notification sent to Telegram chat $chat_id." ||
+            colorized_echo red "Failed to send error notification to Telegram chat $chat_id."
 
-        response=$(curl "${curl_proxy_args[@]}" -s -w "%{http_code}" -o /tmp/tg_response.json \
-            -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
-            -F document=@"$log_file;filename=backup_error.log" \
-            -F caption="📜 Backup Error Log - $error_time" \
-            "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument")
+        if [ -f "$log_file" ]; then
 
-        http_code="${response:(-3)}"
-        if [ "$http_code" -eq 200 ]; then
-            colorized_echo green "Backup error log sent to Telegram."
+            response=$(curl "${curl_proxy_args[@]}" -s -w "%{http_code}" -o /tmp/tg_response.json \
+                -F chat_id="$chat_id" \
+                -F document=@"$log_file;filename=backup_error.log" \
+                -F caption="📜 Backup Error Log - $error_time" \
+                "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument")
+
+            http_code="${response:(-3)}"
+            if [ "$http_code" -eq 200 ]; then
+                colorized_echo green "Backup error log sent to Telegram chat $chat_id."
+            else
+                colorized_echo red "Failed to send backup error log to Telegram chat $chat_id. HTTP code: $http_code"
+                cat /tmp/tg_response.json
+            fi
         else
-            colorized_echo red "Failed to send backup error log to Telegram. HTTP code: $http_code"
-            cat /tmp/tg_response.json
+            colorized_echo red "Log file not found: $log_file"
         fi
-    else
-        colorized_echo red "Log file not found: $log_file"
-    fi
+    done
 }
 
 backup_service() {
+    if [ -f "$ENV_FILE" ] && grep -q "^BACKUP_TELEGRAM_CHAT_ID=" "$ENV_FILE"; then
+        sed -i 's/^BACKUP_TELEGRAM_CHAT_ID=/BACKUP_TELEGRAM_CHAT_IDS=/' "$ENV_FILE"
+    fi
     local telegram_bot_key=""
-    local telegram_chat_id=""
+    local telegram_chat_ids=""
     local cron_schedule=""
     local interval_minutes=""
     local backup_proxy_enabled="false"
@@ -418,7 +450,7 @@ backup_service() {
     if grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         while true; do
             telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
-            telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+            telegram_chat_ids=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_IDS=/ {print $2}' "$ENV_FILE")
             cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
             backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
             backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
@@ -433,7 +465,7 @@ backup_service() {
             colorized_echo green "====================================="
             colorized_echo green "Current Backup Configuration:"
             colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
-            colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
+            colorized_echo cyan "Telegram Chat ID(s): $telegram_chat_ids"
             colorized_echo cyan "Backup Interval: $(format_backup_interval "$interval_minutes" "$cron_schedule")"
             if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
                 colorized_echo cyan "Proxy: Enabled ($backup_proxy_url)"
@@ -500,9 +532,9 @@ backup_service() {
     done
 
     while true; do
-        printf "Enter your Telegram chat ID: "
-        read telegram_chat_id
-        if [[ -n "$telegram_chat_id" ]]; then
+        printf "Enter Telegram chat ID(s) (comma-separated for multiple, e.g. 1234567,9876543): "
+        read telegram_chat_ids
+        if [[ -n "$telegram_chat_ids" ]]; then
             break
         else
             colorized_echo red "Chat ID cannot be empty. Please try again."
@@ -558,7 +590,7 @@ backup_service() {
 
     sed -i '/^BACKUP_SERVICE_ENABLED/d' "$ENV_FILE"
     sed -i '/^BACKUP_TELEGRAM_BOT_KEY/d' "$ENV_FILE"
-    sed -i '/^BACKUP_TELEGRAM_CHAT_ID/d' "$ENV_FILE"
+    sed -i '/^BACKUP_TELEGRAM_CHAT_IDS/d' "$ENV_FILE"
     sed -i '/^BACKUP_CRON_SCHEDULE/d' "$ENV_FILE"
     sed -i '/^BACKUP_PROXY_ENABLED/d' "$ENV_FILE"
     sed -i '/^BACKUP_PROXY_URL/d' "$ENV_FILE"
@@ -568,7 +600,7 @@ backup_service() {
         echo "# Backup service configuration"
         echo "BACKUP_SERVICE_ENABLED=true"
         echo "BACKUP_TELEGRAM_BOT_KEY=$telegram_bot_key"
-        echo "BACKUP_TELEGRAM_CHAT_ID=$telegram_chat_id"
+        echo "BACKUP_TELEGRAM_CHAT_IDS=$telegram_chat_ids"
         echo "BACKUP_CRON_SCHEDULE=\"$cron_schedule\""
         echo "BACKUP_PROXY_ENABLED=$backup_proxy_enabled"
         echo "BACKUP_PROXY_URL=\"$backup_proxy_url\""
@@ -625,7 +657,7 @@ view_backup_service() {
     fi
 
     local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
-    local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    local telegram_chat_ids=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_IDS=/ {print $2}' "$ENV_FILE")
     local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
     local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
     local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
@@ -643,7 +675,7 @@ view_backup_service() {
     colorized_echo blue "====================================="
     colorized_echo green "Status: Enabled"
     colorized_echo cyan "Telegram Bot API Key: $masked_telegram_bot_key"
-    colorized_echo cyan "Telegram Chat ID: $telegram_chat_id"
+    colorized_echo cyan "Telegram Chat ID(s): $telegram_chat_ids"
     colorized_echo cyan "Cron Schedule: $cron_schedule"
     colorized_echo cyan "Backup Interval: $(format_backup_interval "$interval_minutes" "$cron_schedule")"
     if [[ "$backup_proxy_enabled" == "true" && -n "$backup_proxy_url" ]]; then
@@ -663,7 +695,7 @@ edit_backup_service() {
     fi
 
     local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
-    local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    local telegram_chat_ids=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_IDS=/ {print $2}' "$ENV_FILE")
     local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
     local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
     local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
@@ -685,7 +717,7 @@ edit_backup_service() {
         proxy_display="Enabled ($backup_proxy_url)"
     fi
     colorized_echo cyan "1. Telegram Bot API Key: $masked_telegram_bot_key"
-    colorized_echo cyan "2. Telegram Chat ID: $telegram_chat_id"
+    colorized_echo cyan "2. Telegram Chat ID(s): $telegram_chat_ids"
     colorized_echo cyan "3. Backup Interval: $(format_backup_interval "$interval_minutes" "$cron_schedule")"
     colorized_echo cyan "4. Proxy: $proxy_display"
     colorized_echo yellow "5. Cancel"
@@ -708,11 +740,11 @@ edit_backup_service() {
         ;;
     2)
         while true; do
-            printf "Enter new Telegram chat ID [current: $telegram_chat_id]: "
-            read new_chat_id
-            if [[ -n "$new_chat_id" ]]; then
-                sed -i "s|^BACKUP_TELEGRAM_CHAT_ID=.*|BACKUP_TELEGRAM_CHAT_ID=$new_chat_id|" "$ENV_FILE"
-                colorized_echo green "Telegram Chat ID updated successfully."
+            printf "Enter new Telegram chat ID(s) (comma-separated for multiple, e.g. 1234567,9876543) [current: $telegram_chat_ids]: "
+            read new_chat_ids
+            if [[ -n "$new_chat_ids" ]]; then
+                sed -i "s|^BACKUP_TELEGRAM_CHAT_IDS=.*|BACKUP_TELEGRAM_CHAT_IDS=$new_chat_ids|" "$ENV_FILE"
+                colorized_echo green "Telegram Chat ID(s) updated successfully."
                 break
             else
                 colorized_echo red "Chat ID cannot be empty. Please try again."
@@ -823,7 +855,7 @@ remove_backup_service() {
     sed -i '/^# Backup service configuration/d' "$ENV_FILE"
     sed -i '/BACKUP_SERVICE_ENABLED/d' "$ENV_FILE"
     sed -i '/BACKUP_TELEGRAM_BOT_KEY/d' "$ENV_FILE"
-    sed -i '/BACKUP_TELEGRAM_CHAT_ID/d' "$ENV_FILE"
+    sed -i '/BACKUP_TELEGRAM_CHAT_IDS/d' "$ENV_FILE"
     sed -i '/BACKUP_CRON_SCHEDULE/d' "$ENV_FILE"
     sed -i '/BACKUP_PROXY_ENABLED/d' "$ENV_FILE"
     sed -i '/BACKUP_PROXY_URL/d' "$ENV_FILE"
