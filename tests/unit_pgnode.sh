@@ -203,6 +203,383 @@ assert_eq "$(detect_node_serviced_platform)" "Linux_arm64" \
 unset -f uname
 
 # -----------------------------------------------------------------------
+# node-serviced binary validation and atomic replacement
+# -----------------------------------------------------------------------
+service_test_dir="$WORK_DIR/node-serviced"
+mkdir -p "$service_test_dir"
+valid_binary="$service_test_dir/valid"
+empty_binary="$service_test_dir/empty"
+invalid_binary="$service_test_dir/invalid"
+printf '\177ELFtest-binary\n' > "$valid_binary"
+: > "$empty_binary"
+printf '<html>download failed</html>\n' > "$invalid_binary"
+
+assert_true "verify_node_serviced_binary: accepts non-empty ELF" \
+    verify_node_serviced_binary "$valid_binary"
+assert_false "verify_node_serviced_binary: rejects empty file" \
+    verify_node_serviced_binary "$empty_binary"
+assert_false "verify_node_serviced_binary: rejects non-ELF content" \
+    verify_node_serviced_binary "$invalid_binary"
+
+checksum_archive="$service_test_dir/archive.tar.gz"
+checksum_dir="$service_test_dir/checksum"
+checksum_asset="node-serviced_test_Linux_x86_64.tar.gz"
+mkdir -p "$checksum_dir"
+printf 'archive-content\n' > "$checksum_archive"
+checksum_value=$(sha256sum "$checksum_archive" | awk '{print $1}')
+curl() {
+    local output=""
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "-o" ]; then
+            output="$2"
+            shift 2
+        else
+            shift
+        fi
+    done
+    printf '%s  %s\n' "$checksum_value" "$checksum_asset" > "$output"
+}
+assert_true "verify_node_serviced_checksum: accepts matching release checksum" \
+    verify_node_serviced_checksum "https://example.invalid/checksums.txt" "$checksum_asset" "$checksum_archive" "$checksum_dir"
+checksum_value="$(printf '0%.0s' {1..64})"
+assert_false "verify_node_serviced_checksum: rejects mismatch" \
+    verify_node_serviced_checksum "https://example.invalid/checksums.txt" "$checksum_asset" "$checksum_archive" "$checksum_dir"
+curl() { echo ""; return 0; }
+
+assert_false "verify_node_serviced_checksum: rejects missing checksum by default" \
+    verify_node_serviced_checksum "" "$checksum_asset" "$checksum_archive" "$checksum_dir"
+NODE_SERVICE_REQUIRE_CHECKSUM=false
+assert_true "verify_node_serviced_checksum: allows missing checksum only when explicitly disabled" \
+    verify_node_serviced_checksum "" "$checksum_asset" "$checksum_archive" "$checksum_dir"
+unset NODE_SERVICE_REQUIRE_CHECKSUM
+
+# A failed temporary-directory allocation must stop before constructing
+# /release.json or attempting any release API request.
+original_create_temp_dir_definition=$(declare -f create_temp_dir)
+original_run_node_service_external_definition=$(declare -f run_node_service_external)
+release_request_attempted=false
+release_request_target=""
+create_temp_dir() { return 73; }
+run_node_service_external() {
+    release_request_attempted=true
+    release_request_target="${*: -1}"
+    return 1
+}
+assert_false "install_node_service_script: temp-dir failure is fatal" \
+    install_node_service_script false
+assert_eq "$release_request_attempted" "false" \
+    "install_node_service_script: temp-dir failure skips release request"
+assert_false "install_node_service_script: temp-dir failure never targets /release.json" \
+    test "$release_request_target" = "/release.json"
+eval "$original_create_temp_dir_definition"
+eval "$original_run_node_service_external_definition"
+
+SERVICE_BINARY_PATH="$service_test_dir/pg-node-service"
+printf '\177ELFold-binary\n' > "$SERVICE_BINARY_PATH"
+assert_true "activate_node_serviced_binary: stages a rollback candidate" \
+    activate_node_serviced_binary "$valid_binary" true
+if grep -q 'test-binary' "$SERVICE_BINARY_PATH"; then
+    pass "activate_node_serviced_binary: activates staged binary"
+else
+    fail "activate_node_serviced_binary: activates staged binary"
+fi
+rollback_node_serviced_binary
+if grep -q 'old-binary' "$SERVICE_BINARY_PATH"; then
+    pass "rollback_node_serviced_binary: restores previous binary"
+else
+    fail "rollback_node_serviced_binary: restores previous binary"
+fi
+NODE_SERVICE_HAD_PREVIOUS=false
+NODE_SERVICE_BACKUP_PATH=""
+SERVICE_NAME=""
+rollback_output=$(rollback_node_serviced_binary 2>&1)
+if [[ "$rollback_output" == *"No previous node-serviced binary is available; removing the failed replacement."* ]]; then
+    pass "rollback_node_serviced_binary: reports no-backup removal"
+else
+    fail "rollback_node_serviced_binary: reports no-backup removal"
+fi
+assert_false "rollback_node_serviced_binary: removes failed replacement without backup" \
+    test -e "$SERVICE_BINARY_PATH"
+printf '\177ELFold-binary\n' > "$SERVICE_BINARY_PATH"
+assert_false "activate_node_serviced_binary: rejects invalid candidate" \
+    activate_node_serviced_binary "$invalid_binary" true
+if grep -q 'old-binary' "$SERVICE_BINARY_PATH"; then
+    pass "activate_node_serviced_binary: preserves target after rejected candidate"
+else
+    fail "activate_node_serviced_binary: preserves target after rejected candidate"
+fi
+
+ready_cert="$service_test_dir/ssl-cert.pem"
+ready_env="$service_test_dir/node-service.env"
+: > "$ready_cert"
+printf 'API_PORT= 62051\nAPI_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+ENV_FILE="$ready_env"
+printf 'API_KEY= "unit#test-key" # deployment note\n' > "$ready_env"
+assert_eq "$(read_node_service_env_value API_KEY)" "unit#test-key" \
+    "read_node_service_env_value: preserves a quoted hash before a trailing comment"
+printf 'API_KEY= unit-test-key # deployment note\n' > "$ready_env"
+assert_eq "$(read_node_service_env_value API_KEY)" "unit-test-key" \
+    "read_node_service_env_value: removes comments from unquoted values"
+cat > "$ready_env" <<'EOF'
+API_PORT= 61000
+export API_PORT = "62051"
+PREFIX=unit
+API_KEY="${PREFIX}\\nkey-\$literal"
+API_KEY='last-${PREFIX}-value'
+EOF
+assert_eq "$(read_node_service_env_value API_PORT)" "62051" \
+    "read_node_service_env_value: matches Overload export and last duplicate wins"
+assert_eq "$(read_node_service_env_value API_KEY)" 'last-${PREFIX}-value' \
+    "read_node_service_env_value: matches Overload single-quote literal semantics"
+cat > "$ready_env" <<'EOF'
+PREFIX=unit
+API_KEY="${PREFIX}\nkey-\$literal"
+EOF
+assert_eq "$(read_node_service_env_value API_KEY)" $'unit\nkey-$literal' \
+    "read_node_service_env_value: matches Overload expansion and double-quote escapes"
+printf 'API_KEY="valid-prefix" trailing-garbage\n' > "$ready_env"
+assert_false "read_node_service_env_value: rejects garbage after a quoted value" \
+    read_node_service_env_value API_KEY
+printf 'API_PORT= 62051\nAPI_KEY= "unit#test-key" # deployment note\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+SERVICE_NAME="pg-node-test-service"
+NODE_SERVICE_READINESS_ATTEMPTS=1
+NODE_SERVICE_READINESS_STABLE_CHECKS=1
+NODE_SERVICE_READINESS_DELAY_SECONDS=0
+api_ready_calls=0
+systemctl() { [ "${1:-}" = "is-active" ]; }
+openssl() {
+    case "${NODE_SERVICE_CERT_TEST_MODE:-dns}" in
+    wildcard) printf 'X509v3 Subject Alternative Name:\n    DNS:*.example.test\n' ;;
+    cn)
+        if [[ " $* " == *' -subject '* ]]; then
+            printf 'subject=CN=legacy.example.test\n'
+        else
+            printf 'No extensions in certificate\n'
+        fi
+        ;;
+    *) printf 'X509v3 Subject Alternative Name:\n    DNS:node.example.test\n' ;;
+    esac
+}
+curl() {
+    api_ready_config=$(cat "$2")
+    api_ready_config_path="$2"
+    api_ready_calls=$((api_ready_calls + 1))
+    [ "${NODE_SERVICE_API_READY:-true}" = true ]
+}
+assert_true "wait_for_node_service_ready: requires authenticated API success" \
+    wait_for_node_service_ready
+assert_eq "$api_ready_calls" "1" \
+    "wait_for_node_service_ready: checks the service API after systemd"
+if [[ "$api_ready_config" == *'header = "x-api-key: unit#test-key"'* ]]; then
+    pass "wait_for_node_service_ready: preserves a quoted API key before a trailing comment"
+else
+    fail "wait_for_node_service_ready: preserves a quoted API key before a trailing comment"
+fi
+if [[ "$api_ready_config" == *'connect-to = "::127.0.0.1:62051"'* ]] &&
+    [[ "$api_ready_config" == *'url = "https://node.example.test:62051/"'* ]]; then
+    pass "node_service_api_ready: preserves DNS SAN for SNI while connecting to loopback"
+else
+    fail "node_service_api_ready: preserves DNS SAN for SNI while connecting to loopback"
+fi
+assert_false "wait_for_node_service_ready: removes the temporary curl config" \
+    test -e "$api_ready_config_path"
+printf 'API_PORT= 62051\nAPI_KEY= '\''unit\\key"quote'\''\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+assert_true "node_service_api_ready: accepts API keys containing quote and backslash" \
+    node_service_api_ready
+expected_curl_header='header = "x-api-key: unit\\key\"quote"'
+if grep -Fqx -- "$expected_curl_header" <<<"$api_ready_config"; then
+    pass "node_service_api_ready: curl config escapes quote and backslash once"
+else
+    fail "node_service_api_ready: curl config escapes quote and backslash once"
+fi
+printf 'API_PORT= 62051\nAPI_KEY= "unit#test-key" # deployment note\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+NODE_SERVICE_CERT_TEST_MODE=wildcard
+assert_true "node_service_certificate_identity: accepts wildcard DNS SAN" \
+    node_service_certificate_identity "$ready_cert"
+assert_eq "$NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT" "node-serviced-health.example.test" \
+    "node_service_certificate_identity: synthesizes one wildcard label"
+NODE_SERVICE_CERT_TEST_MODE=cn
+assert_true "node_service_certificate_identity: supports SAN-less CN fallback" \
+    node_service_certificate_identity "$ready_cert"
+assert_eq "$NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT" "legacy.example.test" \
+    "node_service_certificate_identity: uses CN only without SAN"
+unset NODE_SERVICE_CERT_TEST_MODE
+printf 'API_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+assert_true "node_service_api_ready: uses node-serviced default port when API_PORT is absent" \
+    node_service_api_ready
+if [[ "$api_ready_config" == *'url = "https://node.example.test:3000/"'* ]]; then
+    pass "node_service_api_ready: probes node-serviced default port 3000"
+else
+    fail "node_service_api_ready: probes node-serviced default port 3000"
+fi
+printf 'API_PORT= 62051\nAPI_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+NODE_SERVICE_API_READY=false
+assert_false "wait_for_node_service_ready: rejects active service with unavailable API" \
+    wait_for_node_service_ready
+unset NODE_SERVICE_API_READY
+
+# The lock is held for the entire update transaction so a second updater
+# cannot create a stale backup and later overwrite a successful install.
+NODE_SERVICE_UPDATE_LOCK_PATH="$service_test_dir/update.lock"
+flock() {
+    case "${1:-}" in
+    -n) [ "${NODE_SERVICE_UPDATE_LOCK_BUSY:-false}" != true ] ;;
+    -u) return 0 ;;
+    *) return 0 ;;
+    esac
+}
+NODE_SERVICE_UPDATE_LOCK_BUSY=true
+assert_false "acquire_node_serviced_update_lock: rejects a concurrent updater" \
+    acquire_node_serviced_update_lock
+NODE_SERVICE_UPDATE_LOCK_BUSY=false
+assert_true "acquire_node_serviced_update_lock: acquires an available lock" \
+    acquire_node_serviced_update_lock
+assert_true "release_node_serviced_update_lock: releases the transaction lock" \
+    release_node_serviced_update_lock
+assert_eq "$NODE_SERVICE_UPDATE_LOCK_HELD" "false" \
+    "release_node_serviced_update_lock: clears lock state"
+unset -f flock
+unset NODE_SERVICE_UPDATE_LOCK_BUSY NODE_SERVICE_UPDATE_LOCK_PATH
+
+# Exercise kernel-level contention with a separate process. This is the
+# inter-process boundary shared by service-install/update/uninstall.
+NODE_SERVICE_UPDATE_LOCK_PATH="$service_test_dir/process-update.lock"
+lock_ready="$service_test_dir/process-lock-ready"
+lock_release="$service_test_dir/process-lock-release"
+(
+    exec 8>"$NODE_SERVICE_UPDATE_LOCK_PATH"
+    flock 8
+    : > "$lock_ready"
+    while [ ! -e "$lock_release" ]; do
+        sleep 0.01
+    done
+) &
+lock_holder_pid=$!
+lock_wait_attempt=0
+while [ ! -e "$lock_ready" ] && [ "$lock_wait_attempt" -lt 100 ]; do
+    sleep 0.01
+    lock_wait_attempt=$((lock_wait_attempt + 1))
+done
+assert_true "node-serviced update lock: separate process acquired the lock" \
+    test -e "$lock_ready"
+assert_false "node-serviced update lock: blocks a concurrent transaction" \
+    acquire_node_serviced_update_lock
+: > "$lock_release"
+wait "$lock_holder_pid"
+assert_true "node-serviced update lock: becomes available after transaction exit" \
+    acquire_node_serviced_update_lock
+release_node_serviced_update_lock
+unset NODE_SERVICE_UPDATE_LOCK_PATH
+
+assert_true "can_reuse_node_service_api_port: permits the current service port" \
+    can_reuse_node_service_api_port true 62051 62051
+assert_false "can_reuse_node_service_api_port: rejects a different occupied port" \
+    can_reuse_node_service_api_port true 62052 62051
+assert_false "can_reuse_node_service_api_port: rejects a port without an installed service" \
+    can_reuse_node_service_api_port false 62051 62051
+
+# Exercise the complete update failure path: the replacement is installed,
+# the first restart fails, rollback restores the old binary, and the second
+# restart attempts to bring the old version back online.
+set_service_paths() {
+    SERVICE_NAME="pg-node-test-service"
+    SERVICE_BINARY_PATH="$service_test_dir/pg-node-service"
+    SERVICE_UNIT="$service_test_dir/pg-node-test-service.service"
+}
+service_installed() {
+    [ "$NODE_SERVICE_UPDATE_LOCK_HELD" = true ]
+}
+id() { echo 0; }
+update_activation_marker="$service_test_dir/update-activated"
+install_node_service_script() {
+    activate_node_serviced_binary "$valid_binary" true
+    : > "$update_activation_marker"
+}
+NODE_SERVICE_UPDATE_LOCK_PATH="$service_test_dir/transaction-update.lock"
+NODE_SERVICE_READINESS_ATTEMPTS=1
+NODE_SERVICE_READINESS_STABLE_CHECKS=1
+NODE_SERVICE_READINESS_DELAY_SECONDS=0
+restart_attempts_file="$service_test_dir/restart-attempts"
+printf '0\n' > "$restart_attempts_file"
+systemctl() {
+    if [ "${1:-}" = "daemon-reload" ]; then
+        return 0
+    fi
+    if [ "${1:-}" = "restart" ]; then
+        local attempts
+        attempts=$(cat "$restart_attempts_file")
+        attempts=$((attempts + 1))
+        printf '%s\n' "$attempts" > "$restart_attempts_file"
+        [ "$attempts" -gt 1 ]
+        return
+    fi
+    return 0
+}
+if (update_service_if_installed >/dev/null 2>&1); then
+    fail "update_service_if_installed: reports restart failure"
+else
+    pass "update_service_if_installed: reports restart failure"
+fi
+if grep -q 'old-binary' "$SERVICE_BINARY_PATH"; then
+    pass "update_service_if_installed: rolls back failed replacement"
+else
+    fail "update_service_if_installed: rolls back failed replacement"
+fi
+assert_eq "$(cat "$restart_attempts_file")" "2" \
+    "update_service_if_installed: restarts restored binary"
+
+# A successful `systemctl restart` is not sufficient: systemd can return zero
+# before a crashing Type=simple process exits. Readiness failure must retain and
+# restore the backup just like an immediate restart failure.
+rm -f "$update_activation_marker"
+printf '\177ELFold-binary\n' > "$SERVICE_BINARY_PATH"
+printf '0\n' > "$restart_attempts_file"
+readiness_attempts_file="$service_test_dir/readiness-attempts"
+printf '0\n' > "$readiness_attempts_file"
+systemctl() {
+    case "${1:-}" in
+    daemon-reload)
+        return 0
+        ;;
+    restart)
+        local restarts
+        restarts=$(cat "$restart_attempts_file")
+        printf '%s\n' "$((restarts + 1))" > "$restart_attempts_file"
+        return 0
+        ;;
+    is-active)
+        local checks
+        if [ ! -e "$update_activation_marker" ]; then
+            return 0
+        fi
+        checks=$(cat "$readiness_attempts_file")
+        printf '%s\n' "$((checks + 1))" > "$readiness_attempts_file"
+        return 1
+        ;;
+    esac
+    return 0
+}
+sleep() { return 0; }
+if (update_service_if_installed >/dev/null 2>&1); then
+    fail "update_service_if_installed: reports inactive service after restart=0"
+else
+    pass "update_service_if_installed: reports inactive service after restart=0"
+fi
+if grep -q 'old-binary' "$SERVICE_BINARY_PATH"; then
+    pass "update_service_if_installed: rolls back restart=0 but inactive replacement"
+else
+    fail "update_service_if_installed: rolls back restart=0 but inactive replacement"
+fi
+assert_eq "$(cat "$restart_attempts_file")" "2" \
+    "update_service_if_installed: retries restored binary after readiness failure"
+assert_eq "$(cat "$readiness_attempts_file")" "2" \
+    "update_service_if_installed: readiness-checks replacement and restored binary"
+unset -f set_service_paths service_installed id install_node_service_script systemctl sleep openssl
+rm -f "$update_activation_marker"
+unset NODE_SERVICE_READINESS_ATTEMPTS NODE_SERVICE_READINESS_STABLE_CHECKS NODE_SERVICE_READINESS_DELAY_SECONDS
+unset NODE_SERVICE_UPDATE_LOCK_PATH
+
+# -----------------------------------------------------------------------
 # is_port_occupied
 # -----------------------------------------------------------------------
 OCCUPIED_PORTS=$(printf "80\n443\n62051\n")

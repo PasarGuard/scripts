@@ -18,7 +18,7 @@ github_download_file() {
 
 backup_scripts() {
     local backup_dir=""
-    backup_dir=$(create_temp_dir "scripts-backup")
+    backup_dir=$(create_temp_dir "scripts-backup") || return 1
 
     # Backup main scripts
     [ -f "/usr/local/bin/pasarguard" ] && cp "/usr/local/bin/pasarguard" "$backup_dir/"
@@ -110,7 +110,7 @@ install_shared_libs_from_repo() {
     local tmp_dir=""
     local lib_name=""
 
-    tmp_dir=$(create_temp_dir "shared-libs")
+    tmp_dir=$(create_temp_dir "shared-libs") || return 1
     mkdir -p "$SHARED_LIB_INSTALL_DIR"
 
     for lib_name in "$@"; do

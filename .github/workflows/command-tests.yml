@@ -16,6 +16,8 @@ on:
       - "tests/unit_lib_github.sh"
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
+      - "tests/test_node_service_transaction_guard.sh"
+      - "tests/test_node_service_readiness_tls.sh"
       - "tests/unit_pgnode_service.sh"
       - "tests/unit_restore_archive_safety.sh"
       - "tests/unit_lib_system.sh"
@@ -32,6 +34,8 @@ on:
       - "tests/unit_lib_system.sh"
       - "tests/unit_pasarguard.sh"
       - "tests/unit_pgnode.sh"
+      - "tests/test_node_service_transaction_guard.sh"
+      - "tests/test_node_service_readiness_tls.sh"
       - "tests/unit_pgnode_service.sh"
       - "tests/unit_restore_archive_safety.sh"
   workflow_dispatch:
@@ -57,6 +61,10 @@ jobs:
         run: bash tests/unit_pasarguard.sh
       - name: Run pg-node.sh unit tests
         run: bash tests/unit_pgnode.sh
+      - name: Run node service transaction guard tests
+        run: bash tests/test_node_service_transaction_guard.sh
+      - name: Run node service DNS-SAN readiness test
+        run: bash tests/test_node_service_readiness_tls.sh
       - name: Run pg-node-service.sh unit tests
         run: bash tests/unit_pgnode_service.sh
       - name: Run restore archive-safety unit tests

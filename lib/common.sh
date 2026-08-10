@@ -118,7 +118,7 @@ temp_root_dir() {
         root="/var/lib/pasarguard-scripts/tmp"
     fi
 
-    mkdir -p "$root"
+    mkdir -p "$root" || return 1
     printf '%s\n' "$root"
 }
 
@@ -128,7 +128,7 @@ create_temp_dir() {
     local candidate=""
     local attempt=0
 
-    root=$(temp_root_dir)
+    root=$(temp_root_dir) || return 1
     while [ "$attempt" -lt 20 ]; do
         candidate="${root}/${prefix}-$$-${RANDOM}-${attempt}"
         if mkdir "$candidate" 2>/dev/null; then
@@ -146,7 +146,7 @@ create_temp_file() {
     local suffix="${2:-}"
     local root=""
 
-    root=$(temp_root_dir)
+    root=$(temp_root_dir) || return 1
     create_temp_file_in_dir "$root" "$prefix" "$suffix"
 }
 
@@ -157,7 +157,7 @@ create_temp_file_in_dir() {
     local candidate=""
     local attempt=0
 
-    mkdir -p "$dir"
+    mkdir -p "$dir" || return 1
     while [ "$attempt" -lt 20 ]; do
         candidate="${dir}/${prefix}-$$-${RANDOM}-${attempt}${suffix}"
         if (set -C; : >"$candidate") 2>/dev/null; then

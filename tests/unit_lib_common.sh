@@ -38,6 +38,20 @@ d2=$(create_temp_dir)
 if [ -d "$d2" ]; then pass "create_temp_dir: default prefix works"; else fail "create_temp_dir: default prefix works"; fi
 rm -rf "$d2"
 
+original_temp_root_dir_definition=$(declare -f temp_root_dir)
+temp_root_dir() { return 73; }
+if ! create_temp_dir "must-not-reach-root" >/dev/null 2>&1; then
+    pass "create_temp_dir: temp-root failure is propagated before path construction"
+else
+    fail "create_temp_dir: temp-root failure is propagated before path construction"
+fi
+if ! create_temp_file "must-not-reach-root" ".tmp" >/dev/null 2>&1; then
+    pass "create_temp_file: temp-root failure is propagated before path construction"
+else
+    fail "create_temp_file: temp-root failure is propagated before path construction"
+fi
+eval "$original_temp_root_dir_definition"
+
 # --- create_temp_file ---
 f=$(create_temp_file "mypfx" ".sh")
 if [ -f "$f" ]; then pass "create_temp_file: file exists"; else fail "create_temp_file: file exists"; fi
