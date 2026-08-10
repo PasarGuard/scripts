@@ -118,7 +118,7 @@ systemctl() {
 }
 
 install_node_service_script() {
-    activate_node_serviced_binary "$VALID_BINARY" false
+    activate_node_serviced_binary "$VALID_BINARY"
     printf 'new-env\n' > "$ENV_FILE"
     printf 'new-unit\n' > "$SERVICE_UNIT"
     : > "$ACTIVATED_MARKER"
@@ -126,6 +126,18 @@ install_node_service_script() {
 transaction_test_install_node_service_script_definition=$(declare -f install_node_service_script)
 
 echo "=== test_node_service_transaction_guard.sh ==="
+
+# Secret-bearing environment snapshots remain owner-readable even if a legacy
+# installation left the source .env world-readable.
+setup_case secure-env-backup
+chmod 644 "$ENV_FILE"
+acquire_node_serviced_update_lock
+begin_node_service_transaction
+env_backup="${NODE_SERVICE_TRANSACTION_BACKUPS[0]}"
+[ "$(stat -c '%a' "$env_backup")" = "600" ] && pass "backup security: .env snapshot is 0600" || fail "backup security: .env snapshot is 0600"
+abort_node_service_transaction
+assert_no_backups "backup security: snapshots cleaned"
+assert_lock_released "backup security: flock released"
 
 # Deliver a real TERM after binary activation. The public command runs the
 # guard in a subshell, so its traps cannot replace the caller's traps.
@@ -193,7 +205,7 @@ setup_case errexit
 unexpected_failure() (
     acquire_node_serviced_update_lock
     begin_node_service_transaction
-    activate_node_serviced_binary "$VALID_BINARY" false
+    activate_node_serviced_binary "$VALID_BINARY"
     printf 'new-env\n' > "$ENV_FILE"
     printf 'new-unit\n' > "$SERVICE_UNIT"
     false
@@ -274,6 +286,18 @@ set -e
 if grep -Eq '^(stop|disable)$' "$SYSTEMCTL_MUTATION_LOG"; then fail "uninstall inactive/disabled: no redundant stop/disable"; else pass "uninstall inactive/disabled: no redundant stop/disable"; fi
 assert_no_backups "uninstall inactive/disabled: backups removed"
 assert_lock_released "uninstall inactive/disabled: flock released"
+
+# Dangling artifacts are still installation residue and must be removed.
+setup_case uninstall-dangling-symlinks
+rm -f "$SERVICE_UNIT" "$SERVICE_BINARY_PATH"
+ln -s "$CASE_DIR/missing-unit" "$SERVICE_UNIT"
+ln -s "$CASE_DIR/missing-binary" "$SERVICE_BINARY_PATH"
+SERVICE_INACTIVE=true
+SERVICE_DISABLED=true
+uninstall_service_command >/dev/null 2>&1
+[ ! -L "$SERVICE_UNIT" ] && pass "uninstall dangling symlink: unit removed" || fail "uninstall dangling symlink: unit removed"
+[ ! -L "$SERVICE_BINARY_PATH" ] && pass "uninstall dangling symlink: binary removed" || fail "uninstall dangling symlink: binary removed"
+assert_lock_released "uninstall dangling symlink: flock released"
 
 # Reinstall snapshots are armed before env mutation and binary activation. A
 # later unit-write failure must restore every artifact through the same guard.
@@ -434,6 +458,8 @@ service_installed() { return 0; }
 # Production uses an external systemctl process group. TERM sent to the
 # transaction shell must promptly reach the external child and its descendant,
 # then rollback and release the lock without waiting for the child timeout.
+# Force the compatibility path used by setsid implementations without --wait.
+NODE_SERVICE_SETSID_WAIT_SUPPORTED=false
 setup_case external-signal
 EXTERNAL_BIN="$CASE_DIR/bin"
 EXTERNAL_CHILD_PID_FILE="$CASE_DIR/external-child-pid"
@@ -494,6 +520,7 @@ assert_file "$SERVICE_UNIT" "old-unit" "external signal: unit restored"
 grep -q 'old-binary' "$SERVICE_BINARY_PATH" && pass "external signal: binary restored" || fail "external signal: binary restored"
 assert_no_backups "external signal: backups removed"
 assert_lock_released "external signal: flock released"
+unset NODE_SERVICE_SETSID_WAIT_SUPPORTED
 
 # A hung external mutation is bounded even without an incoming signal. The
 # watchdog terminates its process group, then the failure path rolls back.

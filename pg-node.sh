@@ -169,8 +169,6 @@ FETCH_REPO="PasarGuard/scripts"
 NODE_SERVICE_REPO="PasarGuard/node-serviced"
 NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
 NODE_SERVICE_BINARY_NAME="node-serviced"
-NODE_SERVICE_BACKUP_PATH=""
-NODE_SERVICE_HAD_PREVIOUS=false
 NODE_SERVICE_STAGED_PATH=""
 NODE_SERVICE_DOWNLOAD_TMP_DIR=""
 NODE_SERVICE_UPDATE_LOCK_HELD=false
@@ -294,7 +292,7 @@ update_service_if_installed() (
         fi
         return
     fi
-    if ! install_node_service_script false; then
+    if ! install_node_service_script; then
         abort_node_service_transaction
         return 1
     fi
@@ -423,7 +421,11 @@ run_node_service_external() {
         colorized_echo red "setsid is required to supervise $1 safely."
         return 1
     fi
-    setsid --wait bash -c 'trap - INT TERM; exec "$@"' bash "$@" &
+    local -a setsid_args=()
+    if node_service_setsid_supports_wait; then
+        setsid_args+=(--wait)
+    fi
+    setsid "${setsid_args[@]}" bash -c 'trap - INT TERM; exec "$@"' bash "$@" &
     child_pid=$!
     child_pgid="$child_pid"
     NODE_SERVICE_EXTERNAL_CHILD_PID="$child_pid"
@@ -454,6 +456,17 @@ run_node_service_external() {
     return "$status"
 }
 
+node_service_setsid_supports_wait() {
+    local help_output
+
+    if [ -n "${NODE_SERVICE_SETSID_WAIT_SUPPORTED:-}" ]; then
+        [ "$NODE_SERVICE_SETSID_WAIT_SUPPORTED" = true ]
+        return
+    fi
+    help_output=$(setsid --help 2>&1 || true)
+    [[ "$help_output" == *"--wait"* ]]
+}
+
 run_node_service_systemctl() {
     run_node_service_external "${NODE_SERVICE_SYSTEMCTL_TIMEOUT_SECONDS:-30}" systemctl "$@"
 }
@@ -477,6 +490,9 @@ snapshot_node_service_path() {
         NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[index]=""
         NODE_SERVICE_TRANSACTION_RESTORED[index]=false
         cp -a "$source_path" "$backup_path" || return 1
+        if [ "$source_path" = "$ENV_FILE" ] && [ ! -L "$backup_path" ]; then
+            chmod 600 "$backup_path" || return 1
+        fi
         if [ -L "$source_path" ]; then
             link_target=$(readlink -f "$source_path" 2>/dev/null || true)
             if [ -n "$link_target" ] && { [ -e "$link_target" ] || [ -L "$link_target" ]; }; then
@@ -486,6 +502,9 @@ snapshot_node_service_path() {
                 NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET[index]="$had_link_target"
                 NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[index]="$link_target_backup"
                 cp -a "$link_target" "$link_target_backup" || return 1
+                if [ "$source_path" = "$ENV_FILE" ] && [ ! -L "$link_target_backup" ]; then
+                    chmod 600 "$link_target_backup" || return 1
+                fi
             fi
         fi
     else
@@ -550,8 +569,6 @@ rollback_node_service_transaction() {
     for ((index = ${#NODE_SERVICE_TRANSACTION_PATHS[@]} - 1; index >= 0; index--)); do
         restore_node_service_snapshot_entry "$index" || restore_failed=true
     done
-    discard_node_serviced_backup
-
     if ! run_node_service_systemctl daemon-reload; then
         restore_failed=true
     fi
@@ -586,7 +603,6 @@ finish_node_service_transaction() {
         cleanup_node_service_transaction_backups
     fi
     cleanup_node_serviced_temporary_files
-    discard_node_serviced_backup
     NODE_SERVICE_TRANSACTION_ACTIVE=false
     NODE_SERVICE_TRANSACTION_COMMITTED=false
     if [ "$preserve_backups" != true ]; then
@@ -627,7 +643,6 @@ node_service_transaction_guard() {
         report_retained_node_service_backups
     fi
     cleanup_node_serviced_temporary_files
-    discard_node_serviced_backup
     NODE_SERVICE_TRANSACTION_ACTIVE=false
     if [ "$rollback_failed" != true ]; then
         NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
@@ -726,10 +741,30 @@ wait_for_node_service_ready() {
     local max_attempts="${NODE_SERVICE_READINESS_ATTEMPTS:-10}"
     local stable_required="${NODE_SERVICE_READINESS_STABLE_CHECKS:-3}"
     local delay_seconds="${NODE_SERVICE_READINESS_DELAY_SECONDS:-1}"
-    local attempt=0 stable=0
+    local deadline_seconds="${NODE_SERVICE_READINESS_DEADLINE_SECONDS:-30}"
+    local attempt=0 stable=0 started_at now remaining probe_timeout sleep_for
+
+    if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ && "$stable_required" =~ ^[1-9][0-9]*$ &&
+        "$deadline_seconds" =~ ^[1-9][0-9]*$ && "$delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        colorized_echo red "Invalid $SERVICE_NAME readiness limits."
+        return 1
+    fi
+    started_at=$(node_service_monotonic_seconds) || return 1
 
     while [ "$attempt" -lt "$max_attempts" ]; do
-        if run_node_service_systemctl is-active --quiet "$SERVICE_NAME" && node_service_api_ready; then
+        now=$(node_service_monotonic_seconds) || return 1
+        remaining=$((deadline_seconds - (now - started_at)))
+        [ "$remaining" -gt 0 ] || return 1
+        probe_timeout=$(awk -v timeout="${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}" -v remaining="$remaining" \
+            'BEGIN { budget = remaining / 2; print timeout < budget ? timeout : budget }')
+        if run_node_service_external "$remaining" systemctl is-active --quiet "$SERVICE_NAME"; then
+            now=$(node_service_monotonic_seconds) || return 1
+            remaining=$((deadline_seconds - (now - started_at)))
+            [ "$remaining" -gt 0 ] || return 1
+        else
+            probe_timeout=""
+        fi
+        if [ -n "$probe_timeout" ] && node_service_api_ready "$probe_timeout"; then
             stable=$((stable + 1))
             if [ "$stable" -ge "$stable_required" ]; then
                 return 0
@@ -739,10 +774,24 @@ wait_for_node_service_ready() {
         fi
         attempt=$((attempt + 1))
         if [ "$attempt" -lt "$max_attempts" ]; then
-            sleep "$delay_seconds"
+            now=$(node_service_monotonic_seconds) || return 1
+            remaining=$((deadline_seconds - (now - started_at)))
+            [ "$remaining" -gt 0 ] || return 1
+            sleep_for=$(awk -v delay="$delay_seconds" -v remaining="$remaining" \
+                'BEGIN { print delay < remaining ? delay : remaining }')
+            sleep "$sleep_for"
         fi
     done
     return 1
+}
+
+node_service_monotonic_seconds() {
+    if [ -r /proc/uptime ]; then
+        awk '{ print int($1); exit }' /proc/uptime
+    else
+        # Non-Linux test environments retain a bounded wall-clock fallback.
+        date +%s
+    fi
 }
 
 read_node_service_env_value() {
@@ -857,12 +906,13 @@ read_node_service_env_value() {
 
 node_service_certificate_identity() {
     local ssl_cert="$1"
+    local timeout_seconds="${2:-${NODE_SERVICE_OPENSSL_TIMEOUT_SECONDS:-5}}"
     local cert_output cn_output="" token dns_identity="" wildcard_identity="" ip_identity="" san_present=false
     local wildcard_suffix subject
 
     NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT=""
     cert_output=$(create_temp_file "node-service-cert" ".txt") || return 1
-    if ! run_node_service_external "${NODE_SERVICE_OPENSSL_TIMEOUT_SECONDS:-5}" \
+    if ! run_node_service_external "$timeout_seconds" \
         openssl x509 -in "$ssl_cert" -noout -ext subjectAltName >"$cert_output" 2>/dev/null; then
         rm -f "$cert_output"
         return 1
@@ -910,7 +960,7 @@ node_service_certificate_identity() {
         # considered only when the SAN extension is absent, matching TLS name
         # verification precedence.
         cn_output=$(create_temp_file "node-service-cert-cn" ".txt") || return 1
-        if ! run_node_service_external "${NODE_SERVICE_OPENSSL_TIMEOUT_SECONDS:-5}" \
+        if ! run_node_service_external "$timeout_seconds" \
             openssl x509 -in "$ssl_cert" -noout -subject -nameopt RFC2253 >"$cn_output" 2>/dev/null; then
             rm -f "$cn_output"
             return 1
@@ -937,6 +987,7 @@ node_service_certificate_identity() {
 }
 
 node_service_api_ready() {
+    local timeout_seconds="${1:-${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}}"
     local api_port api_key ssl_cert tls_identity url_host curl_config curl_status
 
     api_port=$(read_node_service_env_value API_PORT)
@@ -953,7 +1004,7 @@ node_service_api_ready() {
         colorized_echo red "$SERVICE_NAME readiness configuration is incomplete in $ENV_FILE."
         return 1
     fi
-    if ! node_service_certificate_identity "$ssl_cert"; then
+    if ! node_service_certificate_identity "$ssl_cert" "$timeout_seconds"; then
         colorized_echo red "$SERVICE_NAME certificate has no usable DNS/IP certificate identity."
         return 1
     fi
@@ -973,7 +1024,7 @@ node_service_api_ready() {
     if ! {
         printf 'silent\nshow-error\nfail\n'
         printf 'noproxy = "*"\n'
-        printf 'max-time = "%s"\n' "${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}"
+        printf 'max-time = "%s"\n' "$timeout_seconds"
         printf 'connect-timeout = "%s"\n' "${NODE_SERVICE_READINESS_CONNECT_TIMEOUT_SECONDS:-2}"
         printf 'cacert = "%s"\n' "$(printf '%s' "$ssl_cert" | sed 's/[\\"]/\\&/g')"
         printf 'header = "x-api-key: %s"\n' "$(printf '%s' "$api_key" | sed 's/[\\"]/\\&/g')"
@@ -989,7 +1040,7 @@ node_service_api_ready() {
         rm -f "$curl_config"
         return 1
     fi
-    run_node_service_external "${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}" curl --config "$curl_config" >/dev/null
+    run_node_service_external "$timeout_seconds" curl --config "$curl_config" >/dev/null
     curl_status=$?
     rm -f "$curl_config"
     return "$curl_status"
@@ -1132,77 +1183,32 @@ verify_node_serviced_checksum() {
 
 activate_node_serviced_binary() {
     local candidate_path="$1"
-    local keep_backup="${2:-false}"
-    local target_dir target_name staged_path backup_path
+    local target_dir target_name staged_path
 
     target_dir=$(dirname "$SERVICE_BINARY_PATH")
     target_name=$(basename "$SERVICE_BINARY_PATH")
     staged_path=$(create_temp_file_in_dir "$target_dir" ".${target_name}.new" "")
     NODE_SERVICE_STAGED_PATH="$staged_path"
-    backup_path="${target_dir}/.${target_name}.backup.$$.$RANDOM"
-    NODE_SERVICE_BACKUP_PATH=""
-    NODE_SERVICE_HAD_PREVIOUS=false
 
     if ! install -m 755 "$candidate_path" "$staged_path" || ! verify_node_serviced_binary "$staged_path"; then
         rm -f "$staged_path"
         NODE_SERVICE_STAGED_PATH=""
         return 1
     fi
-    if [ -e "$SERVICE_BINARY_PATH" ] || [ -L "$SERVICE_BINARY_PATH" ]; then
-        if ! cp -a "$SERVICE_BINARY_PATH" "$backup_path"; then
-            rm -f "$staged_path"
-            NODE_SERVICE_STAGED_PATH=""
-            return 1
-        fi
-        NODE_SERVICE_BACKUP_PATH="$backup_path"
-        NODE_SERVICE_HAD_PREVIOUS=true
-    fi
     if ! mark_node_service_transaction_mutation_started; then
-        rm -f "$NODE_SERVICE_BACKUP_PATH" "$staged_path"
-        NODE_SERVICE_BACKUP_PATH=""
-        NODE_SERVICE_HAD_PREVIOUS=false
+        rm -f "$staged_path"
         NODE_SERVICE_STAGED_PATH=""
         return 1
     fi
     if ! mv "$staged_path" "$SERVICE_BINARY_PATH"; then
-        rm -f "$NODE_SERVICE_BACKUP_PATH"
-        NODE_SERVICE_BACKUP_PATH=""
-        NODE_SERVICE_HAD_PREVIOUS=false
         rm -f "$staged_path"
         NODE_SERVICE_STAGED_PATH=""
         return 1
     fi
     NODE_SERVICE_STAGED_PATH=""
-    if [ "$keep_backup" != true ]; then
-        discard_node_serviced_backup
-    fi
-}
-
-rollback_node_serviced_binary() {
-    local service_label="${SERVICE_NAME:-node-serviced}"
-
-    if [ "$NODE_SERVICE_HAD_PREVIOUS" = true ] && [ -n "$NODE_SERVICE_BACKUP_PATH" ]; then
-        # Both files are in the target directory, so this restores the backup
-        # with one atomic rename over the failed replacement.
-        mv -f "$NODE_SERVICE_BACKUP_PATH" "$SERVICE_BINARY_PATH" || return 1
-    else
-        colorized_echo yellow "No previous $service_label binary is available; removing the failed replacement."
-        rm -f "$SERVICE_BINARY_PATH" || return 1
-    fi
-    NODE_SERVICE_BACKUP_PATH=""
-    NODE_SERVICE_HAD_PREVIOUS=false
-}
-
-discard_node_serviced_backup() {
-    if [ -n "$NODE_SERVICE_BACKUP_PATH" ]; then
-        rm -f "$NODE_SERVICE_BACKUP_PATH"
-    fi
-    NODE_SERVICE_BACKUP_PATH=""
-    NODE_SERVICE_HAD_PREVIOUS=false
 }
 
 install_node_service_script() {
-    local keep_backup="${1:-false}"
     set_service_paths
     local platform release_json release_json_path latest_tag latest_version asset_name asset_url checksum_url tmp_dir archive_path binary_path
     tmp_dir=$(create_temp_dir "node-serviced") || {
@@ -1267,7 +1273,7 @@ install_node_service_script() {
         rm -rf "$tmp_dir"
         return 1
     fi
-    if ! activate_node_serviced_binary "$binary_path" "$keep_backup"; then
+    if ! activate_node_serviced_binary "$binary_path"; then
         colorized_echo red "Failed to atomically install node-serviced at $SERVICE_BINARY_PATH"
         rm -rf "$tmp_dir"
         return 1
@@ -1823,7 +1829,7 @@ uninstall_node_script() {
 }
 uninstall_node_service_script() {
     set_service_paths
-    if [ -f "$SERVICE_BINARY_PATH" ]; then
+    if [ -e "$SERVICE_BINARY_PATH" ] || [ -L "$SERVICE_BINARY_PATH" ]; then
         colorized_echo yellow "Removing node-serviced binary"
         rm "$SERVICE_BINARY_PATH"
     fi
@@ -2455,7 +2461,7 @@ install_service_command() (
     fi
     colorized_echo magenta "API_PORT selected: ${api_port}"
     configure_firewall_for_port "$api_port" "tcp"
-    if ! install_node_service_script false; then
+    if ! install_node_service_script; then
         colorized_echo red "Failed to install $SERVICE_NAME binary; restoring the previous service configuration."
         abort_node_service_transaction ||
             colorized_echo red "Failed to restore the previous $SERVICE_NAME configuration."
@@ -2517,7 +2523,7 @@ uninstall_service_command() (
         fi
     fi
     mark_node_service_transaction_mutation_started || return 1
-    if [ -f "$SERVICE_UNIT" ]; then
+    if [ -e "$SERVICE_UNIT" ] || [ -L "$SERVICE_UNIT" ]; then
         colorized_echo yellow "Removing systemd unit $SERVICE_UNIT"
         rm "$SERVICE_UNIT" || {
             abort_node_service_transaction ||

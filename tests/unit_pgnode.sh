@@ -266,7 +266,7 @@ run_node_service_external() {
     return 1
 }
 assert_false "install_node_service_script: temp-dir failure is fatal" \
-    install_node_service_script false
+    install_node_service_script
 assert_eq "$release_request_attempted" "false" \
     "install_node_service_script: temp-dir failure skips release request"
 assert_false "install_node_service_script: temp-dir failure never targets /release.json" \
@@ -276,33 +276,16 @@ eval "$original_run_node_service_external_definition"
 
 SERVICE_BINARY_PATH="$service_test_dir/pg-node-service"
 printf '\177ELFold-binary\n' > "$SERVICE_BINARY_PATH"
-assert_true "activate_node_serviced_binary: stages a rollback candidate" \
-    activate_node_serviced_binary "$valid_binary" true
+assert_true "activate_node_serviced_binary: atomically activates a validated candidate" \
+    activate_node_serviced_binary "$valid_binary"
 if grep -q 'test-binary' "$SERVICE_BINARY_PATH"; then
     pass "activate_node_serviced_binary: activates staged binary"
 else
     fail "activate_node_serviced_binary: activates staged binary"
 fi
-rollback_node_serviced_binary
-if grep -q 'old-binary' "$SERVICE_BINARY_PATH"; then
-    pass "rollback_node_serviced_binary: restores previous binary"
-else
-    fail "rollback_node_serviced_binary: restores previous binary"
-fi
-NODE_SERVICE_HAD_PREVIOUS=false
-NODE_SERVICE_BACKUP_PATH=""
-SERVICE_NAME=""
-rollback_output=$(rollback_node_serviced_binary 2>&1)
-if [[ "$rollback_output" == *"No previous node-serviced binary is available; removing the failed replacement."* ]]; then
-    pass "rollback_node_serviced_binary: reports no-backup removal"
-else
-    fail "rollback_node_serviced_binary: reports no-backup removal"
-fi
-assert_false "rollback_node_serviced_binary: removes failed replacement without backup" \
-    test -e "$SERVICE_BINARY_PATH"
 printf '\177ELFold-binary\n' > "$SERVICE_BINARY_PATH"
 assert_false "activate_node_serviced_binary: rejects invalid candidate" \
-    activate_node_serviced_binary "$invalid_binary" true
+    activate_node_serviced_binary "$invalid_binary"
 if grep -q 'old-binary' "$SERVICE_BINARY_PATH"; then
     pass "activate_node_serviced_binary: preserves target after rejected candidate"
 else
@@ -418,6 +401,38 @@ assert_false "wait_for_node_service_ready: rejects active service with unavailab
     wait_for_node_service_ready
 unset NODE_SERVICE_API_READY
 
+# Capability detection permits older util-linux setsid releases that do not
+# implement --wait; run_node_service_external falls back to plain setsid.
+setsid() { printf 'Usage: setsid [options] program\n'; }
+assert_false "node_service_setsid_supports_wait: detects legacy setsid" \
+    node_service_setsid_supports_wait
+setsid() { printf '  -w, --wait  wait program exit\n'; }
+assert_true "node_service_setsid_supports_wait: detects --wait support" \
+    node_service_setsid_supports_wait
+unset -f setsid
+
+# A global deadline bounds the full loop even when the attempt count is large.
+deadline_clock_file="$service_test_dir/readiness-clock"
+printf '100\n' > "$deadline_clock_file"
+original_node_service_monotonic_seconds_definition=$(declare -f node_service_monotonic_seconds)
+node_service_monotonic_seconds() {
+    local now
+    now=$(cat "$deadline_clock_file")
+    printf '%s\n' "$now"
+    printf '%s\n' "$((now + 1))" > "$deadline_clock_file"
+}
+systemctl() { return 3; }
+sleep() { return 0; }
+NODE_SERVICE_READINESS_ATTEMPTS=100
+NODE_SERVICE_READINESS_DEADLINE_SECONDS=2
+assert_false "wait_for_node_service_ready: enforces a global deadline" \
+    wait_for_node_service_ready
+assert_eq "$(cat "$deadline_clock_file")" "103" \
+    "wait_for_node_service_ready: stops before exhausting attempts"
+eval "$original_node_service_monotonic_seconds_definition"
+unset -f systemctl sleep
+unset NODE_SERVICE_READINESS_DEADLINE_SECONDS
+
 # The lock is held for the entire update transaction so a second updater
 # cannot create a stale backup and later overwrite a successful install.
 NODE_SERVICE_UPDATE_LOCK_PATH="$service_test_dir/update.lock"
@@ -492,7 +507,7 @@ service_installed() {
 id() { echo 0; }
 update_activation_marker="$service_test_dir/update-activated"
 install_node_service_script() {
-    activate_node_serviced_binary "$valid_binary" true
+    activate_node_serviced_binary "$valid_binary"
     : > "$update_activation_marker"
 }
 NODE_SERVICE_UPDATE_LOCK_PATH="$service_test_dir/transaction-update.lock"

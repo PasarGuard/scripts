@@ -32,6 +32,7 @@ if echo "$out" | grep -q "hello"; then pass "colorized_echo: contains text"; els
 d=$(create_temp_dir "myprefix")
 if [ -d "$d" ]; then pass "create_temp_dir: directory exists"; else fail "create_temp_dir: directory exists"; fi
 if [[ "$d" == *"myprefix"* ]]; then pass "create_temp_dir: prefix in name"; else fail "create_temp_dir: prefix in name"; fi
+assert_eq "$(stat -c '%a' "$d")" "700" "create_temp_dir: ignores permissive caller umask"
 rm -rf "$d"
 
 d2=$(create_temp_dir)
@@ -57,6 +58,7 @@ f=$(create_temp_file "mypfx" ".sh")
 if [ -f "$f" ]; then pass "create_temp_file: file exists"; else fail "create_temp_file: file exists"; fi
 if [[ "$f" == *"mypfx"* ]]; then pass "create_temp_file: prefix in name"; else fail "create_temp_file: prefix in name"; fi
 if [[ "$f" == *".sh" ]]; then pass "create_temp_file: suffix in name"; else fail "create_temp_file: suffix in name"; fi
+assert_eq "$(stat -c '%a' "$f")" "600" "create_temp_file: ignores permissive caller umask"
 rm -f "$f"
 
 f2=$(create_temp_file)

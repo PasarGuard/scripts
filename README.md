@@ -108,3 +108,15 @@
 
 Use `help` to view all commands:
 `pg-node help`
+
+### node-serviced update safety
+
+`service-install`, `service-update`, and `service-uninstall` serialize mutations with a persistent `flock` lock and require
+Linux `setsid` (both normally provided by `util-linux`). Older `setsid` versions without `--wait` are supported. Update and
+rollback probes also require Bash, `awk`, `curl`, and `openssl`; release installation requires `jq`, `tar`, and a SHA-256
+tool (`sha256sum` or `shasum`).
+
+Readiness uses the same `.env` semantics as `node-serviced`: optional `export`, `=` or `:`, last duplicate wins, comments,
+single- and double-quoted values, double-quote escapes, and prior-key expansion. The file is parsed as data and is never
+sourced or evaluated. `NODE_SERVICE_READINESS_DEADLINE_SECONDS` bounds the complete readiness loop (default `30`), while
+`NODE_SERVICE_READINESS_TIMEOUT_SECONDS` bounds an individual authenticated HTTPS probe.
