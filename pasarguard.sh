@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_COMMIT_SHA="${SCRIPT_COMMIT_SHA:-__SCRIPT_COMMIT_SHA__}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
 REQUIRED_SHARED_LIBS="common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh"
@@ -927,6 +928,7 @@ verify_and_start_container() {
 }
 
 install_pasarguard_script() {
+    print_script_execution_header "pasarguard" "$SCRIPT_COMMIT_SHA" "install"
     FETCH_REPO="PasarGuard/scripts"
     colorized_echo blue "Installing pasarguard script"
     install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh
@@ -1242,6 +1244,7 @@ check_existing_database_volumes() {
 
 install_command() {
     check_running_as_root
+    print_script_execution_header "pasarguard" "$SCRIPT_COMMIT_SHA" "install"
 
     # Default values
     pasarguard_version="latest"
@@ -1891,7 +1894,7 @@ _pasarguard_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs cli tui install update uninstall install-script install-node backup backup-service restore core-update edit edit-env help completion"
+    cmds="up down restart status logs cli tui install update uninstall install-script install-node backup backup-service restore core-update edit edit-env version-script script-version help completion"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1945,6 +1948,7 @@ usage() {
     colorized_echo yellow "  restore         $(tput sgr0)– Restore database from backup file"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit environment file (via nano or vi editor)"
+    colorized_echo yellow "  version-script  $(tput sgr0)– Show script version and commit"
     colorized_echo yellow "  help            $(tput sgr0)– Show this help message"
 
     echo
@@ -2024,6 +2028,9 @@ pasarguard_main() {
     edit-env)
         shift
         edit_env_command "$@"
+        ;;
+    version-script | script-version)
+        print_script_execution_header "pasarguard" "$SCRIPT_COMMIT_SHA"
         ;;
     completion)
         check_running_as_root

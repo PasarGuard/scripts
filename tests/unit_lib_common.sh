@@ -82,6 +82,39 @@ assert_eq "$(stat -c '%a' "$secret_new")" "600" "harden_secret_file: appended co
 # Empty path is rejected without creating anything.
 if harden_secret_file ""; then fail "harden_secret_file: rejects empty path"; else pass "harden_secret_file: rejects empty path"; fi
 
+# --- get_script_commit_sha & print_script_execution_header ---
+assert_eq "$(get_script_commit_sha "$WORK_DIR" "a23123f03978989e95d257beb9de0c5ad9da6e70")" \
+    "a23123f03978989e95d257beb9de0c5ad9da6e70" "get_script_commit_sha: returns baked-in SHA"
+
+(
+    export PASARGUARD_SCRIPT_COMMIT="custom_env_commit_sha"
+    assert_eq "$(get_script_commit_sha "$WORK_DIR" "__SCRIPT_COMMIT_SHA__")" \
+        "custom_env_commit_sha" "get_script_commit_sha: respects PASARGUARD_SCRIPT_COMMIT override"
+)
+
+(
+    export SCRIPT_COMMIT_SHA="custom_script_sha"
+    assert_eq "$(get_script_commit_sha "$WORK_DIR" "__SCRIPT_COMMIT_SHA__")" \
+        "custom_script_sha" "get_script_commit_sha: respects SCRIPT_COMMIT_SHA override"
+)
+
+git_expected=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "main")
+assert_eq "$(get_script_commit_sha "$ROOT_DIR" "__SCRIPT_COMMIT_SHA__")" \
+    "$git_expected" "get_script_commit_sha: resolves commit from git repo"
+
+no_git_dir="$WORK_DIR/no_git_dir"
+mkdir -p "$no_git_dir"
+assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
+    "main" "get_script_commit_sha: falls back to 'main' outside git repo"
+
+assert_eq "$(print_script_execution_header "pasarguard" "test_commit_sha" "install")" \
+    "# Executing pasarguard install script, commit: test_commit_sha" \
+    "print_script_execution_header: formats install banner correctly"
+
+assert_eq "$(print_script_execution_header "pg-node" "test_commit_sha")" \
+    "# Executing pg-node script, commit: test_commit_sha" \
+    "print_script_execution_header: formats general script banner correctly"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

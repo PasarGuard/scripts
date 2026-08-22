@@ -249,6 +249,7 @@ detect_compose() {
 }
 
 install_pasarguard_script() {
+    print_script_execution_header "pasarguard-standalone" "$SCRIPT_COMMIT_SHA" "install"
     local target_path="/usr/local/bin/pasarguard"
     local wrapper_source="$STANDALONE_SCRIPT_DIR/pasarguard-standalone.sh"
     local installed_wrapper="$STANDALONE_INSTALL_ROOT/iran-sanction/pasarguard-standalone.sh"

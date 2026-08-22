@@ -281,6 +281,7 @@ install_node_service_script() {
 }
 
 install_node_script() {
+    print_script_execution_header "pg-node-standalone" "$SCRIPT_COMMIT_SHA" "install"
     local target_path="/usr/local/bin/$APP_NAME"
     local wrapper_source="$STANDALONE_SCRIPT_DIR/pg-node-standalone.sh"
     local installed_wrapper="$STANDALONE_INSTALL_ROOT/iran-sanction/pg-node-standalone.sh"

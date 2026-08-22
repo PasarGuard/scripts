@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_COMMIT_SHA="${SCRIPT_COMMIT_SHA:-__SCRIPT_COMMIT_SHA__}"
 SCRIPT_DIR="${PG_NODE_SCRIPT_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
 SHARED_LIB_DIR="${SCRIPT_DIR}/lib"
 REQUIRED_SHARED_LIBS="common.sh system.sh docker.sh github.sh"
@@ -248,6 +249,7 @@ configure_firewall_for_port() {
     colorized_echo yellow "$hint"
 }
 install_node_script() {
+    print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA" "install"
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
     TEMP_FILE=$(create_temp_file "pg-node-script" ".sh")
@@ -1007,6 +1009,7 @@ is_node_up() {
 }
 install_command() {
     check_running_as_root
+    print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA" "install"
     # Default values
     node_version="latest"
     node_version_set="false"
@@ -1881,7 +1884,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1909,6 +1912,8 @@ commands=(
   core-update
   geofiles
   renew-cert
+  version-script
+  script-version
   edit
   edit-env
   completion
@@ -1995,6 +2000,7 @@ usage() {
     colorized_echo yellow "  core-update       $(tput sgr0)✓  Update/Change Xray core"
     colorized_echo yellow "  geofiles          $(tput sgr0)✓  Download geoip and geosite files for specific regions"
     colorized_echo yellow "  renew-cert        $(tput sgr0)✓  Regenerate SSL/TLS certificate"
+    colorized_echo yellow "  version-script    $(tput sgr0)✓  Show script version and commit"
     colorized_echo yellow "  completion        $(tput sgr0)✓  Install bash/zsh tab completion"
     echo
     colorized_echo cyan "Restart Options:"
@@ -2296,6 +2302,9 @@ pg_node_main() {
         ;;
     edit-env)
         edit_env_command
+        ;;
+    version-script | script-version)
+        print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA"
         ;;
     completion)
         check_running_as_root

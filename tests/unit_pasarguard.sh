@@ -448,6 +448,16 @@ OS="openSUSE Tumbleweed";  assert_eq "$(get_cron_package_name)" "cronie" "cron_p
 OS="Plan 9";               assert_false "cron_pkg: unknown OS -> non-zero" get_cron_package_name
 OS="$_saved_os"
 
+# -----------------------------------------------------------------------
+# version-script CLI command & completion
+# -----------------------------------------------------------------------
+ver_out=$(pasarguard_main version-script)
+assert_true "version-script: output contains '# Executing pasarguard script, commit:'" contains "$ver_out" "# Executing pasarguard script, commit:"
+
+comp_out=$(generate_completion)
+assert_true "completion: contains version-script" contains "$comp_out" "version-script"
+assert_true "completion: contains script-version" contains "$comp_out" "script-version"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

@@ -51,6 +51,8 @@ jobs:
           cp dist/pg-node-assets/.env.example "$BUNDLE_ROOT/pg-node-assets/.env.example"
           cp dist/pasarguard-assets/.env.example "$BUNDLE_ROOT/pasarguard-assets/.env.example"
           cp iran-sanction/README-pasarguard-standalone.fa.md "$BUNDLE_ROOT/README.md"
+          COMMIT_SHA="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+          find "$BUNDLE_ROOT" -type f -name "*.sh" -exec sed -i "s/__SCRIPT_COMMIT_SHA__/${COMMIT_SHA}/g" {} +
           tar -czf dist/pasarguard-standalone.tar.gz -C dist pasarguard-standalone
 
       - name: Upload workflow artifact
