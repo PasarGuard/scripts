@@ -113,3 +113,50 @@ create_temp_file_in_dir() {
 
     die "Failed to create temporary file in $dir"
 }
+
+get_script_commit_sha() {
+    local script_dir="${1:-}"
+    local baked_sha="${2:-}"
+    local commit_sha=""
+
+    if [ -n "$baked_sha" ] && [ "$baked_sha" != "__SCRIPT_COMMIT_SHA__" ]; then
+        printf '%s\n' "$baked_sha"
+        return 0
+    fi
+
+    if [ -n "${PASARGUARD_SCRIPT_COMMIT:-}" ] && [ "$PASARGUARD_SCRIPT_COMMIT" != "__SCRIPT_COMMIT_SHA__" ]; then
+        printf '%s\n' "$PASARGUARD_SCRIPT_COMMIT"
+        return 0
+    fi
+
+    if [ -n "${SCRIPT_COMMIT_SHA:-}" ] && [ "$SCRIPT_COMMIT_SHA" != "__SCRIPT_COMMIT_SHA__" ]; then
+        printf '%s\n' "$SCRIPT_COMMIT_SHA"
+        return 0
+    fi
+
+    if [ -n "$script_dir" ] && command -v git >/dev/null 2>&1; then
+        commit_sha=$(git -C "$script_dir" rev-parse HEAD 2>/dev/null || true)
+        if [ -n "$commit_sha" ]; then
+            printf '%s\n' "$commit_sha"
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "main"
+}
+
+print_script_execution_header() {
+    local script_name="$1"
+    local baked_sha="${2:-}"
+    local action_type="${3:-}"
+    local script_dir="${4:-${SCRIPT_DIR:-}}"
+    local commit_sha=""
+
+    commit_sha=$(get_script_commit_sha "$script_dir" "$baked_sha")
+
+    if [ -n "$action_type" ]; then
+        printf '# Executing %s %s script, commit: %s\n' "$script_name" "$action_type" "$commit_sha"
+    else
+        printf '# Executing %s script, commit: %s\n' "$script_name" "$commit_sha"
+    fi
+}

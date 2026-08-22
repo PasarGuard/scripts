@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -e
 
+SCRIPT_COMMIT_SHA="${SCRIPT_COMMIT_SHA:-__SCRIPT_COMMIT_SHA__}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+get_script_commit_sha() {
+    local baked_sha="${SCRIPT_COMMIT_SHA:-}"
+    local commit_sha=""
+
+    if [ -n "$baked_sha" ] && [ "$baked_sha" != "__SCRIPT_COMMIT_SHA__" ]; then
+        printf '%s\n' "$baked_sha"
+        return 0
+    fi
+
+    if [ -n "${PASARGUARD_SCRIPT_COMMIT:-}" ] && [ "$PASARGUARD_SCRIPT_COMMIT" != "__SCRIPT_COMMIT_SHA__" ]; then
+        printf '%s\n' "$PASARGUARD_SCRIPT_COMMIT"
+        return 0
+    fi
+
+    if command -v git >/dev/null 2>&1; then
+        commit_sha=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
+        if [ -n "$commit_sha" ]; then
+            printf '%s\n' "$commit_sha"
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "main"
+}
+
 # Download Xray latest
 
 RELEASE_TAG="latest"
@@ -44,6 +72,7 @@ parse_args() {
 }
 
 parse_args "$@"
+printf '# Executing install_core script, commit: %s\n' "$(get_script_commit_sha)"
 
 check_if_running_as_root() {
     # If you want to run as another user, please modify $EUID to be owned by this user

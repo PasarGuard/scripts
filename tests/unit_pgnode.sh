@@ -279,6 +279,30 @@ ENV_FILE="/nonexistent/dir/.env"
 sync_env_ssl_paths
 pass "sync_env_ssl_paths: no crash when ENV_FILE missing"
 
+# -----------------------------------------------------------------------
+# version-script CLI command & completions
+# -----------------------------------------------------------------------
+ver_out=$(pg_node_main version-script)
+if [[ "$ver_out" == *"# Executing pg-node script, commit:"* ]]; then
+    pass "version-script: output contains '# Executing pg-node script, commit:'"
+else
+    fail "version-script: output contains '# Executing pg-node script, commit:'"
+fi
+
+bash_comp_out=$(generate_bash_completion)
+if [[ "$bash_comp_out" == *"version-script"* && "$bash_comp_out" == *"script-version"* ]]; then
+    pass "bash completion: contains version-script and script-version"
+else
+    fail "bash completion: contains version-script and script-version"
+fi
+
+zsh_comp_out=$(generate_zsh_completion)
+if [[ "$zsh_comp_out" == *"version-script"* && "$zsh_comp_out" == *"script-version"* ]]; then
+    pass "zsh completion: contains version-script and script-version"
+else
+    fail "zsh completion: contains version-script and script-version"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
