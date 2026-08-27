@@ -4,6 +4,23 @@ set -e
 SCRIPT_COMMIT_SHA="${SCRIPT_COMMIT_SHA:-__SCRIPT_COMMIT_SHA__}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+resolve_remote_commit_sha() {
+    local repo="${1:-PasarGuard/scripts}"
+    local branch="${2:-main}"
+    local response=""
+    local sha=""
+
+    [ -n "${PASARGUARD_SKIP_REMOTE_COMMIT_LOOKUP:-}" ] && return 1
+    command -v curl >/dev/null 2>&1 || return 1
+
+    response=$(curl -fsSL --connect-timeout 3 --max-time 5 \
+        "https://api.github.com/repos/${repo}/commits/${branch}" 2>/dev/null) || return 1
+    sha=$(printf '%s' "$response" | grep -m1 -o '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]\{7,40\}"' | grep -o '[0-9a-f]\{7,40\}')
+
+    [ -n "$sha" ] || return 1
+    printf '%s\n' "$sha"
+}
+
 get_script_commit_sha() {
     local baked_sha="${SCRIPT_COMMIT_SHA:-}"
     local commit_sha=""
@@ -24,6 +41,15 @@ get_script_commit_sha() {
             printf '%s\n' "$commit_sha"
             return 0
         fi
+    fi
+
+    # install_core.sh is normally piped straight into bash, so there is no git
+    # checkout and no baked-in SHA. Ask GitHub which commit "main" currently
+    # points to instead of printing the literal branch name.
+    commit_sha=$(resolve_remote_commit_sha)
+    if [ -n "$commit_sha" ]; then
+        printf '%s\n' "$commit_sha"
+        return 0
     fi
 
     printf '%s\n' "main"

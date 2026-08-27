@@ -114,6 +114,23 @@ create_temp_file_in_dir() {
     die "Failed to create temporary file in $dir"
 }
 
+resolve_remote_commit_sha() {
+    local repo="${1:-PasarGuard/scripts}"
+    local branch="${2:-main}"
+    local response=""
+    local sha=""
+
+    [ -n "${PASARGUARD_SKIP_REMOTE_COMMIT_LOOKUP:-}" ] && return 1
+    command -v curl >/dev/null 2>&1 || return 1
+
+    response=$(curl -fsSL --connect-timeout 3 --max-time 5 \
+        "https://api.github.com/repos/${repo}/commits/${branch}" 2>/dev/null) || return 1
+    sha=$(printf '%s' "$response" | grep -m1 -o '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]\{7,40\}"' | grep -o '[0-9a-f]\{7,40\}')
+
+    [ -n "$sha" ] || return 1
+    printf '%s\n' "$sha"
+}
+
 get_script_commit_sha() {
     local script_dir="${1:-}"
     local baked_sha="${2:-}"
@@ -140,6 +157,15 @@ get_script_commit_sha() {
             printf '%s\n' "$commit_sha"
             return 0
         fi
+    fi
+
+    # Scripts are normally installed via `curl ... | bash`, so there is no git
+    # checkout and no baked-in SHA to fall back on. Ask GitHub which commit
+    # "main" currently points to instead of printing the literal branch name.
+    commit_sha=$(resolve_remote_commit_sha "${PASARGUARD_SCRIPT_REPO:-}" "${PASARGUARD_SCRIPT_BRANCH:-}")
+    if [ -n "$commit_sha" ]; then
+        printf '%s\n' "$commit_sha"
+        return 0
     fi
 
     printf '%s\n' "main"

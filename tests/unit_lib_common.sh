@@ -104,8 +104,27 @@ assert_eq "$(get_script_commit_sha "$ROOT_DIR" "__SCRIPT_COMMIT_SHA__")" \
 
 no_git_dir="$WORK_DIR/no_git_dir"
 mkdir -p "$no_git_dir"
-assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
-    "main" "get_script_commit_sha: falls back to 'main' outside git repo"
+(
+    export PASARGUARD_SKIP_REMOTE_COMMIT_LOOKUP=1
+    assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
+        "main" "get_script_commit_sha: falls back to 'main' outside git repo when remote lookup is unavailable"
+)
+
+# When no git checkout is present (e.g. `curl | bash` installs), the real
+# commit SHA is resolved from GitHub instead of printing the literal branch name.
+(
+    stub_bin_dir="$WORK_DIR/stub_bin"
+    mkdir -p "$stub_bin_dir"
+    cat >"$stub_bin_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"sha":"deadbeef1234567890deadbeef1234567890dead","commit":{"tree":{"sha":"other"}}}'
+EOF
+    chmod +x "$stub_bin_dir/curl"
+    export PATH="$stub_bin_dir:$PATH"
+    assert_eq "$(get_script_commit_sha "$no_git_dir" "__SCRIPT_COMMIT_SHA__")" \
+        "deadbeef1234567890deadbeef1234567890dead" \
+        "get_script_commit_sha: resolves real commit SHA from GitHub when no git checkout is available"
+)
 
 assert_eq "$(print_script_execution_header "pasarguard" "test_commit_sha" "install")" \
     "# Executing pasarguard install script, commit: test_commit_sha" \
