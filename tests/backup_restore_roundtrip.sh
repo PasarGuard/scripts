@@ -57,9 +57,21 @@ EXTRACTED_BACKUP_DIR=""
 COMBINED_BACKUP_ARCHIVE=""
 MULTIPART_SPLIT_SIZE_BYTES=2048
 MULTIPART_SPLIT_THRESHOLD_BYTES=3072
+SQLITE_HOLDER_PID=""
+SQLITE_HOLDER_READY="$WORK_DIR/sqlite-holder.ready"
+SQLITE_HOLDER_STOP="$WORK_DIR/sqlite-holder.stop"
+
+stop_sqlite_holder() {
+    if [ -n "$SQLITE_HOLDER_PID" ] && kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null; then
+        touch "$SQLITE_HOLDER_STOP"
+        wait "$SQLITE_HOLDER_PID"
+    fi
+    SQLITE_HOLDER_PID=""
+}
 
 cleanup() {
     local exit_code=$?
+    stop_sqlite_holder
     if [ "$exit_code" -ne 0 ] && [ -d "$WORK_DIR" ]; then
         while IFS= read -r log_path; do
             [ -n "$log_path" ] || continue
@@ -180,6 +192,7 @@ write_sqlite_env() {
     cat >"$ENV_FILE" <<EOF
 BACKUP_SERVICE_ENABLED=false
 RESTORE_TEST_FLAG=$EXPECTED_ENV_FLAG
+# Keep the legacy five-slash URL here to verify existing installations.
 SQLALCHEMY_DATABASE_URL="sqlite:////$DATA_DIR/db.sqlite3"
 EOF
 }
@@ -275,10 +288,29 @@ record_original_file_hashes() {
 }
 
 setup_sqlite_db() {
-    sqlite3 "$DATA_DIR/db.sqlite3" <<EOF
-CREATE TABLE ci_roundtrip (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-INSERT INTO ci_roundtrip (id, value) VALUES (1, '$EXPECTED_DB_VALUE');
-EOF
+    python3 - "$DATA_DIR/db.sqlite3" "$SQLITE_HOLDER_READY" "$SQLITE_HOLDER_STOP" "$EXPECTED_DB_VALUE" <<'PY' &
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+db_path, ready_path, stop_path, expected_value = sys.argv[1:]
+connection = sqlite3.connect(db_path)
+connection.execute("PRAGMA journal_mode=WAL")
+connection.execute("PRAGMA wal_autocheckpoint=0")
+connection.execute("CREATE TABLE ci_roundtrip (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+connection.execute("INSERT INTO ci_roundtrip (id, value) VALUES (1, 'old-checkpoint')")
+connection.commit()
+connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+connection.execute("UPDATE ci_roundtrip SET value = ? WHERE id = 1", (expected_value,))
+connection.commit()
+Path(ready_path).touch()
+while not Path(stop_path).exists():
+    time.sleep(0.05)
+connection.close()
+PY
+    SQLITE_HOLDER_PID=$!
+    wait_for_command 50 test -f "$SQLITE_HOLDER_READY"
 }
 
 sqlite_query() {
@@ -447,11 +479,7 @@ verify_backup_archive_contents() {
         expected_files=$'.env\ndb_backup.sql\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
     fi
 
-    if [ "$DB_TYPE" = "sqlite" ]; then
-        assert_zip_contains_required_files "$archive_to_verify" "$expected_files"
-    else
-        assert_zip_contains_exact_files "$archive_to_verify" "$expected_files"
-    fi
+    assert_zip_contains_exact_files "$archive_to_verify" "$expected_files"
     assert_equals "$(sha256sum "$EXTRACTED_BACKUP_DIR/.env" | awk '{print $1}')" "$ORIGINAL_ENV_SHA" "Backed up .env contents changed."
     assert_equals "$(sha256sum "$EXTRACTED_BACKUP_DIR/docker-compose.yml" | awk '{print $1}')" "$ORIGINAL_COMPOSE_SHA" "Backed up docker-compose.yml contents changed."
     assert_equals "$(sha256sum "$EXTRACTED_BACKUP_DIR/pasarguard_data/sentinel.txt" | awk '{print $1}')" "$ORIGINAL_SENTINEL_SHA" "Backed up sentinel.txt contents changed."
@@ -460,9 +488,11 @@ verify_backup_archive_contents() {
     if [ "$DB_TYPE" = "sqlite" ]; then
         assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/$sqlite_basename"
         assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/$sqlite_basename")" "$ORIGINAL_SQLITE_DUMP_SHA" "Backed up SQLite database logical contents changed."
-        if [ -f "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename" ]; then
-            assert_sqlite_integrity "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename"
-            assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename")" "$ORIGINAL_SQLITE_DUMP_SHA" "Archived SQLite data-dir database logical contents changed."
+        if [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename" ] || \
+            [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/${sqlite_basename}-wal" ] || \
+            [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/${sqlite_basename}-shm" ]; then
+            printf 'SQLite database or WAL/SHM leaked into the raw data-directory copy.\n' >&2
+            exit 1
         fi
     elif [ "$DB_TYPE" = "postgresql" ] || [ "$DB_TYPE" = "timescaledb" ]; then
         assert_file_contains "$EXTRACTED_BACKUP_DIR/pg_dump/db-001.sql" "ci_roundtrip"
@@ -631,6 +661,7 @@ main() {
     prepare_case
     backup_command
     verify_backup_created
+    stop_sqlite_holder
     mutate_database_after_backup
     mutate_files_after_backup
     run_restore

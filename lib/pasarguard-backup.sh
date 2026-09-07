@@ -145,6 +145,8 @@ pg_manifest_encode() {
 }
 
 send_backup_to_telegram() {
+    local requested_timestamp="${1:-}"
+
     if [ -f "$ENV_FILE" ]; then
         while IFS='=' read -r key value; do
             if [[ -z "$key" || "$key" =~ ^# ]]; then
@@ -195,9 +197,19 @@ send_backup_to_telegram() {
     fi
     local backup_dir="$APP_DIR/backup"
     local latest_backup=""
-    latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
-        \( -name 'backup_*.tar.gz' -o -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) \
-        -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    if [ -n "$requested_timestamp" ]; then
+        if [[ ! "$requested_timestamp" =~ ^[0-9]{14}$ ]]; then
+            colorized_echo red "Invalid backup timestamp requested for upload."
+            return 1
+        fi
+        latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
+            \( -name "backup_${requested_timestamp}.zip" -o -name "backup_${requested_timestamp}.z[0-9][0-9]" -o -name "backup_${requested_timestamp}.part[0-9][0-9].zip" \) \
+            -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    else
+        latest_backup=$(find "$backup_dir" -maxdepth 1 -type f \
+            \( -name 'backup_*.tar.gz' -o -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) \
+            -printf '%T@ %f\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+    fi
 
     if [ -z "$latest_backup" ]; then
         colorized_echo red "No backups found to send."
@@ -1130,27 +1142,8 @@ backup_command() {
 
         # Extract database type from scheme
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
-        db_type="sqlite"
-            # Extract SQLite file path
-            # SQLite URLs: sqlite:///relative/path or sqlite:////absolute/path
-            local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
-            sqlite_url_part="${sqlite_url_part%%\?*}"
-            sqlite_url_part="${sqlite_url_part%%#*}"
-
-            # SQLite URL format:
-            # sqlite:////absolute/path (4 slashes = absolute path /path)
-            # After removing 'sqlite://', //absolute/path remains, convert to /absolute/path
-            if [[ "$sqlite_url_part" =~ ^//(.*)$ ]]; then
-                # Absolute path: sqlite:////absolute/path -> /absolute/path
-                sqlite_file="/${BASH_REMATCH[1]}"
-            elif [[ "$sqlite_url_part" =~ ^/(.*)$ ]]; then
-                # Could be absolute (sqlite:///path) or relative depending on context
-                # In practice, treat as absolute since SQLAlchemy uses 4 slashes for absolute
-                sqlite_file="/${BASH_REMATCH[1]}"
-            else
-                # Relative path (no leading slash)
-                sqlite_file="$sqlite_url_part"
-            fi
+            db_type="sqlite"
+            sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL")
         elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
             # Extract scheme to determine type
             if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mariadb[^:]*:// ]]; then
@@ -1547,8 +1540,8 @@ backup_command() {
                     if ! sqlite3 "$sqlite_file" ".backup '$temp_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
                         error_messages+=("Failed to create SQLite backup snapshot.")
                     fi
-                elif ! cp "$sqlite_file" "$temp_dir/$sqlite_basename" 2>>"$log_file"; then
-                    error_messages+=("Failed to copy SQLite database.")
+                else
+                    error_messages+=("sqlite3 is required to create a consistent SQLite backup snapshot.")
                 fi
             else
                 error_messages+=("SQLite database file not found at $sqlite_file.")
@@ -1582,9 +1575,11 @@ backup_command() {
     # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
     if [ -d "$DATA_DIR" ]; then
         local rsync_args=(-av --exclude 'xray-core' --exclude 'mysql' --exclude 'mariadb' --exclude 'postgresql' --exclude 'timescaledb')
+        local normalized_data_dir=""
+        normalized_data_dir=$(normalize_posix_path "$DATA_DIR")
 
-        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
-            local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$normalized_data_dir/"* ]]; then
+            local sqlite_relative_path="${sqlite_file#"$normalized_data_dir"/}"
             rsync_args+=(--exclude "$sqlite_relative_path")
             rsync_args+=(--exclude "${sqlite_relative_path}-wal")
             rsync_args+=(--exclude "${sqlite_relative_path}-shm")
@@ -1594,8 +1589,8 @@ backup_command() {
         if ! rsync "${rsync_args[@]}" "$DATA_DIR/" "$temp_dir/pasarguard_data/" >>"$log_file" 2>&1; then
             error_messages+=("Failed to copy data directory.")
             echo "Failed to copy data directory" >>"$log_file"
-        elif [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$DATA_DIR/"* ]]; then
-            local sqlite_relative_path="${sqlite_file#$DATA_DIR/}"
+        elif [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ] && [[ "$sqlite_file" == "$normalized_data_dir/"* ]]; then
+            local sqlite_relative_path="${sqlite_file#"$normalized_data_dir"/}"
             rm -f "$temp_dir/pasarguard_data/$sqlite_relative_path" \
                 "$temp_dir/pasarguard_data/${sqlite_relative_path}-wal" \
                 "$temp_dir/pasarguard_data/${sqlite_relative_path}-shm" 2>>"$log_file" || true
@@ -1683,6 +1678,10 @@ backup_command() {
     fi
 
     if [ ${#error_messages[@]} -gt 0 ]; then
+        rm -f "$backup_file"
+        find "$backup_dir" -maxdepth 1 -type f \
+            \( -name "backup_${timestamp}.z[0-9][0-9]" -o -name "backup_${timestamp}.part[0-9][0-9].zip" \) \
+            -delete 2>/dev/null || true
         keep_log_file=true
         colorized_echo red "Backup completed with errors:"
         for error in "${error_messages[@]}"; do
@@ -1712,7 +1711,7 @@ backup_command() {
         done
     fi
     if [ -f "$ENV_FILE" ]; then
-        send_backup_to_telegram "$backup_file"
+        send_backup_to_telegram "$timestamp"
     fi
     cleanup_backup_command
 }

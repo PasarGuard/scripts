@@ -82,6 +82,18 @@ assert_eq "$(stat -c '%a' "$secret_new")" "600" "harden_secret_file: appended co
 # Empty path is rejected without creating anything.
 if harden_secret_file ""; then fail "harden_secret_file: rejects empty path"; else pass "harden_secret_file: rejects empty path"; fi
 
+# --- SQLite SQLAlchemy URL helpers ---
+assert_eq "$(sqlite_database_path_from_url 'sqlite:///db.sqlite3')" "db.sqlite3" \
+    "sqlite_database_path_from_url: relative path"
+assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3')" \
+    "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: absolute path"
+assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite://///var/lib/pasarguard/db.sqlite3')" \
+    "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: legacy five-slash path"
+assert_eq "$(sqlite_database_path_from_url 'sqlite:////var/lib/pasarguard/db.sqlite3?mode=ro#fragment')" \
+    "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: strips query and fragment"
+assert_eq "$(sqlite_absolute_database_url 'sqlite+aiosqlite' '/var/lib/pasarguard/db.sqlite3')" \
+    "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3" "sqlite_absolute_database_url: exactly four slashes"
+
 # --- get_script_commit_sha & print_script_execution_header ---
 assert_eq "$(get_script_commit_sha "$WORK_DIR" "a23123f03978989e95d257beb9de0c5ad9da6e70")" \
     "a23123f03978989e95d257beb9de0c5ad9da6e70" "get_script_commit_sha: returns baked-in SHA"

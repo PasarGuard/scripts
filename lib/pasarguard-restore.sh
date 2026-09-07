@@ -253,6 +253,7 @@ restore_command() {
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
     local sqlite_basename=""
+    local sqlite_backup_source=""
 
     redact_database_url() {
         local url="$1"
@@ -684,17 +685,7 @@ restore_command() {
     if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
         db_type="sqlite"
         colorized_echo green "✓ Detected SQLite database"
-        local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
-        sqlite_url_part="${sqlite_url_part%%\?*}"
-        sqlite_url_part="${sqlite_url_part%%#*}"
-
-        if [[ "$sqlite_url_part" =~ ^//(.*)$ ]]; then
-            sqlite_file="/${BASH_REMATCH[1]}"
-        elif [[ "$sqlite_url_part" =~ ^/(.*)$ ]]; then
-            sqlite_file="/${BASH_REMATCH[1]}"
-        else
-            sqlite_file="$sqlite_url_part"
-        fi
+        sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL")
         colorized_echo blue "Database file: $sqlite_file"
     elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mariadb[^:]*:// ]]; then
@@ -816,15 +807,14 @@ restore_command() {
     case $db_type in
     sqlite)
         sqlite_basename=$(basename "$sqlite_file")
-        local backup_source=""
 
         if [ -f "$temp_restore_dir/$sqlite_basename" ]; then
-            backup_source="$temp_restore_dir/$sqlite_basename"
+            sqlite_backup_source="$temp_restore_dir/$sqlite_basename"
         elif [ -f "$temp_restore_dir/db_backup.sqlite" ]; then
-            backup_source="$temp_restore_dir/db_backup.sqlite"
+            sqlite_backup_source="$temp_restore_dir/db_backup.sqlite"
         fi
 
-        if [ -z "$backup_source" ]; then
+        if [ -z "$sqlite_backup_source" ]; then
             colorized_echo red "SQLite backup file not found in backup archive (looked for $sqlite_basename or db_backup.sqlite)."
             rm -rf "$temp_restore_dir"
             exit 1
@@ -834,15 +824,6 @@ restore_command() {
 
         if [ -f "$sqlite_file" ]; then
             cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
-        fi
-
-        if cp "$backup_source" "$sqlite_file" 2>>"$log_file"; then
-            colorized_echo green "SQLite database restored successfully."
-        else
-            colorized_echo red "Failed to restore SQLite database."
-            echo "SQLite restore failed" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
         fi
         ;;
 
@@ -1160,6 +1141,22 @@ restore_command() {
         colorized_echo green "Data directory restored to $DATA_DIR."
     else
         colorized_echo yellow "No pasarguard_data directory found in backup. Skipping data restore."
+    fi
+
+    # The data directory in legacy archives may contain a raw SQLite main file
+    # and WAL. Apply the consistent snapshot only after that directory has been
+    # restored so the raw copy can never overwrite the authoritative backup.
+    if [ "$db_type" = "sqlite" ]; then
+        mkdir -p "$(dirname "$sqlite_file")"
+        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
+        if cp "$sqlite_backup_source" "$sqlite_file" 2>>"$log_file"; then
+            colorized_echo green "SQLite database restored successfully."
+        else
+            colorized_echo red "Failed to restore SQLite database."
+            echo "SQLite restore failed" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
     fi
 
     # Restore app directory files (full app backup support)
