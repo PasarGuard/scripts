@@ -83,6 +83,8 @@ assert_eq "$(stat -c '%a' "$secret_new")" "600" "harden_secret_file: appended co
 if harden_secret_file ""; then fail "harden_secret_file: rejects empty path"; else pass "harden_secret_file: rejects empty path"; fi
 
 # --- SQLite SQLAlchemy URL helpers ---
+assert_eq "$(normalize_posix_path '/var/lib/pasarguard///')" "/var/lib/pasarguard" \
+    "normalize_posix_path: removes repeated trailing slashes"
 assert_eq "$(sqlite_database_path_from_url 'sqlite:///db.sqlite3')" "db.sqlite3" \
     "sqlite_database_path_from_url: relative path"
 assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3')" \

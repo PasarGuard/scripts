@@ -44,9 +44,9 @@ normalize_posix_path() {
     while [[ "$path" == //* ]]; do
         path="${path#/}"
     done
-    if [ "$path" != "/" ]; then
+    while [[ "$path" != "/" && "$path" == */ ]]; do
         path="${path%/}"
-    fi
+    done
 
     printf '%s\n' "$path"
 }
