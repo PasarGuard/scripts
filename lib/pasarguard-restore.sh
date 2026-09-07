@@ -1705,8 +1705,8 @@ restore_command() {
         else
             colorized_echo red "Failed to restore SQLite database."
             echo "SQLite restore failed" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
+            up_pasarguard || echo "Failed to restart pasarguard after SQLite restore failure" >>"$log_file"
+            cleanup_and_exit_restore_error 1
         fi
     fi
 
