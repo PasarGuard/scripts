@@ -513,6 +513,35 @@ mkdir -p "$PGL_DIR/pg_dump"
 touch "$PGL_DIR/pg_dump/manifest.tsv"
 assert_eq "$(pg_backup_layout "$PGL_DIR")" "multi"  "layout: manifest present -> multi (precedence)"
 
+SINGLE_TS_DIR="$WORK_DIR/single-timescale"
+mkdir -p "$SINGLE_TS_DIR"
+printf '%s\n' \
+    '-- PostgreSQL database dump' \
+    'CREATE TABLE metrics (time timestamptz);' \
+    '-- PostgreSQL database dump complete' >"$SINGLE_TS_DIR/db_backup.sql"
+printf '%s\n' '2.27.2' >"$SINGLE_TS_DIR/db_backup.timescaledb-version"
+assert_true "single_ts: versioned dump promoted to manifest" \
+    pg_promote_timescaledb_single_backup "$SINGLE_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$SINGLE_TS_DIR/pg_dump/manifest.tsv")" "2.27.2" "single_ts: source version recorded"
+assert_true "single_ts: promoted artifact validates" postgres_backup_looks_restorable "$SINGLE_TS_DIR" "appdb"
+
+NOEXT_TS_DIR="$WORK_DIR/single-timescale-no-extension"
+mkdir -p "$NOEXT_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$NOEXT_TS_DIR/db_backup.sql"
+printf '%s\n' 'none' >"$NOEXT_TS_DIR/db_backup.timescaledb-version"
+assert_true "single_ts: explicit no-extension dump promoted" \
+    pg_promote_timescaledb_single_backup "$NOEXT_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f3 "$NOEXT_TS_DIR/pg_dump/manifest.tsv")" "0" "single_ts: no-extension manifest uses PostgreSQL path"
+assert_eq "$(cut -f5 "$NOEXT_TS_DIR/pg_dump/manifest.tsv")" "" "single_ts: no fake extension version recorded"
+assert_true "single_ts: no-extension artifact validates" postgres_backup_looks_restorable "$NOEXT_TS_DIR" "appdb"
+
+UNVERSIONED_TS_DIR="$WORK_DIR/unversioned-timescale"
+mkdir -p "$UNVERSIONED_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$UNVERSIONED_TS_DIR/db_backup.sql"
+unset TIMESCALEDB_BACKUP_VERSION 2>/dev/null || true
+assert_false "single_ts: unversioned legacy dump fails safely" \
+    pg_promote_timescaledb_single_backup "$UNVERSIONED_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+
 # -----------------------------------------------------------------------
 # pg_filter_timescaledb_extension_lines
 # -----------------------------------------------------------------------
@@ -525,11 +554,91 @@ _ts_expected=$(printf '%s\n' "CREATE TABLE foo (id int);" "INSERT INTO foo VALUE
 assert_eq "$_ts_out" "$_ts_expected" "ts_filter: removes timescaledb extension lines, keeps rest"
 
 # -----------------------------------------------------------------------
+# pg_filter_global_passwords
+# -----------------------------------------------------------------------
+_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN PASSWORD 'SCRAM-SHA-256\$4096:salt\$stored:server' VALID UNTIL 'infinity';" \
+    "ALTER ROLE disabled PASSWORD NULL NOSUPERUSER;" \
+    "GRANT appuser TO postgres;" | pg_filter_global_passwords)
+_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN VALID UNTIL 'infinity';" \
+    "ALTER ROLE disabled NOSUPERUSER;" \
+    "GRANT appuser TO postgres;")
+assert_eq "$_globals_out" "$_globals_expected" "global_filter: strips password verifiers and keeps role attributes/grants"
+assert_false "global_filter: no PASSWORD keyword remains" grep -qE '[[:space:]]PASSWORD[[:space:]]' <<<"$_globals_out"
+
+_encrypted_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN ENCRYPTED PASSWORD 'SCRAM-SHA-256\$4096:salt\$stored:server' VALID UNTIL 'infinity';" \
+    "ALTER ROLE dev WITH LOGIN UNENCRYPTED PASSWORD 'plain-pass' NOSUPERUSER;" | pg_filter_global_passwords)
+_encrypted_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN VALID UNTIL 'infinity';" \
+    "ALTER ROLE dev WITH LOGIN NOSUPERUSER;")
+assert_eq "$_encrypted_globals_out" "$_encrypted_globals_expected" "global_filter: strips ENCRYPTED and UNENCRYPTED password verifiers cleanly"
+assert_false "global_filter: no ENCRYPTED keyword remains" grep -qE '[[:space:]]ENCRYPTED([[:space:]]|;)' <<<"$_encrypted_globals_out"
+assert_false "global_filter: no UNENCRYPTED keyword remains" grep -qE '[[:space:]]UNENCRYPTED([[:space:]]|;)' <<<"$_encrypted_globals_out"
+
+_destination_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH NOSUPERUSER PASSWORD 'old-password';" \
+    "CREATE ROLE worker;" \
+    "ALTER ROLE worker WITH LOGIN PASSWORD 'worker-password';" \
+    "GRANT worker TO appuser;" | pg_filter_globals_for_destination "appuser")
+_destination_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE worker;" \
+    "ALTER ROLE worker WITH LOGIN;" \
+    "GRANT worker TO appuser;")
+assert_eq "$_destination_globals_out" "$_destination_globals_expected" "global_filter: preserves the destination role definition and grants"
+
+_quoted_destination_globals_out=$(printf '%s\n' \
+    "CREATE ROLE \"app user\";" \
+    "ALTER ROLE \"app user\" WITH NOSUPERUSER PASSWORD 'old-password';" \
+    "CREATE ROLE worker;" \
+    "GRANT worker TO \"app user\";" | pg_filter_globals_for_destination "app user")
+_quoted_destination_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE worker;" \
+    "GRANT worker TO \"app user\";")
+assert_eq "$_quoted_destination_globals_out" "$_quoted_destination_globals_expected" "global_filter: preserves quoted destination role with spaces"
+
+# -----------------------------------------------------------------------
 # timescaledb_version_matches
 # -----------------------------------------------------------------------
 assert_true  "ts_match: equal"           timescaledb_version_matches "2.27.2" "2.27.2"
 assert_false "ts_match: differ"          timescaledb_version_matches "2.27.2" "2.15.0"
 assert_false "ts_match: source vs empty" timescaledb_version_matches "2.27.2" ""
+assert_true  "ts_version: release is safe" timescaledb_version_is_safe "2.28.3"
+assert_true  "ts_version: prerelease is safe" timescaledb_version_is_safe "2.28.0-rc1"
+assert_false "ts_version: SQL is rejected" timescaledb_version_is_safe "2.28'; DROP DATABASE appdb; --"
+assert_false "ts_version: image fragment is rejected" timescaledb_version_is_safe "2.28/evil"
+
+TS_PREP_DIR="$WORK_DIR/ts-prepare/source/pg_dump"
+mkdir -p "$TS_PREP_DIR"
+printf '%s\n' '-- PostgreSQL database cluster dump complete' >"$TS_PREP_DIR/globals.sql"
+printf '%s\n' 'CREATE TABLE metrics (id int);' '-- PostgreSQL database dump complete' >"$TS_PREP_DIR/db-001.sql"
+printf 'appdb\tappuser\t1\tdb-001.sql\t2.28.3\n' >"$TS_PREP_DIR/manifest.tsv"
+MOCK_COMPAT_PULL=false
+docker() {
+    case "$*" in
+        *"default_version FROM pg_available_extensions"*) printf '2.28.3\n' ;;
+        *"SHOW server_version_num"*) printf '170010\n' ;;
+        *" pull "*) MOCK_COMPAT_PULL=true; return 1 ;;
+        *) return 1 ;;
+    esac
+}
+assert_true "ts_prepare: matching destination needs no conversion" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$PG_PREPARED_DUMP_DIR" "$TS_PREP_DIR" "ts_prepare: original validated dump retained"
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: compatibility image not pulled for matching versions"
+
+printf 'appdb\tappuser\t1\tdb-001.sql\t\n' >"$TS_PREP_DIR/manifest.tsv"
+assert_false "ts_prepare: versionless Timescale manifest fails closed" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+unset -f docker
 
 # -----------------------------------------------------------------------
 # format_timescaledb_mismatch_help
@@ -538,11 +647,10 @@ contains() { [[ "$1" == *"$2"* ]]; }
 _help=$(format_timescaledb_mismatch_help "pasarguard" "2.27.2" "2.15.0" "17" "pasarguard")
 assert_true "help: shows source version"  contains "$_help" "timescaledb 2.27.2"
 assert_true "help: shows target version"  contains "$_help" "timescaledb 2.15.0"
-assert_true "help: exact image tag"       contains "$_help" "timescale/timescaledb:2.27.2-pg17"
+assert_true "help: compatibility image"   contains "$_help" "timescale/timescaledb-ha:pg17-ts2.15-all"
 assert_true "help: data untouched"        contains "$_help" "untouched"
-assert_true "help: this-server warning"   contains "$_help" "do NOT run this on your main server"
-assert_true "help: uses edit subcommand"  contains "$_help" "pasarguard edit"
-assert_true "help: uses restart subcmd"   contains "$_help" "pasarguard restart"
+assert_true "help: automatic conversion"  contains "$_help" "Automatic compatibility conversion"
+assert_true "help: retries restore"        contains "$_help" "pasarguard restore"
 
 _help2=$(format_timescaledb_mismatch_help "db" "2.27.2" "" "" "pasarguard")
 assert_true "help: target not installed"  contains "$_help2" "not installed"
