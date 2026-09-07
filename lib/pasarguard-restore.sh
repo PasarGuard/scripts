@@ -331,9 +331,16 @@ pg_prepare_timescaledb_compatible_dumps() {
     local ready=false
     local waited=0
     while [ "$waited" -lt 180 ]; do
-        if docker exec "$compat_container" pg_isready -q -U "$admin_user" -d postgres >/dev/null 2>&1; then
-            ready=true
-            break
+        if docker exec "$compat_container" pg_isready -q -U "$admin_user" -d postgres >/dev/null 2>&1 && \
+           docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+               psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+            # Verify the container is stable and not in a temporary initdb/bootstrap restart window
+            sleep 3
+            if docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+                ready=true
+                break
+            fi
         fi
         local container_status=""
         container_status=$(docker inspect -f '{{.State.Status}}' "$compat_container" 2>/dev/null || true)
@@ -341,8 +348,8 @@ pg_prepare_timescaledb_compatible_dumps() {
             echo "Temporary TimescaleDB compatibility container stopped unexpectedly with status: $container_status" >>"$log_file"
             break
         fi
-        sleep 1
-        waited=$((waited + 1))
+        sleep 2
+        waited=$((waited + 2))
     done
     if [ "$ready" != true ]; then
         echo "Temporary TimescaleDB compatibility container did not become ready" >>"$log_file"
@@ -362,12 +369,21 @@ pg_prepare_timescaledb_compatible_dumps() {
     local required_version available_count
     while IFS= read -r required_version; do
         [ -n "$required_version" ] || continue
-        available_count=$(docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
-            psql -X -U "$admin_user" -d postgres -At \
-            -c "SELECT count(*) FROM pg_available_extension_versions WHERE name = 'timescaledb' AND version = '$required_version';" \
-            2>>"$log_file") || available_count="0"
+        available_count="0"
+        local check_try=0
+        while [ "$check_try" -lt 15 ]; do
+            if available_count=$(docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -U "$admin_user" -d postgres -At \
+                -c "SELECT count(*) FROM pg_available_extension_versions WHERE name = 'timescaledb' AND version = '$required_version';" \
+                2>>"$log_file") && [ "$available_count" = "1" ]; then
+                break
+            fi
+            sleep 2
+            check_try=$((check_try + 1))
+        done
         if [ "$available_count" != "1" ]; then
             echo "Compatibility image $compat_image does not contain TimescaleDB $required_version" >>"$log_file"
+            docker logs "$compat_container" >>"$log_file" 2>&1 || true
             finish_timescaledb_compat_cleanup
             return 1
         fi
@@ -416,7 +432,10 @@ pg_prepare_timescaledb_compatible_dumps() {
         colorized_echo blue "Converting '$dbname' from TimescaleDB $source_version to $target_version..."
         if ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
             psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d postgres \
-            -c "CREATE DATABASE \"$compat_db\" OWNER \"${admin_user//\"/\"\"}\";" >>"$log_file" 2>&1 ||
+            -c "CREATE DATABASE \"$compat_db\" TEMPLATE template0 OWNER \"${admin_user//\"/\"\"}\";" >>"$log_file" 2>&1 ||
+            ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" \
+                -c "DROP EXTENSION IF EXISTS timescaledb CASCADE;" >>"$log_file" 2>&1 ||
             ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
                 psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" \
                 -c "CREATE EXTENSION timescaledb VERSION '$source_version';" >>"$log_file" 2>&1 ||
@@ -455,6 +474,9 @@ pg_prepare_timescaledb_compatible_dumps() {
             psql -X -U "$admin_user" -d postgres -c "DROP DATABASE \"$compat_db\";" >>"$log_file" 2>&1 || true
     done <"$manifest"
 
+    if [ "$converted_ok" != true ]; then
+        docker logs "$compat_container" >>"$log_file" 2>&1 || true
+    fi
     finish_timescaledb_compat_cleanup
     if [ "$converted_ok" != true ] || ! postgres_backup_looks_restorable "$(dirname "$output_dir")" "$expected_database"; then
         echo "TimescaleDB compatibility conversion failed validation" >>"$log_file"

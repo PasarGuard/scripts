@@ -381,7 +381,7 @@ setup_mysql_container() {
 
     wait_for_mysql_root_query mysql "$CONTAINER_NAME"
 
-    docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mysql -uroot -D "$DB_NAME" \
+    wait_for_command 30 docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mysql -uroot -D "$DB_NAME" \
         -e "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value VARCHAR(255) NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$EXPECTED_DB_VALUE');"
 }
 
@@ -395,7 +395,7 @@ setup_mariadb_container() {
 
     wait_for_mysql_root_query mariadb "$CONTAINER_NAME"
 
-    docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mariadb -uroot "$DB_NAME" \
+    wait_for_command 30 docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mariadb -uroot "$DB_NAME" \
         -e "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value VARCHAR(255) NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$EXPECTED_DB_VALUE');"
 }
 
@@ -435,12 +435,12 @@ setup_postgresql_container() {
         pg_isready -U "$DB_USER" -d "$DB_NAME"
 
     if [ "$DB_TYPE" = "timescaledb" ]; then
-        docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
+        wait_for_command 30 docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
             psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" \
-            -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+            -c "DO \$\$ BEGIN CREATE EXTENSION IF NOT EXISTS timescaledb; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END \$\$;"
     fi
 
-    docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
+    wait_for_command 30 docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
         psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" \
         -c "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$initial_value');"
 }
