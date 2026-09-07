@@ -14,6 +14,7 @@ on:
       - "lib/env.sh"
       - "lib/system.sh"
       - "tests/backup_restore_roundtrip.sh"
+      - "tests/unit_pasarguard.sh"
   pull_request:
     paths:
       - ".github/workflows/backup-restore.yml"
@@ -24,6 +25,7 @@ on:
       - "lib/env.sh"
       - "lib/system.sh"
       - "tests/backup_restore_roundtrip.sh"
+      - "tests/unit_pasarguard.sh"
   workflow_dispatch:
 
 jobs:
@@ -54,3 +56,23 @@ jobs:
 
       - name: Run backup/restore round-trip
         run: bash tests/backup_restore_roundtrip.sh "${{ matrix.database }}" "${{ matrix.archive_mode }}"
+
+  timescaledb-version-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync zip unzip sqlite3
+
+      - name: Restore TimescaleDB 2.27 backup into 2.28 destination
+        env:
+          TIMESCALE_SOURCE_IMAGE: timescale/timescaledb:2.27.2-pg17
+          TIMESCALE_TARGET_IMAGE: timescale/timescaledb:2.28.3-pg17
+          TIMESCALEDB_COMPAT_IMAGE: timescale/timescaledb-ha:pg17-ts2.28-all
+        run: bash tests/backup_restore_roundtrip.sh timescaledb single

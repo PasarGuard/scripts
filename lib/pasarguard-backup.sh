@@ -1074,6 +1074,31 @@ pg_dump_all_user_databases() {
     return 0
 }
 
+# Record the extension version beside a legacy single-database TimescaleDB
+# dump. pg_dump itself does not preserve which extension version must be
+# created first, so this small sidecar is required for automatic cross-version
+# restore when the all-databases layout is unavailable.
+write_timescaledb_single_dump_version() {
+    local container_name="$1"
+    local backup_user="$2"
+    local backup_password="$3"
+    local database_name="$4"
+    local temp_dir="$5"
+    local log_file="$6"
+    local source_version=""
+
+    if ! source_version=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+        psql -X -U "$backup_user" -d "$database_name" -At \
+        -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';" \
+        2>>"$log_file") ||
+        [[ ! "$source_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9]+)*$ ]]; then
+        echo "Could not record TimescaleDB version for single-database dump" >>"$log_file"
+        return 1
+    fi
+
+    printf '%s\n' "$source_version" >"$temp_dir/db_backup.timescaledb-version"
+}
+
 backup_command() {
     colorized_echo blue "Starting backup process..."
 
@@ -1644,6 +1669,9 @@ backup_command() {
                                 if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                     colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
                                     error_messages+=("TimescaleDB dump failed for database '$db_name'.")
+                                elif ! write_timescaledb_single_dump_version "$container_name" "$backup_user" "$backup_password" "$db_name" "$temp_dir" "$log_file"; then
+                                    colorized_echo red "TimescaleDB version metadata could not be created."
+                                    error_messages+=("TimescaleDB version metadata could not be created for '$db_name'.")
                                 else
                                     colorized_echo green "TimescaleDB backup completed successfully"
                                 fi
@@ -1693,8 +1721,29 @@ backup_command() {
 
     colorized_echo blue "Copying app directory..."
     if [ -d "$APP_DIR" ]; then
-        # Use rsync to copy the entire app directory, excluding the backup folder
-        if ! rsync -av --exclude 'backup' "$APP_DIR/" "$temp_dir/" >>"$log_file" 2>&1; then
+        # Database artifacts are staged before app files. Old restore versions
+        # could leave dumps in APP_DIR; copying those over staging would replace
+        # today's fresh dump with a complete-but-stale dump that still passes
+        # structural validation.
+        local app_rsync_args=(
+            -av
+            --exclude 'backup'
+            --exclude 'db_backup.sql'
+            --exclude 'db_backup.sqlite'
+            --exclude 'db_backup.timescaledb-version'
+            --exclude 'pg_dump'
+            --exclude 'timescaledb-compatible'
+            --exclude 'pasarguard_restore_error.log'
+        )
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ]; then
+            local app_sqlite_basename=""
+            app_sqlite_basename=$(basename "$sqlite_file")
+            app_rsync_args+=(--exclude "$app_sqlite_basename")
+            app_rsync_args+=(--exclude "${app_sqlite_basename}-wal")
+            app_rsync_args+=(--exclude "${app_sqlite_basename}-shm")
+            app_rsync_args+=(--exclude "${app_sqlite_basename}-journal")
+        fi
+        if ! rsync "${app_rsync_args[@]}" "$APP_DIR/" "$temp_dir/" >>"$log_file" 2>&1; then
             error_messages+=("Failed to copy app directory.")
             echo "Failed to copy app directory" >>"$log_file"
         fi

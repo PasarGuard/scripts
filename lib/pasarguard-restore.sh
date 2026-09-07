@@ -73,10 +73,89 @@ pg_backup_layout() {
     fi
 }
 
+# Convert a versioned single-database TimescaleDB backup into the same manifest
+# layout used by new multi-database backups. Version lookup order supports new
+# sidecars, an exact version pinned in the archived compose file, and an
+# explicit override for old archives that recorded neither.
+pg_promote_timescaledb_single_backup() {
+    local restore_dir="$1"
+    local database_name="$2"
+    local database_owner="$3"
+    local log_file="$4"
+    local requested_source_version="${5:-}"
+    local source_version=""
+
+    if [ -s "$restore_dir/db_backup.timescaledb-version" ]; then
+        source_version=$(head -n 1 "$restore_dir/db_backup.timescaledb-version" | tr -d '[:space:]')
+    elif [ -n "$requested_source_version" ]; then
+        source_version="$requested_source_version"
+    elif [ -s "$restore_dir/docker-compose.yml" ]; then
+        source_version=$(sed -nE 's#^[[:space:]]*image:[[:space:]]*timescale/timescaledb:([0-9]+([.][0-9]+){1,3})(-pg[0-9]+.*)?[[:space:]]*$#\1#p' \
+            "$restore_dir/docker-compose.yml" | head -n 1)
+    fi
+
+    if ! timescaledb_version_is_safe "$source_version"; then
+        echo "Single-database TimescaleDB backup has no safe source-version metadata" >>"$log_file"
+        return 1
+    fi
+    case "${database_name}${database_owner}" in
+        *$'\t'* | *$'\n'*) return 1 ;;
+    esac
+    [ -n "$database_name" ] && [ -n "$database_owner" ] || return 1
+
+    local dump_dir="$restore_dir/pg_dump"
+    mkdir -p "$dump_dir" || return 1
+    cp "$restore_dir/db_backup.sql" "$dump_dir/db-001.sql" || return 1
+
+    local owner_ident="${database_owner//\"/\"\"}"
+    printf '%s\n' \
+        '-- PasarGuard synthetic globals for a legacy single-database backup' \
+        "CREATE ROLE \"$owner_ident\";" \
+        '-- PostgreSQL database cluster dump complete' >"$dump_dir/globals.sql"
+    printf '%s\t%s\t1\tdb-001.sql\t%s\n' \
+        "$database_name" "$database_owner" "$source_version" >"$dump_dir/manifest.tsv"
+    return 0
+}
+
 # Strip "DROP/CREATE EXTENSION ... timescaledb" statements from a dump on stdin.
 # These would undo the timescaledb_pre_restore() setup during restore.
 pg_filter_timescaledb_extension_lines() {
     grep -v -E '^\s*(DROP|CREATE)\s+EXTENSION\s+(IF\s+(EXISTS|NOT\s+EXISTS)\s+)?timescaledb\b' || true
+}
+
+# Keep cluster roles and grants from pg_dumpall, but never restore password
+# verifiers from another installation. Restoring an archived ALTER ROLE ...
+# PASSWORD silently changes the destination password while its .env still has
+# the current password, locking the application out after an otherwise
+# successful restore.
+pg_filter_global_passwords() {
+    sed -E \
+        -e "s/[[:space:]]+PASSWORD[[:space:]]+'([^']|'')*'//g" \
+        -e 's/[[:space:]]+PASSWORD[[:space:]]+NULL//g'
+}
+
+# In addition to removing every archived password, keep the destination admin
+# role itself entirely unchanged. pg_dumpall emits CREATE ROLE followed by
+# ALTER ROLE; the latter succeeds for an existing role and could otherwise
+# remove destination privileges or change connection limits.
+pg_filter_globals_for_destination() {
+    local destination_role="$1"
+    pg_filter_global_passwords | awk -v role="$destination_role" '
+        BEGIN {
+            quoted_role = role
+            gsub(/"/, "\"\"", quoted_role)
+            quoted_role = "\"" quoted_role "\""
+        }
+        {
+            statement_role = $3
+            sub(/;$/, "", statement_role)
+            if (($1 == "CREATE" || $1 == "ALTER") && $2 == "ROLE" &&
+                (statement_role == role || statement_role == quoted_role)) {
+                next
+            }
+            print
+        }
+    '
 }
 
 # True (0) when two timescaledb version strings are identical. Restore uses this
@@ -84,6 +163,243 @@ pg_filter_timescaledb_extension_lines() {
 # version (legacy backup) as "do not gate".
 timescaledb_version_matches() {
     [ "$1" = "$2" ]
+}
+
+timescaledb_version_is_safe() {
+    [[ "$1" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9]+)*$ ]]
+}
+
+cleanup_timescaledb_compat_container() {
+    local container_name="$1"
+    local volume_name="$2"
+
+    [ -n "$container_name" ] && docker rm -f "$container_name" >/dev/null 2>&1 || true
+    [ -n "$volume_name" ] && docker volume rm "$volume_name" >/dev/null 2>&1 || true
+}
+
+# Convert cross-version TimescaleDB dumps before the destination is changed.
+# The temporary `pgNN-all` image contains historical extension versions: each
+# mismatched database is restored at its source version, upgraded to the exact
+# target version, and dumped again. The caller may then use the normal restore
+# path against a dump whose extension version matches the destination.
+#
+# On success PG_PREPARED_DUMP_DIR is set to either source_dir (no conversion was
+# needed) or output_dir (every mismatched dump converted and validated).
+pg_prepare_timescaledb_compatible_dumps() {
+    local destination_container="$1"
+    local admin_user="$2"
+    local admin_password="$3"
+    local source_dir="$4"
+    local output_dir="$5"
+    local log_file="$6"
+    local expected_database="${7:-}"
+    local requested_compat_image="${8:-}"
+    local manifest="$source_dir/manifest.tsv"
+
+    PG_PREPARED_DUMP_DIR="$source_dir"
+    [ -s "$manifest" ] || return 1
+
+    local has_versioned_timescale=false
+    local needs_conversion=false
+    local dbname owner has_ts filename source_version
+    while IFS=$'\t' read -r dbname owner has_ts filename source_version; do
+        [ -n "$dbname" ] || continue
+        if [ "$has_ts" = "1" ] && [ -z "$source_version" ]; then
+            echo "TimescaleDB database '$dbname' has no source-version metadata" >>"$log_file"
+            return 1
+        elif [ "$has_ts" = "1" ]; then
+            has_versioned_timescale=true
+            if ! timescaledb_version_is_safe "$source_version"; then
+                echo "Unsafe TimescaleDB version in manifest: $source_version" >>"$log_file"
+                return 1
+            fi
+        fi
+    done <"$manifest"
+
+    [ "$has_versioned_timescale" = true ] || return 0
+
+    local target_version=""
+    local server_version_num=""
+    if ! target_version=$(docker exec -e PGPASSWORD="$admin_password" "$destination_container" \
+        psql -X -U "$admin_user" -d postgres -At \
+        -c "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb';" \
+        2>>"$log_file") || ! timescaledb_version_is_safe "$target_version"; then
+        echo "Could not determine a safe destination TimescaleDB version" >>"$log_file"
+        return 1
+    fi
+    if ! server_version_num=$(docker exec -e PGPASSWORD="$admin_password" "$destination_container" \
+        psql -X -U "$admin_user" -d postgres -At -c "SHOW server_version_num;" \
+        2>>"$log_file") || [[ ! "$server_version_num" =~ ^[0-9]+$ ]]; then
+        echo "Could not determine destination PostgreSQL major version" >>"$log_file"
+        return 1
+    fi
+
+    while IFS=$'\t' read -r dbname owner has_ts filename source_version; do
+        [ -n "$dbname" ] || continue
+        if [ "$has_ts" = "1" ] && [ -n "$source_version" ] && [ "$source_version" != "$target_version" ]; then
+            needs_conversion=true
+            break
+        fi
+    done <"$manifest"
+    [ "$needs_conversion" = true ] || return 0
+
+    local pg_major=$((server_version_num / 10000))
+    local target_series="${target_version%.*}"
+    local compat_image="${requested_compat_image:-timescale/timescaledb-ha:pg${pg_major}-ts${target_series}-all}"
+    local compat_suffix="${$}-${RANDOM}-$(date +%s)"
+    local compat_container="pasarguard-ts-compat-${compat_suffix}"
+    local compat_volume=""
+
+    colorized_echo blue "Preparing TimescaleDB $target_version-compatible dumps before changing the destination..."
+    colorized_echo blue "Pulling temporary compatibility image: $compat_image"
+    if ! docker pull "$compat_image" >>"$log_file" 2>&1; then
+        echo "Could not pull TimescaleDB compatibility image: $compat_image" >>"$log_file"
+        return 1
+    fi
+    if ! compat_volume=$(docker volume create --label "com.pasarguard.restore=$compat_suffix" 2>>"$log_file"); then
+        echo "Could not create temporary TimescaleDB compatibility volume" >>"$log_file"
+        return 1
+    fi
+    if ! docker run -d --name "$compat_container" --restart=no \
+        -e POSTGRES_USER="$admin_user" \
+        -e POSTGRES_PASSWORD="$admin_password" \
+        -e POSTGRES_DB=postgres \
+        -v "$compat_volume:/home/postgres/pgdata/data" \
+        "$compat_image" >>"$log_file" 2>&1; then
+        echo "Could not start temporary TimescaleDB compatibility container" >>"$log_file"
+        cleanup_timescaledb_compat_container "" "$compat_volume"
+        return 1
+    fi
+
+    local ready=false
+    local attempt=0
+    for attempt in $(seq 1 45); do
+        if docker exec "$compat_container" pg_isready -q -U "$admin_user" -d postgres >/dev/null 2>&1; then
+            ready=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$ready" != true ]; then
+        echo "Temporary TimescaleDB compatibility container did not become ready" >>"$log_file"
+        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        return 1
+    fi
+
+    # Verify every required version exists before doing any conversion work.
+    local required_versions="$target_version"
+    while IFS=$'\t' read -r dbname owner has_ts filename source_version; do
+        [ "$has_ts" = "1" ] && [ -n "$source_version" ] || continue
+        if ! grep -F -x -q "$source_version" <<<"$required_versions"; then
+            required_versions+=$'\n'"$source_version"
+        fi
+    done <"$manifest"
+    local required_version available_count
+    while IFS= read -r required_version; do
+        [ -n "$required_version" ] || continue
+        available_count=$(docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+            psql -X -U "$admin_user" -d postgres -At \
+            -c "SELECT count(*) FROM pg_available_extension_versions WHERE name = 'timescaledb' AND version = '$required_version';" \
+            2>>"$log_file") || available_count="0"
+        if [ "$available_count" != "1" ]; then
+            echo "Compatibility image $compat_image does not contain TimescaleDB $required_version" >>"$log_file"
+            cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+            return 1
+        fi
+    done <<<"$required_versions"
+
+    if ! mkdir -p "$output_dir"; then
+        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        return 1
+    fi
+    cp "$source_dir/globals.sql" "$output_dir/globals.sql" 2>>"$log_file" || {
+        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        rm -rf "$output_dir"
+        return 1
+    }
+    : >"$output_dir/manifest.tsv"
+
+    local filtered_globals="$output_dir/globals.no-passwords.sql"
+    if ! pg_filter_globals_for_destination "$admin_user" <"$source_dir/globals.sql" >"$filtered_globals"; then
+        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        rm -rf "$output_dir"
+        return 1
+    fi
+    docker exec -i -e PGPASSWORD="$admin_password" "$compat_container" \
+        psql -X -U "$admin_user" -d postgres <"$filtered_globals" >>"$log_file" 2>&1 || true
+    rm -f "$filtered_globals"
+
+    local index=0
+    local converted_ok=true
+    while IFS=$'\t' read -r dbname owner has_ts filename source_version; do
+        [ -n "$dbname" ] || continue
+        index=$((index + 1))
+        if [ "$has_ts" != "1" ] || [ -z "$source_version" ] || [ "$source_version" = "$target_version" ]; then
+            if ! cp "$source_dir/$filename" "$output_dir/$filename" 2>>"$log_file"; then
+                converted_ok=false
+                break
+            fi
+            if ! printf '%s\t%s\t%s\t%s\t%s\n' "$dbname" "$owner" "$has_ts" "$filename" "$source_version" >>"$output_dir/manifest.tsv"; then
+                converted_ok=false
+                break
+            fi
+            continue
+        fi
+
+        local compat_db="pasarguard_restore_${index}"
+        local filtered_dump="$output_dir/${filename}.source-filtered"
+        colorized_echo blue "Converting '$dbname' from TimescaleDB $source_version to $target_version..."
+        if ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+            psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d postgres \
+            -c "CREATE DATABASE \"$compat_db\" OWNER \"${admin_user//\"/\"\"}\";" >>"$log_file" 2>&1 ||
+            ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" \
+                -c "CREATE EXTENSION timescaledb VERSION '$source_version';" >>"$log_file" 2>&1 ||
+            ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" \
+                -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1; then
+            converted_ok=false
+            break
+        fi
+
+        if ! pg_filter_timescaledb_extension_lines <"$source_dir/$filename" >"$filtered_dump"; then
+            converted_ok=false
+            break
+        fi
+        if ! docker exec -i -e PGPASSWORD="$admin_password" "$compat_container" \
+            psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" <"$filtered_dump" >>"$log_file" 2>&1 ||
+            ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" \
+                -c "SELECT timescaledb_post_restore();" >>"$log_file" 2>&1 ||
+            ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" -d "$compat_db" \
+                -c "ALTER EXTENSION timescaledb UPDATE TO '$target_version';" >>"$log_file" 2>&1 ||
+            ! docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+                pg_dump -U "$admin_user" -d "$compat_db" --clean --if-exists >"$output_dir/$filename" 2>>"$log_file" ||
+            ! postgres_dump_looks_restorable "$output_dir/$filename"; then
+            converted_ok=false
+            rm -f "$filtered_dump"
+            break
+        fi
+        rm -f "$filtered_dump"
+        if ! printf '%s\t%s\t1\t%s\t%s\n' "$dbname" "$owner" "$filename" "$target_version" >>"$output_dir/manifest.tsv"; then
+            converted_ok=false
+            break
+        fi
+        docker exec -e PGPASSWORD="$admin_password" "$compat_container" \
+            psql -X -U "$admin_user" -d postgres -c "DROP DATABASE \"$compat_db\";" >>"$log_file" 2>&1 || true
+    done <"$manifest"
+
+    cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+    if [ "$converted_ok" != true ] || ! postgres_backup_looks_restorable "$(dirname "$output_dir")" "$expected_database"; then
+        echo "TimescaleDB compatibility conversion failed validation" >>"$log_file"
+        rm -rf "$output_dir"
+        return 1
+    fi
+
+    PG_PREPARED_DUMP_DIR="$output_dir"
+    colorized_echo green "TimescaleDB dumps converted to destination version $target_version."
+    return 0
 }
 
 # Operator-facing guidance shown when a backup's timescaledb version does not
@@ -96,20 +412,19 @@ format_timescaledb_mismatch_help() {
     if [ -z "$pg_major" ]; then
         tag_suffix="pgNN   (replace NN with your PostgreSQL major version)"
     fi
+    local target_series="${tgt_ver%.*}"
+    local compat_tag="${tag_suffix}-all"
+    if timescaledb_version_is_safe "$tgt_ver"; then
+        compat_tag="${tag_suffix}-ts${target_series}-all"
+    fi
     printf '%s\n' \
 "TimescaleDB version mismatch for database '$dbname':" \
 "  this backup was taken with timescaledb $src_ver" \
 "  but THIS server has timescaledb $tgt_display" \
+"Automatic compatibility conversion could not be completed." \
 "The restore was stopped BEFORE changing anything - your current data is untouched." \
-"" \
-"To fix, on THIS server (the one you are restoring to):" \
-"  1. Run:  $app_name edit" \
-"  2. Set the timescaledb image to the backup's version:" \
-"         image: timescale/timescaledb:${src_ver}-${tag_suffix}" \
-"  3. Reset ONLY this server's database volume (do NOT run this on your main server):" \
-"         rm -rf /var/lib/postgresql/pasarguard" \
-"  4. Restart:  $app_name restart" \
-"  5. Run the restore again."
+"Required compatibility image: timescale/timescaledb-ha:${compat_tag}" \
+"Check Docker connectivity and the restore log, then run '$app_name restore' again."
 }
 
 # Restore every database listed in <pg_dump_dir>/manifest.tsv. Globals are
@@ -125,6 +440,9 @@ pg_restore_all_user_databases() {
     local admin_password="$5"
     local pg_dump_dir="$6"
     local log_file="$7"
+    local source_app_database="${8:-}"
+    local target_app_database="${9:-}"
+    local target_app_owner="${10:-}"
 
     local manifest="$pg_dump_dir/manifest.tsv"
     if [ ! -s "$manifest" ]; then
@@ -134,8 +452,14 @@ pg_restore_all_user_databases() {
 
     if [ -s "$pg_dump_dir/globals.sql" ]; then
         colorized_echo blue "Restoring global roles and grants..."
+        local filtered_globals="$pg_dump_dir/globals.no-passwords.sql"
+        if ! pg_filter_globals_for_destination "$admin_user" <"$pg_dump_dir/globals.sql" >"$filtered_globals"; then
+            echo "Could not remove archived role passwords from globals.sql" >>"$log_file"
+            return 1
+        fi
         docker exec -i -e PGPASSWORD="$admin_password" "$container_name" \
-            psql -U "$admin_user" -d postgres < "$pg_dump_dir/globals.sql" >>"$log_file" 2>&1 || true
+            psql -X -U "$admin_user" -d postgres <"$filtered_globals" >>"$log_file" 2>&1 || true
+        rm -f "$filtered_globals"
     fi
 
     local total=0 ok=0
@@ -151,28 +475,33 @@ pg_restore_all_user_databases() {
             continue
         fi
 
-        local db_ident="${dbname//\"/\"\"}"
-        local db_sql="${dbname//\'/\'\'}"
-        local owner_ident="${owner//\"/\"\"}"
+        local destination_dbname="$dbname"
+        local destination_owner="$owner"
+        if [ -n "$source_app_database" ] && [ "$dbname" = "$source_app_database" ]; then
+            destination_dbname="${target_app_database:-$dbname}"
+            destination_owner="${target_app_owner:-$owner}"
+        fi
+
+        local db_ident="${destination_dbname//\"/\"\"}"
+        local db_sql="${destination_dbname//\'/\'\'}"
+        local owner_ident="${destination_owner//\"/\"\"}"
         [ -n "$owner_ident" ] || owner_ident="$admin_user"
 
         # TimescaleDB cross-version safety gate. If this backup recorded a
         # timescaledb version, refuse to touch the database unless THIS server's
         # bundled version matches. Runs BEFORE any terminate/DROP so a mismatch
-        # never wipes or half-restores data. (Empty ts_version = legacy backup =
-        # no gate; the single-DB legacy path is unaffected.)
+        # never wipes or half-restores data. The preflight rejects versionless
+        # Timescale manifests before this function is called.
         if [ "$has_ts" = "1" ] && [ -n "$ts_version" ]; then
             # Read THIS server's bundled timescaledb version (read-only). Separate
             # a probe that FAILED (transient docker/psql error -> non-zero exit)
             # from one that SUCCEEDED but returned nothing (the target genuinely
             # has no timescaledb available). Only a successful probe gates the
-            # restore: a failed probe falls back to best-effort (we cannot gate on
-            # information we do not have), while a successful empty result is a
-            # real mismatch (target lacks the extension) and is skipped before any
-            # destructive step.
+            # restore: both a failed probe and a successful empty result fail
+            # closed before any destructive step.
             local target_ts="" probe_ok=0
             if target_ts=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
-                psql -U "$admin_user" -d postgres -At \
+                psql -X -U "$admin_user" -d postgres -At \
                 -c "SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb';" \
                 2>>"$log_file"); then
                 probe_ok=1
@@ -182,19 +511,20 @@ pg_restore_all_user_databases() {
             if [ "$probe_ok" = "1" ] && ! timescaledb_version_matches "$ts_version" "$target_ts"; then
                 local svn="" pg_major=""
                 svn=$(docker exec -e PGPASSWORD="$admin_password" "$container_name" \
-                    psql -U "$admin_user" -d postgres -At -c "SHOW server_version_num;" \
+                    psql -X -U "$admin_user" -d postgres -At -c "SHOW server_version_num;" \
                     2>>"$log_file") || svn=""
                 [ -n "$svn" ] && pg_major=$(( svn / 10000 ))
                 colorized_echo red "$(format_timescaledb_mismatch_help "$dbname" "$ts_version" "$target_ts" "$pg_major" "${APP_NAME:-pasarguard}")"
                 echo "TimescaleDB version mismatch for '$dbname' (backup=$ts_version target=${target_ts:-unavailable}); skipped before any destructive change" >>"$log_file"
                 continue
             elif [ "$probe_ok" != "1" ]; then
-                colorized_echo yellow "Could not read this server's timescaledb version for '$dbname'; the cross-version safety check was skipped and restore will proceed best-effort."
-                echo "Could not read target timescaledb version for '$dbname'; proceeding best-effort (probe failed)" >>"$log_file"
+                colorized_echo red "Could not verify this server's TimescaleDB version for '$dbname'; skipping it before any destructive change."
+                echo "Could not read target timescaledb version for '$dbname'; skipped before destructive change" >>"$log_file"
+                continue
             fi
         fi
 
-        colorized_echo blue "Restoring database '$dbname'..."
+        colorized_echo blue "Restoring database '$dbname' as '$destination_dbname'..."
         docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" -d postgres \
             -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db_sql' AND pid <> pg_backend_pid();" \
             >>"$log_file" 2>&1
@@ -209,29 +539,47 @@ pg_restore_all_user_databases() {
 
         local restored=false
         if [ "$has_ts" = "1" ]; then
-            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$dbname" \
-                -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >>"$log_file" 2>&1
-            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$dbname" \
-                -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1
+            local create_extension_sql="CREATE EXTENSION IF NOT EXISTS timescaledb;"
+            if [ -n "$ts_version" ]; then
+                create_extension_sql="CREATE EXTENSION IF NOT EXISTS timescaledb VERSION '$ts_version';"
+            fi
+            if ! docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -X -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$destination_dbname" \
+                -c "$create_extension_sql" >>"$log_file" 2>&1 ||
+                ! docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -X -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$destination_dbname" \
+                    -c "SELECT timescaledb_pre_restore();" >>"$log_file" 2>&1; then
+                colorized_echo red "Could not prepare TimescaleDB database '$destination_dbname'."
+                continue
+            fi
             local filtered="$pg_dump_dir/${filename}.filtered"
             pg_filter_timescaledb_extension_lines < "$dump_path" > "$filtered" 2>>"$log_file"
             if docker exec -i -e PGPASSWORD="$restore_password" "$container_name" \
-                psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$dbname" < "$filtered" >>"$log_file" 2>&1; then
+                psql -X -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$destination_dbname" < "$filtered" >>"$log_file" 2>&1; then
                 restored=true
             elif docker exec -i -e PGPASSWORD="$admin_password" "$container_name" \
-                psql -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$dbname" < "$filtered" >>"$log_file" 2>&1; then
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$destination_dbname" < "$filtered" >>"$log_file" 2>&1; then
                 restored=true
             fi
             rm -f "$filtered"
-            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -U "$admin_user" --dbname="$dbname" \
+            docker exec -e PGPASSWORD="$admin_password" "$container_name" psql -X -U "$admin_user" --dbname="$destination_dbname" \
                 -c "SELECT timescaledb_post_restore();" >>"$log_file" 2>&1
         else
             if docker exec -i -e PGPASSWORD="$restore_password" "$container_name" \
-                psql -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$dbname" < "$dump_path" >>"$log_file" 2>&1; then
+                psql -X -v ON_ERROR_STOP=1 -U "$restore_user" --dbname="$destination_dbname" < "$dump_path" >>"$log_file" 2>&1; then
                 restored=true
             elif docker exec -i -e PGPASSWORD="$admin_password" "$container_name" \
-                psql -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$dbname" < "$dump_path" >>"$log_file" 2>&1; then
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$destination_dbname" < "$dump_path" >>"$log_file" 2>&1; then
                 restored=true
+            fi
+        fi
+
+        if [ "$restored" = true ] && [ "$destination_owner" != "$owner" ] && [ -n "$owner" ] && [ -n "$destination_owner" ]; then
+            local source_owner_ident="${owner//\"/\"\"}"
+            local target_owner_ident="${destination_owner//\"/\"\"}"
+            if ! docker exec -e PGPASSWORD="$admin_password" "$container_name" \
+                psql -X -v ON_ERROR_STOP=1 -U "$admin_user" --dbname="$destination_dbname" \
+                -c "REASSIGN OWNED BY \"$source_owner_ident\" TO \"$target_owner_ident\";" >>"$log_file" 2>&1; then
+                echo "Could not reassign '$destination_dbname' from '$owner' to '$destination_owner'" >>"$log_file"
+                restored=false
             fi
         fi
 
@@ -272,6 +620,8 @@ restore_command() {
     local current_db_name=""
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
+    local requested_timescaledb_backup_version="${TIMESCALEDB_BACKUP_VERSION:-}"
+    local requested_timescaledb_compat_image="${TIMESCALEDB_COMPAT_IMAGE:-}"
     local sqlite_basename=""
     local sqlite_backup_source=""
     local sqlite_safety_backup=""
@@ -322,6 +672,7 @@ restore_command() {
     local backup_dir="$APP_DIR/backup"
     local restore_staging_root=""
     local temp_restore_dir=""
+    local current_compose_snapshot=""
 
     # Check if backup directory exists
     if [ ! -d "$backup_dir" ]; then
@@ -341,6 +692,8 @@ restore_command() {
         colorized_echo red "Failed to create restore temp directory."
         exit 1
     fi
+
+    current_compose_snapshot="$temp_restore_dir/.pasarguard-destination-compose.yml"
 
     local log_file="${temp_restore_dir}/pasarguard_restore_error.log"
     >"$log_file"
@@ -918,27 +1271,28 @@ restore_command() {
                 local backup_restore_password="${db_password:-${DB_PASSWORD:-}}"
                 local app_db_target="${current_db_name:-${db_name:-}}"
 
-                # Try root password from backup .env first
-                if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
-                    colorized_echo blue "Trying root user from backup .env..."
-                    if docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$mysql_cmd" -u root < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
-                        restore_success=true
-                        colorized_echo green "$db_type_name database restored successfully."
-                    else
-                        colorized_echo yellow "Root restore failed with backup .env credentials, trying fallback..."
-                        echo "$db_type_name restore failed with backup MYSQL_ROOT_PASSWORD" >>"$log_file"
-                    fi
-                fi
-
-                # If root password changed after backup, try current installation value
-                if [ "$restore_success" = false ] && [ -n "$current_mysql_root_password" ] && [ "$current_mysql_root_password" != "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                # The destination root password is authoritative. The archived
+                # value belongs to the source server and is only a legacy
+                # fallback when the current installation did not provide one.
+                if [ -n "$current_mysql_root_password" ]; then
                     colorized_echo blue "Trying root user from current installation .env..."
                     if docker exec -i -e MYSQL_PWD="$current_mysql_root_password" "$container_name" "$mysql_cmd" -u root < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
                         restore_success=true
                         colorized_echo green "$db_type_name database restored successfully."
                     else
-                        colorized_echo yellow "Root restore failed with current .env credentials, trying app user fallback..."
+                        colorized_echo yellow "Root restore failed with current .env credentials, trying fallback..."
                         echo "$db_type_name restore failed with current MYSQL_ROOT_PASSWORD" >>"$log_file"
+                    fi
+                fi
+
+                if [ "$restore_success" = false ] && [ -z "$current_mysql_root_password" ] && [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
+                    colorized_echo blue "No destination root password was found; trying the backup .env value..."
+                    if docker exec -i -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$mysql_cmd" -u root < "$temp_restore_dir/db_backup.sql" 2>>"$log_file"; then
+                        restore_success=true
+                        colorized_echo green "$db_type_name database restored successfully."
+                    else
+                        colorized_echo yellow "Backup root credentials failed, trying app user fallback..."
+                        echo "$db_type_name restore failed with backup MYSQL_ROOT_PASSWORD" >>"$log_file"
                     fi
                 fi
 
@@ -994,6 +1348,20 @@ restore_command() {
     postgresql|timescaledb)
         local pg_layout
         pg_layout=$(pg_backup_layout "$temp_restore_dir")
+
+        if [ "$db_type" = "timescaledb" ] && [ "$pg_layout" = "single" ]; then
+            if ! pg_promote_timescaledb_single_backup \
+                "$temp_restore_dir" "$db_name" "${db_user:-${DB_USER:-postgres}}" "$log_file" \
+                "$requested_timescaledb_backup_version"; then
+                colorized_echo red "This TimescaleDB backup does not record its source extension version; restore stopped before changing the current database."
+                colorized_echo yellow "For a legacy archive, set TIMESCALEDB_BACKUP_VERSION to its exact source version and run restore again."
+                start_pasarguard_app_services
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
+            pg_layout="multi"
+            colorized_echo blue "Prepared versioned TimescaleDB metadata for the single-database backup."
+        fi
 
         if [ "$pg_layout" = "none" ]; then
             colorized_echo red "Database backup not found in backup archive."
@@ -1062,7 +1430,29 @@ restore_command() {
             local restore_success=false
 
             if [ "$pg_layout" = "multi" ]; then
-                if pg_restore_all_user_databases "$container_name" "$restore_user" "$restore_password" "$admin_user" "$admin_password" "$temp_restore_dir/pg_dump" "$log_file"; then
+                local prepared_pg_dump_dir="$temp_restore_dir/pg_dump"
+                local compat_restore_root=""
+                if ! compat_restore_root=$(mktemp -d "$temp_restore_dir/pasarguard_ts_compat.XXXXXX"); then
+                    colorized_echo red "Could not create TimescaleDB compatibility staging directory."
+                    start_pasarguard_app_services
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+                if ! pg_prepare_timescaledb_compatible_dumps \
+                    "$container_name" "$admin_user" "$admin_password" \
+                    "$temp_restore_dir/pg_dump" "$compat_restore_root/pg_dump" \
+                    "$log_file" "$db_name" "$requested_timescaledb_compat_image"; then
+                    colorized_echo red "TimescaleDB version compatibility preflight failed. The current database was not changed."
+                    colorized_echo yellow "Check log file for details: $log_file"
+                    start_pasarguard_app_services
+                    rm -rf "$temp_restore_dir"
+                    exit 1
+                fi
+                prepared_pg_dump_dir="$PG_PREPARED_DUMP_DIR"
+
+                if pg_restore_all_user_databases \
+                    "$container_name" "$restore_user" "$restore_password" "$admin_user" "$admin_password" \
+                    "$prepared_pg_dump_dir" "$log_file" "$db_name" "$restore_db_name" "${current_db_user:-$restore_user}"; then
                     colorized_echo green "All $db_type databases restored successfully."
                     restore_success=true
                 else
@@ -1221,6 +1611,18 @@ restore_command() {
     # Restore app directory files (full app backup support)
     colorized_echo blue "Restoring app directory files..."
     if [ -d "$temp_restore_dir" ]; then
+        # Capture this only after archive extraction/DB restore and immediately
+        # before app-file sync. An archive member with the same internal helper
+        # name therefore cannot spoof the destination snapshot. Infrastructure
+        # belongs to the destination installation; restoring an old compose
+        # file could otherwise downgrade TimescaleDB again.
+        if [[ "$db_type" != "sqlite" ]] && [ -f "$COMPOSE_FILE" ]; then
+            if ! cp "$COMPOSE_FILE" "$current_compose_snapshot"; then
+                colorized_echo red "Failed to snapshot destination docker-compose.yml."
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
+        fi
         if ! command -v rsync >/dev/null 2>&1; then
             detect_os
             install_package rsync
@@ -1230,7 +1632,10 @@ restore_command() {
             colorized_echo blue "Backing up current app directory before restore..."
             cp -r "$APP_DIR" "$APP_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
         fi
-        if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' --exclude "$sqlite_basename" \
+        if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
+            --exclude 'db_backup.timescaledb-version' --exclude 'pg_dump' \
+            --exclude '.pasarguard-destination-compose.yml' --exclude 'pasarguard_ts_compat.*' \
+            --exclude 'pasarguard_restore_error.log' --exclude "$sqlite_basename" \
             "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
             colorized_echo red "Failed to restore app directory files."
             echo "Failed to restore app directory files from $temp_restore_dir to $APP_DIR" >>"$log_file"
@@ -1239,22 +1644,12 @@ restore_command() {
         fi
     fi
 
-    # Perform configuration adjustments (e.g. preserve credentials)
+    # Keep the destination database identity. Archived credentials describe the
+    # source server and must never replace credentials already provisioned on
+    # this installation, even if the literal values happen to compare equal.
     if [ -f "$APP_DIR/.env" ]; then
-        local preserve_db_credentials=false
         if [[ "$db_type" != "sqlite" ]]; then
-            if [ -n "$current_db_user" ] && [ -n "${DB_USER:-}" ] && [ "$current_db_user" != "$DB_USER" ]; then
-                preserve_db_credentials=true
-            elif [ -n "$current_db_name" ] && [ -n "${DB_NAME:-}" ] && [ "$current_db_name" != "$DB_NAME" ]; then
-                preserve_db_credentials=true
-            elif [ -n "$current_db_password" ] && [ -n "${DB_PASSWORD:-}" ] && [ "$current_db_password" != "$DB_PASSWORD" ]; then
-                preserve_db_credentials=true
-            elif [ -n "$current_mysql_root_password" ] && [ -n "${MYSQL_ROOT_PASSWORD:-}" ] && [ "$current_mysql_root_password" != "$MYSQL_ROOT_PASSWORD" ]; then
-                preserve_db_credentials=true
-            fi
-        fi
-        if [ "$preserve_db_credentials" = true ]; then
-            colorized_echo yellow "Database credentials in backup differ from current installation; preserving current database credentials."
+            colorized_echo blue "Preserving destination database credentials and connection URL."
             if [ -n "$current_mysql_root_password" ]; then
                 replace_or_append_env_var "MYSQL_ROOT_PASSWORD" "$current_mysql_root_password" true "$ENV_FILE"
             fi
@@ -1271,6 +1666,15 @@ restore_command() {
                 replace_or_append_env_var "SQLALCHEMY_DATABASE_URL" "$current_sqlalchemy_url" true "$ENV_FILE"
             fi
         fi
+    fi
+
+    if [[ "$db_type" != "sqlite" ]] && [ -s "$current_compose_snapshot" ]; then
+        if ! cp "$current_compose_snapshot" "$COMPOSE_FILE"; then
+            colorized_echo red "Failed to preserve the destination docker-compose.yml."
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        colorized_echo blue "Preserved destination docker-compose.yml."
     fi
 
     # Clean up
