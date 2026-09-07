@@ -71,8 +71,13 @@ CREATE TABLE public.users (id integer NOT NULL);
 COPY public.users (id) FROM stdin;
 1
 \.
+-- PostgreSQL database dump complete
 EOF
 assert_true "postgres_dump_looks_restorable: real dump accepted" postgres_dump_looks_restorable "$good_dump"
+
+truncated_dump="$WORK_DIR/truncated.sql"
+sed '$d' "$good_dump" >"$truncated_dump"
+assert_false "postgres_dump_looks_restorable: missing completion marker rejected" postgres_dump_looks_restorable "$truncated_dump"
 
 empty_dump="$WORK_DIR/empty.sql"; : > "$empty_dump"
 assert_false "postgres_dump_looks_restorable: empty file rejected" postgres_dump_looks_restorable "$empty_dump"
@@ -85,6 +90,22 @@ printf -- '-- only comments\nSET statement_timeout = 0;\n' > "$comments_only"
 assert_false "postgres_dump_looks_restorable: no DDL/data rejected" postgres_dump_looks_restorable "$comments_only"
 
 assert_false "postgres_dump_looks_restorable: missing file rejected" postgres_dump_looks_restorable "$WORK_DIR/nope.sql"
+
+good_globals="$WORK_DIR/globals.sql"
+printf '%s\n' '-- PostgreSQL database cluster dump' 'CREATE ROLE appuser;' '-- PostgreSQL database cluster dump complete' >"$good_globals"
+assert_true "postgres_globals_dump_looks_complete: completed dump accepted" postgres_globals_dump_looks_complete "$good_globals"
+sed '$d' "$good_globals" >"$WORK_DIR/truncated-globals.sql"
+assert_false "postgres_globals_dump_looks_complete: truncated dump rejected" postgres_globals_dump_looks_complete "$WORK_DIR/truncated-globals.sql"
+
+good_mysql="$WORK_DIR/mysql.sql"
+printf '%s\n' '-- MySQL dump 10.13  Distrib 8.0.43' 'CREATE TABLE users (id int);' '-- Dump completed on 2026-08-01 12:00:00' >"$good_mysql"
+assert_true "mysql_dump_looks_restorable: completed MySQL dump accepted" mysql_dump_looks_restorable "$good_mysql"
+sed '$d' "$good_mysql" >"$WORK_DIR/truncated-mysql.sql"
+assert_false "mysql_dump_looks_restorable: truncated MySQL dump rejected" mysql_dump_looks_restorable "$WORK_DIR/truncated-mysql.sql"
+
+good_mariadb="$WORK_DIR/mariadb.sql"
+printf '%s\n' '-- MariaDB dump 10.19  Distrib 11.8.2-MariaDB' 'CREATE TABLE users (id int);' '-- Dump completed on 2026-08-01 12:00:00' >"$good_mariadb"
+assert_true "mysql_dump_looks_restorable: completed MariaDB dump accepted" mysql_dump_looks_restorable "$good_mariadb"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

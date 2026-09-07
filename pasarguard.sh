@@ -1069,7 +1069,8 @@ install_pasarguard() {
             db_driver_scheme="sqlite"
         fi
 
-        sed -i "s~\(SQLALCHEMY_DATABASE_URL = \).*~\1\"${db_driver_scheme}:////${DATA_DIR}/db.sqlite3\"~" "$APP_DIR/.env"
+        SQLALCHEMY_DATABASE_URL=$(sqlite_absolute_database_url "$db_driver_scheme" "$DATA_DIR/db.sqlite3")
+        sed -i "s~\(SQLALCHEMY_DATABASE_URL = \).*~\1\"${SQLALCHEMY_DATABASE_URL}\"~" "$APP_DIR/.env"
 
     fi
 

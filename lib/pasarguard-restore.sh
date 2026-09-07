@@ -35,7 +35,27 @@ postgres_dump_looks_restorable() {
     local dump_file="$1"
     [ -s "$dump_file" ] || return 1
     # Require at least one real schema/data statement, not just comments/SET.
-    grep -qiE '^[[:space:]]*(CREATE|COPY|INSERT|ALTER)[[:space:]]' "$dump_file"
+    grep -qiE '^[[:space:]]*(CREATE|COPY|INSERT|ALTER)[[:space:]]' "$dump_file" || return 1
+    # pg_dump writes this only after completing the output. Requiring it keeps a
+    # dump truncated by a full disk or interrupted process from being accepted.
+    grep -qE '^-- PostgreSQL database dump complete([[:space:]]*)$' "$dump_file"
+}
+
+# pg_dumpall uses a different completion marker for the globals-only file.
+postgres_globals_dump_looks_complete() {
+    local dump_file="$1"
+    [ -s "$dump_file" ] || return 1
+    grep -qE '^-- PostgreSQL database cluster dump complete([[:space:]]*)$' "$dump_file"
+}
+
+# Both mysqldump and mariadb-dump emit a completion marker after a successful
+# plain-SQL dump. This accepts either tool while rejecting empty and truncated
+# files before they can be archived or restored.
+mysql_dump_looks_restorable() {
+    local dump_file="$1"
+    [ -s "$dump_file" ] || return 1
+    grep -qE '^-- (MySQL|MariaDB) dump ' "$dump_file" || return 1
+    grep -qE '^-- Dump completed on ' "$dump_file"
 }
 
 # Detect the dump layout inside an extracted backup directory.
@@ -253,6 +273,10 @@ restore_command() {
     local current_sqlalchemy_url=""
     local current_mysql_root_password=""
     local sqlite_basename=""
+    local sqlite_backup_source=""
+    local sqlite_safety_backup=""
+    local restore_timestamp=""
+    restore_timestamp=$(date +%Y%m%d%H%M%S)
 
     redact_database_url() {
         local url="$1"
@@ -684,16 +708,11 @@ restore_command() {
     if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
         db_type="sqlite"
         colorized_echo green "✓ Detected SQLite database"
-        local sqlite_url_part="${SQLALCHEMY_DATABASE_URL#*://}"
-        sqlite_url_part="${sqlite_url_part%%\?*}"
-        sqlite_url_part="${sqlite_url_part%%#*}"
-
-        if [[ "$sqlite_url_part" =~ ^//(.*)$ ]]; then
-            sqlite_file="/${BASH_REMATCH[1]}"
-        elif [[ "$sqlite_url_part" =~ ^/(.*)$ ]]; then
-            sqlite_file="/${BASH_REMATCH[1]}"
-        else
-            sqlite_file="$sqlite_url_part"
+        if ! sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL") || [ -z "$sqlite_file" ]; then
+            colorized_echo red "Invalid SQLite SQLALCHEMY_DATABASE_URL in backup; expected sqlite[+driver]:// followed by a database path."
+            echo "Invalid SQLite SQLALCHEMY_DATABASE_URL: $(redact_database_url "$SQLALCHEMY_DATABASE_URL")" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
         fi
         colorized_echo blue "Database file: $sqlite_file"
     elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
@@ -816,39 +835,53 @@ restore_command() {
     case $db_type in
     sqlite)
         sqlite_basename=$(basename "$sqlite_file")
-        local backup_source=""
 
         if [ -f "$temp_restore_dir/$sqlite_basename" ]; then
-            backup_source="$temp_restore_dir/$sqlite_basename"
+            sqlite_backup_source="$temp_restore_dir/$sqlite_basename"
         elif [ -f "$temp_restore_dir/db_backup.sqlite" ]; then
-            backup_source="$temp_restore_dir/db_backup.sqlite"
+            sqlite_backup_source="$temp_restore_dir/db_backup.sqlite"
         fi
 
-        if [ -z "$backup_source" ]; then
+        if [ -z "$sqlite_backup_source" ]; then
             colorized_echo red "SQLite backup file not found in backup archive (looked for $sqlite_basename or db_backup.sqlite)."
             rm -rf "$temp_restore_dir"
             exit 1
         fi
 
-        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
-
-        if [ -f "$sqlite_file" ]; then
-            cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+        if ! command -v sqlite3 >/dev/null 2>&1; then
+            detect_os
+            try_install_package sqlite3 || true
         fi
-
-        if cp "$backup_source" "$sqlite_file" 2>>"$log_file"; then
-            colorized_echo green "SQLite database restored successfully."
-        else
-            colorized_echo red "Failed to restore SQLite database."
-            echo "SQLite restore failed" >>"$log_file"
+        if ! command -v sqlite3 >/dev/null 2>&1; then
+            colorized_echo red "sqlite3 is required to validate the SQLite snapshot before restore. Install sqlite3 and run the restore again."
+            echo "sqlite3 unavailable; cannot validate $sqlite_backup_source" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
+        fi
+        if ! sqlite_snapshot_looks_restorable "$sqlite_backup_source"; then
+            colorized_echo red "SQLite backup is corrupt or incomplete; aborting before replacing the current database."
+            echo "SQLite snapshot validation failed for $sqlite_backup_source" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if [ -f "$sqlite_file" ]; then
+            sqlite_safety_backup="$backup_dir/sqlite_before_restore_${restore_timestamp}_${sqlite_basename}"
+            if ! sqlite3 "$sqlite_file" ".backup '$sqlite_safety_backup'" >>"$log_file" 2>&1; then
+                colorized_echo red "Failed to create a safety snapshot of the current SQLite database; restore aborted."
+                echo "SQLite safety snapshot failed: $sqlite_file -> $sqlite_safety_backup" >>"$log_file"
+                rm -f "$sqlite_safety_backup"
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
+            colorized_echo blue "Current SQLite database saved to $sqlite_safety_backup"
         fi
         ;;
 
     mariadb|mysql)
-        if [ ! -f "$temp_restore_dir/db_backup.sql" ]; then
-            colorized_echo red "Database backup file not found in backup archive."
+        if ! mysql_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
+            colorized_echo red "Database backup is missing, truncated, or invalid; aborting before restore."
+            echo "MySQL/MariaDB dump validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -964,6 +997,13 @@ restore_command() {
 
         if [ "$pg_layout" = "none" ]; then
             colorized_echo red "Database backup not found in backup archive."
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if [ "$pg_layout" = "multi" ] && ! postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then
+            colorized_echo red "Multi-database backup is incomplete or does not contain the configured database; aborting before restore."
+            echo "Multi-database dump validation failed for $temp_restore_dir/pg_dump" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -1155,11 +1195,27 @@ restore_command() {
             exit 1
         fi
         if [ "$db_type" = "sqlite" ] && [ -n "${sqlite_file:-}" ]; then
-            rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
+            rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" "${sqlite_file}-journal" 2>>"$log_file" || true
         fi
         colorized_echo green "Data directory restored to $DATA_DIR."
     else
         colorized_echo yellow "No pasarguard_data directory found in backup. Skipping data restore."
+    fi
+
+    # The data directory in legacy archives may contain a raw SQLite main file
+    # and WAL. Apply the consistent snapshot only after that directory has been
+    # restored so the raw copy can never overwrite the authoritative backup.
+    if [ "$db_type" = "sqlite" ]; then
+        mkdir -p "$(dirname "$sqlite_file")"
+        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" "${sqlite_file}-journal" 2>>"$log_file" || true
+        if cp "$sqlite_backup_source" "$sqlite_file" 2>>"$log_file"; then
+            colorized_echo green "SQLite database restored successfully."
+        else
+            colorized_echo red "Failed to restore SQLite database."
+            echo "SQLite restore failed" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
     fi
 
     # Restore app directory files (full app backup support)

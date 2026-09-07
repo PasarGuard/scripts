@@ -35,6 +35,62 @@ die() {
     exit 1
 }
 
+# Normalize redundant leading and trailing slashes without requiring the path
+# to exist. This keeps legacy SQLite URLs containing five slashes compatible
+# while producing the same path used by normal four-slash absolute URLs.
+normalize_posix_path() {
+    local path="$1"
+
+    while [[ "$path" == //* ]]; do
+        path="${path#/}"
+    done
+    while [[ "$path" != "/" && "$path" == */ ]]; do
+        path="${path%/}"
+    done
+
+    printf '%s\n' "$path"
+}
+
+# Return the filesystem path represented by a SQLAlchemy SQLite URL.
+#   sqlite:///relative.db       -> relative.db
+#   sqlite:////absolute/db      -> /absolute/db
+#   sqlite://///absolute/db     -> /absolute/db (legacy installer output)
+sqlite_database_path_from_url() {
+    local url="$1"
+    local url_part=""
+    local path=""
+
+    [[ "$url" =~ ^sqlite[^:]*:// ]] || return 1
+
+    url_part="${url#*://}"
+    url_part="${url_part%%\?*}"
+    url_part="${url_part%%#*}"
+
+    if [[ "$url_part" == //* ]]; then
+        path="/${url_part#//}"
+    elif [[ "$url_part" == /* ]]; then
+        path="${url_part#/}"
+    else
+        path="$url_part"
+    fi
+
+    normalize_posix_path "$path"
+}
+
+# Build a SQLAlchemy URL for an absolute SQLite database path. Stripping the
+# path's leading slash before adding the URL prefix guarantees exactly four
+# slashes after the scheme separator.
+sqlite_absolute_database_url() {
+    local driver="$1"
+    local path=""
+
+    path=$(normalize_posix_path "$2")
+    [[ "$driver" =~ ^sqlite([+][A-Za-z0-9_]+)?$ ]] || return 1
+    [[ "$path" == /* ]] || return 1
+
+    printf '%s:////%s\n' "$driver" "${path#/}"
+}
+
 # Ensure a secret-bearing file (e.g. .env, TLS private key) is only readable by
 # its owner. Creates the file with 0600 if it is missing so callers can harden
 # it *before* writing secrets; tightens it to 0600 if it already exists. A
