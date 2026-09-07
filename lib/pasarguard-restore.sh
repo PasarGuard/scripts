@@ -274,6 +274,9 @@ restore_command() {
     local current_mysql_root_password=""
     local sqlite_basename=""
     local sqlite_backup_source=""
+    local sqlite_safety_backup=""
+    local restore_timestamp=""
+    restore_timestamp=$(date +%Y%m%d%H%M%S)
 
     redact_database_url() {
         local url="$1"
@@ -705,7 +708,12 @@ restore_command() {
     if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
         db_type="sqlite"
         colorized_echo green "✓ Detected SQLite database"
-        sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL")
+        if ! sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL") || [ -z "$sqlite_file" ]; then
+            colorized_echo red "Invalid SQLite SQLALCHEMY_DATABASE_URL in backup; expected sqlite[+driver]:// followed by a database path."
+            echo "Invalid SQLite SQLALCHEMY_DATABASE_URL: $(redact_database_url "$SQLALCHEMY_DATABASE_URL")" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
         colorized_echo blue "Database file: $sqlite_file"
     elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mariadb[^:]*:// ]]; then
@@ -844,6 +852,12 @@ restore_command() {
             detect_os
             try_install_package sqlite3 || true
         fi
+        if ! command -v sqlite3 >/dev/null 2>&1; then
+            colorized_echo red "sqlite3 is required to validate the SQLite snapshot before restore. Install sqlite3 and run the restore again."
+            echo "sqlite3 unavailable; cannot validate $sqlite_backup_source" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
         if ! sqlite_snapshot_looks_restorable "$sqlite_backup_source"; then
             colorized_echo red "SQLite backup is corrupt or incomplete; aborting before replacing the current database."
             echo "SQLite snapshot validation failed for $sqlite_backup_source" >>"$log_file"
@@ -851,10 +865,16 @@ restore_command() {
             exit 1
         fi
 
-        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
-
         if [ -f "$sqlite_file" ]; then
-            cp "$sqlite_file" "${sqlite_file}.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file"
+            sqlite_safety_backup="$backup_dir/sqlite_before_restore_${restore_timestamp}_${sqlite_basename}"
+            if ! sqlite3 "$sqlite_file" ".backup '$sqlite_safety_backup'" >>"$log_file" 2>&1; then
+                colorized_echo red "Failed to create a safety snapshot of the current SQLite database; restore aborted."
+                echo "SQLite safety snapshot failed: $sqlite_file -> $sqlite_safety_backup" >>"$log_file"
+                rm -f "$sqlite_safety_backup"
+                rm -rf "$temp_restore_dir"
+                exit 1
+            fi
+            colorized_echo blue "Current SQLite database saved to $sqlite_safety_backup"
         fi
         ;;
 
@@ -1175,7 +1195,7 @@ restore_command() {
             exit 1
         fi
         if [ "$db_type" = "sqlite" ] && [ -n "${sqlite_file:-}" ]; then
-            rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
+            rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" "${sqlite_file}-journal" 2>>"$log_file" || true
         fi
         colorized_echo green "Data directory restored to $DATA_DIR."
     else
@@ -1187,7 +1207,7 @@ restore_command() {
     # restored so the raw copy can never overwrite the authoritative backup.
     if [ "$db_type" = "sqlite" ]; then
         mkdir -p "$(dirname "$sqlite_file")"
-        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
+        rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" "${sqlite_file}-journal" 2>>"$log_file" || true
         if cp "$sqlite_backup_source" "$sqlite_file" 2>>"$log_file"; then
             colorized_echo green "SQLite database restored successfully."
         else

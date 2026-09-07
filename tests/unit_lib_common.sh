@@ -93,6 +93,11 @@ assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite://///var/lib/pasarg
     "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: legacy five-slash path"
 assert_eq "$(sqlite_database_path_from_url 'sqlite:////var/lib/pasarguard/db.sqlite3?mode=ro#fragment')" \
     "/var/lib/pasarguard/db.sqlite3" "sqlite_database_path_from_url: strips query and fragment"
+if sqlite_database_path_from_url 'sqlite:/var/lib/pasarguard/db.sqlite3' >/dev/null; then
+    fail "sqlite_database_path_from_url: malformed URL rejected"
+else
+    pass "sqlite_database_path_from_url: malformed URL rejected"
+fi
 assert_eq "$(sqlite_absolute_database_url 'sqlite+aiosqlite' '/var/lib/pasarguard/db.sqlite3')" \
     "sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3" "sqlite_absolute_database_url: exactly four slashes"
 

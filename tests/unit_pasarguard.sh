@@ -292,6 +292,9 @@ assert_true "backup validation: complete TimescaleDB multi dump accepted" \
     database_backup_looks_restorable timescaledb "$DB_VALIDATION_DIR" appdb ""
 assert_false "backup validation: configured PostgreSQL database must be present" \
     database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" missingdb ""
+printf '%s\n' "$(pg_manifest_encode appdb appuser 0 db-001.sql '')" >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: PostgreSQL manifest with empty ts_version accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
 
 SQLITE_VALIDATION_DIR="$WORK_DIR/sqlite-validation"
 mkdir -p "$SQLITE_VALIDATION_DIR"

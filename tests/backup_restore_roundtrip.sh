@@ -311,6 +311,13 @@ connection.close()
 PY
     SQLITE_HOLDER_PID=$!
     wait_for_command 50 test -f "$SQLITE_HOLDER_READY"
+
+    # A valid SQLite file with the same basename in APP_DIR used to overwrite
+    # the authoritative snapshot while app files were copied into staging.
+    # Keep this collision valid (not garbage) so integrity checks alone cannot
+    # distinguish it from the live DATA_DIR database.
+    sqlite3 "$APP_DIR/db.sqlite3" \
+        "CREATE TABLE ci_roundtrip (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO ci_roundtrip VALUES (1, 'stale-app-dir-copy');"
 }
 
 sqlite_query() {
@@ -319,6 +326,7 @@ sqlite_query() {
 
 mutate_sqlite_db() {
     sqlite3 "$DATA_DIR/db.sqlite3" "UPDATE ci_roundtrip SET value = 'mutated' WHERE id = 1;"
+    printf 'stale rollback journal\n' >"$DATA_DIR/db.sqlite3-journal"
 }
 
 setup_mysql_container() {
@@ -490,8 +498,9 @@ verify_backup_archive_contents() {
         assert_equals "$(sqlite_dump_sha "$EXTRACTED_BACKUP_DIR/$sqlite_basename")" "$ORIGINAL_SQLITE_DUMP_SHA" "Backed up SQLite database logical contents changed."
         if [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/$sqlite_basename" ] || \
             [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/${sqlite_basename}-wal" ] || \
-            [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/${sqlite_basename}-shm" ]; then
-            printf 'SQLite database or WAL/SHM leaked into the raw data-directory copy.\n' >&2
+            [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/${sqlite_basename}-shm" ] || \
+            [ -e "$EXTRACTED_BACKUP_DIR/pasarguard_data/${sqlite_basename}-journal" ]; then
+            printf 'SQLite database or WAL/SHM/journal leaked into the raw data-directory copy.\n' >&2
             exit 1
         fi
     elif [ "$DB_TYPE" = "postgresql" ] || [ "$DB_TYPE" = "timescaledb" ]; then
@@ -514,6 +523,20 @@ verify_restored_files() {
     if [ "$DB_TYPE" = "sqlite" ]; then
         assert_sqlite_integrity "$DATA_DIR/db.sqlite3"
         assert_equals "$(sqlite_dump_sha "$DATA_DIR/db.sqlite3")" "$ORIGINAL_SQLITE_DUMP_SHA" "SQLite database logical contents were not restored from backup."
+        if [ -e "$DATA_DIR/db.sqlite3-journal" ]; then
+            printf 'A stale SQLite rollback journal survived the restore.\n' >&2
+            exit 1
+        fi
+
+        local sqlite_safety_backup=""
+        sqlite_safety_backup=$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'sqlite_before_restore_*_db.sqlite3' | sort | tail -n 1)
+        if [ -z "$sqlite_safety_backup" ]; then
+            printf 'The pre-restore SQLite safety snapshot did not survive the data-directory restore.\n' >&2
+            exit 1
+        fi
+        assert_sqlite_integrity "$sqlite_safety_backup"
+        assert_equals "$(sqlite3 "$sqlite_safety_backup" 'SELECT value FROM ci_roundtrip WHERE id = 1;')" \
+            "mutated" "Pre-restore SQLite safety snapshot did not preserve the replaced database."
     fi
 }
 

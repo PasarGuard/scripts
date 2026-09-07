@@ -1004,8 +1004,9 @@ pg_dump_all_user_databases() {
         local filename
         filename=$(pg_dump_index_filename "$index")
 
-        # Owner of this database (empty if it can't be determined; restore
-        # falls back to the admin role).
+        # Owner of this database. If it cannot be determined, the manifest
+        # would be incomplete, so abort and let the caller fall back to a
+        # validated single-database dump.
         local owner=""
         if ! owner=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             psql -U "$backup_user" -d postgres -At \
@@ -1091,6 +1092,7 @@ backup_command() {
     local split_threshold_bytes="${BACKUP_SPLIT_THRESHOLD_BYTES:-$split_size_bytes}"
     local staging_root=""
     local temp_dir=""
+    local sqlite_snapshot_dir=""
     local log_file=""
     # Keep the lock with the backup artifacts so it is not affected by sticky-dir
     # protections on /tmp when different users invoke the command.
@@ -1170,6 +1172,9 @@ backup_command() {
 
     cleanup_backup_command() {
         rm -rf "$temp_dir"
+        if [ -n "$sqlite_snapshot_dir" ]; then
+            rm -rf "$sqlite_snapshot_dir"
+        fi
         if [ "$keep_log_file" != true ] && [ -n "$log_file" ]; then
             rm -f "$log_file"
         fi
@@ -1248,7 +1253,11 @@ backup_command() {
         # Extract database type from scheme
         if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^sqlite ]]; then
             db_type="sqlite"
-            sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL")
+            if ! sqlite_file=$(sqlite_database_path_from_url "$SQLALCHEMY_DATABASE_URL") || [ -z "$sqlite_file" ]; then
+                sqlite_file=""
+                echo "Invalid SQLite SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
+                error_messages+=("SQLite database URL is malformed; expected sqlite[+driver]:// followed by a database path.")
+            fi
         elif [[ "$SQLALCHEMY_DATABASE_URL" =~ ^(mysql|mariadb|postgresql)[^:]*:// ]]; then
             # Extract scheme to determine type
             if [[ "$SQLALCHEMY_DATABASE_URL" =~ ^mariadb[^:]*:// ]]; then
@@ -1354,6 +1363,7 @@ backup_command() {
                     mariadb_databases=$(docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" \
                         mariadb -N -s -u root -e "SHOW DATABASES;" 2>>"$log_file") || mariadb_databases=""
                     while IFS= read -r _db_line; do
+                        [ -n "$_db_line" ] || continue
                         if [ "$_db_line" = "$db_name" ]; then
                             configured_db_found=true
                             break
@@ -1648,7 +1658,10 @@ backup_command() {
             fi
             ;;
         sqlite)
-            if [ -f "$sqlite_file" ]; then
+            if [ -z "$sqlite_file" ]; then
+                # URL parsing already recorded the actionable error above.
+                :
+            elif [ -f "$sqlite_file" ]; then
                 if ! command -v sqlite3 >/dev/null 2>&1; then
                     detect_os
                     # Best-effort: if sqlite3 can't be installed, continue (the
@@ -1659,7 +1672,9 @@ backup_command() {
 
                 local sqlite_basename=$(basename "$sqlite_file")
                 if command -v sqlite3 >/dev/null 2>&1; then
-                    if ! sqlite3 "$sqlite_file" ".backup '$temp_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
+                    if ! sqlite_snapshot_dir=$(mktemp -d "${staging_root}/pasarguard_sqlite_snapshot.XXXXXX"); then
+                        error_messages+=("Failed to create protected SQLite snapshot staging directory.")
+                    elif ! sqlite3 "$sqlite_file" ".backup '$sqlite_snapshot_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
                         error_messages+=("Failed to create SQLite backup snapshot.")
                     fi
                 else
@@ -1674,18 +1689,6 @@ backup_command() {
         colorized_echo yellow "Warning: No database type detected. Skipping database backup."
         echo "Warning: No database type detected." >>"$log_file"
         echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
-    fi
-
-    # Refuse to archive a database artifact unless it is complete and contains
-    # the configured application database. This applies to every supported
-    # engine and prevents a failed current run from masquerading as a usable
-    # backup (or causing an older Telegram archive to appear current).
-    if [ -n "$db_type" ] && [ ${#error_messages[@]} -eq 0 ]; then
-        if ! database_backup_looks_restorable "$db_type" "$temp_dir" "$db_name" "$sqlite_file"; then
-            colorized_echo red "Database backup artifact failed completeness validation."
-            echo "Database backup artifact failed completeness validation for $db_type" >>"$log_file"
-            error_messages+=("$db_type backup artifact is missing, truncated, corrupt, or does not contain the configured database.")
-        fi
     fi
 
     colorized_echo blue "Copying app directory..."
@@ -1717,6 +1720,7 @@ backup_command() {
             rsync_args+=(--exclude "$sqlite_relative_path")
             rsync_args+=(--exclude "${sqlite_relative_path}-wal")
             rsync_args+=(--exclude "${sqlite_relative_path}-shm")
+            rsync_args+=(--exclude "${sqlite_relative_path}-journal")
             echo "Excluding SQLite database from data directory copy: $sqlite_relative_path" >>"$log_file"
         fi
 
@@ -1727,7 +1731,8 @@ backup_command() {
             local sqlite_relative_path="${sqlite_file#"$normalized_data_dir"/}"
             rm -f "$temp_dir/pasarguard_data/$sqlite_relative_path" \
                 "$temp_dir/pasarguard_data/${sqlite_relative_path}-wal" \
-                "$temp_dir/pasarguard_data/${sqlite_relative_path}-shm" 2>>"$log_file" || true
+                "$temp_dir/pasarguard_data/${sqlite_relative_path}-shm" \
+                "$temp_dir/pasarguard_data/${sqlite_relative_path}-journal" 2>>"$log_file" || true
         fi
     else
         colorized_echo yellow "Data directory $DATA_DIR does not exist. Skipping data directory backup."
@@ -1744,6 +1749,30 @@ backup_command() {
             colorized_echo yellow "Removing Unix socket files before archiving (zip cannot archive sockets)."
             printf "%s\n" "$socket_files" >>"$log_file"
             find "$temp_dir" -type s -delete >>"$log_file" 2>&1 || true
+        fi
+    fi
+
+    # Refuse to archive a database artifact unless the final staged copy is
+    # complete and contains the configured application database. Keep this
+    # gate after app/data copying because those operations also write into the
+    # staging directory and must not replace an already-validated artifact.
+    if [ -n "$db_type" ] && [ ${#error_messages[@]} -eq 0 ]; then
+        if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ]; then
+            local final_sqlite_basename=""
+            final_sqlite_basename=$(basename "$sqlite_file")
+            if [ -z "$sqlite_snapshot_dir" ] || [ ! -f "$sqlite_snapshot_dir/$final_sqlite_basename" ]; then
+                error_messages+=("Protected SQLite snapshot is missing before final archive staging.")
+            elif ! mv -f "$sqlite_snapshot_dir/$final_sqlite_basename" "$temp_dir/$final_sqlite_basename" 2>>"$log_file"; then
+                error_messages+=("Failed to move the protected SQLite snapshot into final archive staging.")
+            fi
+            rm -f "$temp_dir/${final_sqlite_basename}-wal" \
+                "$temp_dir/${final_sqlite_basename}-shm" \
+                "$temp_dir/${final_sqlite_basename}-journal" 2>>"$log_file" || true
+        fi
+        if [ ${#error_messages[@]} -eq 0 ] && ! database_backup_looks_restorable "$db_type" "$temp_dir" "$db_name" "$sqlite_file"; then
+            colorized_echo red "Database backup artifact failed completeness validation."
+            echo "Final staged database artifact failed completeness validation for $db_type" >>"$log_file"
+            error_messages+=("$db_type backup artifact is missing, truncated, corrupt, or does not contain the configured database.")
         fi
     fi
 
