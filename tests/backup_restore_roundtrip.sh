@@ -66,7 +66,15 @@ SQLITE_HOLDER_STOP="$WORK_DIR/sqlite-holder.stop"
 stop_sqlite_holder() {
     if [ -n "$SQLITE_HOLDER_PID" ] && kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null; then
         touch "$SQLITE_HOLDER_STOP"
-        wait "$SQLITE_HOLDER_PID"
+        local waited=0
+        while kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null && [ "$waited" -lt 50 ]; do
+            sleep 0.2
+            waited=$((waited + 1))
+        done
+        if kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null; then
+            kill -TERM "$SQLITE_HOLDER_PID" 2>/dev/null || true
+        fi
+        wait "$SQLITE_HOLDER_PID" 2>/dev/null || true
     fi
     SQLITE_HOLDER_PID=""
 }
@@ -751,14 +759,14 @@ verify_restored_database() {
     case "$DB_TYPE" in
     mysql)
         docker exec -e MYSQL_PWD="$CURRENT_DB_PASSWORD" "$CONTAINER_NAME" mysql -h 127.0.0.1 -u "$DB_USER" "$DB_NAME" -e "SELECT 1;" >/dev/null
-        if docker exec -e MYSQL_PWD="apppass" "$CONTAINER_NAME" mysql -h 127.0.0.1 -u "$DB_USER" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
+        if docker exec -e MYSQL_PWD="$DB_PASSWORD" "$CONTAINER_NAME" mysql -h 127.0.0.1 -u "$DB_USER" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
             printf 'Archived MySQL password still authenticates after restore.\n' >&2
             exit 1
         fi
         ;;
     mariadb)
         docker exec -e MYSQL_PWD="$CURRENT_DB_PASSWORD" "$CONTAINER_NAME" mariadb -h 127.0.0.1 -u "$DB_USER" "$DB_NAME" -e "SELECT 1;" >/dev/null
-        if docker exec -e MYSQL_PWD="apppass" "$CONTAINER_NAME" mariadb -h 127.0.0.1 -u "$DB_USER" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
+        if docker exec -e MYSQL_PWD="$DB_PASSWORD" "$CONTAINER_NAME" mariadb -h 127.0.0.1 -u "$DB_USER" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
             printf 'Archived MariaDB password still authenticates after restore.\n' >&2
             exit 1
         fi
@@ -766,7 +774,7 @@ verify_restored_database() {
     postgresql | timescaledb)
         docker exec -e PGPASSWORD="$CURRENT_DB_PASSWORD" "$CONTAINER_NAME" \
             psql -h 127.0.0.1 -At -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1;" >/dev/null
-        if docker exec -e PGPASSWORD="apppass" "$CONTAINER_NAME" \
+        if docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER_NAME" \
             psql -h 127.0.0.1 -At -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1;" >/dev/null 2>&1; then
             printf 'Archived PostgreSQL password still authenticates after restore.\n' >&2
             exit 1

@@ -84,6 +84,7 @@ pg_promote_timescaledb_single_backup() {
     local log_file="$4"
     local requested_source_version="${5:-}"
     local source_version=""
+    local has_timescaledb="1"
 
     if [ -s "$restore_dir/db_backup.timescaledb-version" ]; then
         source_version=$(head -n 1 "$restore_dir/db_backup.timescaledb-version" | tr -d '[:space:]')
@@ -94,7 +95,10 @@ pg_promote_timescaledb_single_backup() {
             "$restore_dir/docker-compose.yml" | head -n 1)
     fi
 
-    if ! timescaledb_version_is_safe "$source_version"; then
+    if [ "$source_version" = "none" ]; then
+        has_timescaledb="0"
+        source_version=""
+    elif ! timescaledb_version_is_safe "$source_version"; then
         echo "Single-database TimescaleDB backup has no safe source-version metadata" >>"$log_file"
         return 1
     fi
@@ -112,8 +116,8 @@ pg_promote_timescaledb_single_backup() {
         '-- PasarGuard synthetic globals for a legacy single-database backup' \
         "CREATE ROLE \"$owner_ident\";" \
         '-- PostgreSQL database cluster dump complete' >"$dump_dir/globals.sql"
-    printf '%s\t%s\t1\tdb-001.sql\t%s\n' \
-        "$database_name" "$database_owner" "$source_version" >"$dump_dir/manifest.tsv"
+    printf '%s\t%s\t%s\tdb-001.sql\t%s\n' \
+        "$database_name" "$database_owner" "$has_timescaledb" "$source_version" >"$dump_dir/manifest.tsv"
     return 0
 }
 
@@ -147,11 +151,13 @@ pg_filter_globals_for_destination() {
             quoted_role = "\"" quoted_role "\""
         }
         {
-            statement_role = $3
-            sub(/;$/, "", statement_role)
-            if (($1 == "CREATE" || $1 == "ALTER") && $2 == "ROLE" &&
-                (statement_role == role || statement_role == quoted_role)) {
-                next
+            if ($0 ~ /^(CREATE|ALTER)[[:space:]]+ROLE[[:space:]]/) {
+                rest = $0
+                sub(/^(CREATE|ALTER)[[:space:]]+ROLE[[:space:]]+/, "", rest)
+                if (rest == role || rest == role ";" || index(rest, role " ") == 1 ||
+                    rest == quoted_role || rest == quoted_role ";" || index(rest, quoted_role " ") == 1) {
+                    next
+                }
             }
             print
         }
@@ -175,6 +181,35 @@ cleanup_timescaledb_compat_container() {
 
     [ -n "$container_name" ] && docker rm -f "$container_name" >/dev/null 2>&1 || true
     [ -n "$volume_name" ] && docker volume rm "$volume_name" >/dev/null 2>&1 || true
+}
+
+TIMESCALEDB_COMPAT_CONTAINER=""
+TIMESCALEDB_COMPAT_VOLUME=""
+
+handle_timescaledb_compat_signal() {
+    local exit_code="$1"
+    trap - INT TERM
+    cleanup_timescaledb_compat_container "$TIMESCALEDB_COMPAT_CONTAINER" "$TIMESCALEDB_COMPAT_VOLUME"
+    TIMESCALEDB_COMPAT_CONTAINER=""
+    TIMESCALEDB_COMPAT_VOLUME=""
+    if declare -F start_pasarguard_app_services >/dev/null 2>&1; then
+        start_pasarguard_app_services >/dev/null 2>&1 || true
+    fi
+    exit "$exit_code"
+}
+
+arm_timescaledb_compat_cleanup() {
+    TIMESCALEDB_COMPAT_CONTAINER="$1"
+    TIMESCALEDB_COMPAT_VOLUME="$2"
+    trap 'handle_timescaledb_compat_signal 130' INT
+    trap 'handle_timescaledb_compat_signal 143' TERM
+}
+
+finish_timescaledb_compat_cleanup() {
+    trap - INT TERM
+    cleanup_timescaledb_compat_container "$TIMESCALEDB_COMPAT_CONTAINER" "$TIMESCALEDB_COMPAT_VOLUME"
+    TIMESCALEDB_COMPAT_CONTAINER=""
+    TIMESCALEDB_COMPAT_VOLUME=""
 }
 
 # Convert cross-version TimescaleDB dumps before the destination is changed.
@@ -243,9 +278,27 @@ pg_prepare_timescaledb_compatible_dumps() {
     done <"$manifest"
     [ "$needs_conversion" = true ] || return 0
 
-    local pg_major=$((server_version_num / 10000))
+    local pg_major
+    pg_major=$((server_version_num / 10000))
     local target_series="${target_version%.*}"
     local compat_image="${requested_compat_image:-timescale/timescaledb-ha:pg${pg_major}-ts${target_series}-all}"
+    local compat_pgdata=""
+    case "$compat_image" in
+        *timescale/timescaledb-ha:*)
+            compat_pgdata="/home/postgres/pgdata/data"
+            ;;
+        *timescale/timescaledb:*)
+            if [ "$pg_major" -ge 18 ]; then
+                compat_pgdata="/var/lib/postgresql/${pg_major}/docker"
+            else
+                compat_pgdata="/var/lib/postgresql/data"
+            fi
+            ;;
+        *)
+            echo "Unsupported TimescaleDB compatibility image: $compat_image" >>"$log_file"
+            return 1
+            ;;
+    esac
     local compat_suffix="${$}-${RANDOM}-$(date +%s)"
     local compat_container="pasarguard-ts-compat-${compat_suffix}"
     local compat_volume=""
@@ -264,25 +317,28 @@ pg_prepare_timescaledb_compatible_dumps() {
         -e POSTGRES_USER="$admin_user" \
         -e POSTGRES_PASSWORD="$admin_password" \
         -e POSTGRES_DB=postgres \
-        -v "$compat_volume:/home/postgres/pgdata/data" \
+        -e PGDATA="$compat_pgdata" \
+        -v "$compat_volume:$compat_pgdata" \
         "$compat_image" >>"$log_file" 2>&1; then
         echo "Could not start temporary TimescaleDB compatibility container" >>"$log_file"
         cleanup_timescaledb_compat_container "" "$compat_volume"
         return 1
     fi
+    arm_timescaledb_compat_cleanup "$compat_container" "$compat_volume"
 
     local ready=false
-    local attempt=0
-    for attempt in $(seq 1 45); do
+    local waited=0
+    while [ "$waited" -lt 180 ]; do
         if docker exec "$compat_container" pg_isready -q -U "$admin_user" -d postgres >/dev/null 2>&1; then
             ready=true
             break
         fi
         sleep 1
+        waited=$((waited + 1))
     done
     if [ "$ready" != true ]; then
         echo "Temporary TimescaleDB compatibility container did not become ready" >>"$log_file"
-        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        finish_timescaledb_compat_cleanup
         return 1
     fi
 
@@ -303,17 +359,17 @@ pg_prepare_timescaledb_compatible_dumps() {
             2>>"$log_file") || available_count="0"
         if [ "$available_count" != "1" ]; then
             echo "Compatibility image $compat_image does not contain TimescaleDB $required_version" >>"$log_file"
-            cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+            finish_timescaledb_compat_cleanup
             return 1
         fi
     done <<<"$required_versions"
 
     if ! mkdir -p "$output_dir"; then
-        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        finish_timescaledb_compat_cleanup
         return 1
     fi
     cp "$source_dir/globals.sql" "$output_dir/globals.sql" 2>>"$log_file" || {
-        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        finish_timescaledb_compat_cleanup
         rm -rf "$output_dir"
         return 1
     }
@@ -321,7 +377,7 @@ pg_prepare_timescaledb_compatible_dumps() {
 
     local filtered_globals="$output_dir/globals.no-passwords.sql"
     if ! pg_filter_globals_for_destination "$admin_user" <"$source_dir/globals.sql" >"$filtered_globals"; then
-        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+        finish_timescaledb_compat_cleanup
         rm -rf "$output_dir"
         return 1
     fi
@@ -390,7 +446,7 @@ pg_prepare_timescaledb_compatible_dumps() {
             psql -X -U "$admin_user" -d postgres -c "DROP DATABASE \"$compat_db\";" >>"$log_file" 2>&1 || true
     done <"$manifest"
 
-    cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
+    finish_timescaledb_compat_cleanup
     if [ "$converted_ok" != true ] || ! postgres_backup_looks_restorable "$(dirname "$output_dir")" "$expected_database"; then
         echo "TimescaleDB compatibility conversion failed validation" >>"$log_file"
         rm -rf "$output_dir"
@@ -1365,6 +1421,7 @@ restore_command() {
 
         if [ "$pg_layout" = "none" ]; then
             colorized_echo red "Database backup not found in backup archive."
+            start_pasarguard_app_services
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -1372,6 +1429,7 @@ restore_command() {
         if [ "$pg_layout" = "multi" ] && ! postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then
             colorized_echo red "Multi-database backup is incomplete or does not contain the configured database; aborting before restore."
             echo "Multi-database dump validation failed for $temp_restore_dir/pg_dump" >>"$log_file"
+            start_pasarguard_app_services
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -1380,6 +1438,7 @@ restore_command() {
             # Verify backup file is not empty and is readable
             if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
                 colorized_echo red "Database backup file is empty or unreadable."
+                start_pasarguard_app_services
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
@@ -1390,6 +1449,7 @@ restore_command() {
             if ! postgres_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
                 colorized_echo red "Database backup does not look like a valid SQL dump; aborting before any changes."
                 echo "Dump content validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
+                start_pasarguard_app_services
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
@@ -1401,12 +1461,14 @@ restore_command() {
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
             if [ -z "$container_name" ]; then
                 colorized_echo red "Error: Database container not found. Please start the DB container or specify a valid container name."
+                start_pasarguard_app_services
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
             local verified_container=$(verify_and_start_container "$container_name" "$db_type")
             if [ -z "$verified_container" ]; then
                 colorized_echo red "Failed to start database container. Please start it manually."
+                start_pasarguard_app_services
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
@@ -1423,6 +1485,7 @@ restore_command() {
 
                 if [ -z "$restore_password" ]; then
                     colorized_echo red "No database password found for restore."
+                    start_pasarguard_app_services
                     rm -rf "$temp_restore_dir"
                     exit 1
                 fi
@@ -1619,6 +1682,7 @@ restore_command() {
         if [[ "$db_type" != "sqlite" ]] && [ -f "$COMPOSE_FILE" ]; then
             if ! cp "$COMPOSE_FILE" "$current_compose_snapshot"; then
                 colorized_echo red "Failed to snapshot destination docker-compose.yml."
+                start_pasarguard_app_services
                 rm -rf "$temp_restore_dir"
                 exit 1
             fi
@@ -1635,6 +1699,7 @@ restore_command() {
         if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
             --exclude 'db_backup.timescaledb-version' --exclude 'pg_dump' \
             --exclude '.pasarguard-destination-compose.yml' --exclude 'pasarguard_ts_compat.*' \
+            --exclude '*_combined.zip' --exclude 'pasarguard_env_cleaned' \
             --exclude 'pasarguard_restore_error.log' --exclude "$sqlite_basename" \
             "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
             colorized_echo red "Failed to restore app directory files."
@@ -1671,6 +1736,7 @@ restore_command() {
     if [[ "$db_type" != "sqlite" ]] && [ -s "$current_compose_snapshot" ]; then
         if ! cp "$current_compose_snapshot" "$COMPOSE_FILE"; then
             colorized_echo red "Failed to preserve the destination docker-compose.yml."
+            start_pasarguard_app_services
             rm -rf "$temp_restore_dir"
             exit 1
         fi

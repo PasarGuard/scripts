@@ -379,6 +379,19 @@ assert_true "single_ts backup: records extension version sidecar" \
 assert_eq "$(cat "$PG_SINGLE_META_DIR/db_backup.timescaledb-version")" "2.27.2" "single_ts backup: exact version persisted"
 unset -f docker
 
+docker() {
+    if [[ "$*" == *"SELECT extversion FROM pg_extension"* ]]; then
+        return 0
+    fi
+    return 1
+}
+PG_SINGLE_NOEXT_DIR="$WORK_DIR/pg-single-no-extension"
+mkdir -p "$PG_SINGLE_NOEXT_DIR"
+assert_true "single_ts backup: extension absence is recorded" \
+    write_timescaledb_single_dump_version pg appuser pass appdb "$PG_SINGLE_NOEXT_DIR" "$WORK_DIR/pg-single-meta.log"
+assert_eq "$(cat "$PG_SINGLE_NOEXT_DIR/db_backup.timescaledb-version")" "none" "single_ts backup: no-extension sentinel persisted"
+unset -f docker
+
 # -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
@@ -539,6 +552,16 @@ assert_true "single_ts: versioned dump promoted to manifest" \
 assert_eq "$(cut -f5 "$SINGLE_TS_DIR/pg_dump/manifest.tsv")" "2.27.2" "single_ts: source version recorded"
 assert_true "single_ts: promoted artifact validates" postgres_backup_looks_restorable "$SINGLE_TS_DIR" "appdb"
 
+NOEXT_TS_DIR="$WORK_DIR/single-timescale-no-extension"
+mkdir -p "$NOEXT_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$NOEXT_TS_DIR/db_backup.sql"
+printf '%s\n' 'none' >"$NOEXT_TS_DIR/db_backup.timescaledb-version"
+assert_true "single_ts: explicit no-extension dump promoted" \
+    pg_promote_timescaledb_single_backup "$NOEXT_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f3 "$NOEXT_TS_DIR/pg_dump/manifest.tsv")" "0" "single_ts: no-extension manifest uses PostgreSQL path"
+assert_eq "$(cut -f5 "$NOEXT_TS_DIR/pg_dump/manifest.tsv")" "" "single_ts: no fake extension version recorded"
+assert_true "single_ts: no-extension artifact validates" postgres_backup_looks_restorable "$NOEXT_TS_DIR" "appdb"
+
 UNVERSIONED_TS_DIR="$WORK_DIR/unversioned-timescale"
 mkdir -p "$UNVERSIONED_TS_DIR"
 cp "$SINGLE_TS_DIR/db_backup.sql" "$UNVERSIONED_TS_DIR/db_backup.sql"
@@ -584,6 +607,16 @@ _destination_globals_expected=$(printf '%s\n' \
     "ALTER ROLE worker WITH LOGIN;" \
     "GRANT worker TO appuser;")
 assert_eq "$_destination_globals_out" "$_destination_globals_expected" "global_filter: preserves the destination role definition and grants"
+
+_quoted_destination_globals_out=$(printf '%s\n' \
+    "CREATE ROLE \"app user\";" \
+    "ALTER ROLE \"app user\" WITH NOSUPERUSER PASSWORD 'old-password';" \
+    "CREATE ROLE worker;" \
+    "GRANT worker TO \"app user\";" | pg_filter_globals_for_destination "app user")
+_quoted_destination_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE worker;" \
+    "GRANT worker TO \"app user\";")
+assert_eq "$_quoted_destination_globals_out" "$_quoted_destination_globals_expected" "global_filter: preserves quoted destination role with spaces"
 
 # -----------------------------------------------------------------------
 # timescaledb_version_matches

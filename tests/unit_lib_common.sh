@@ -85,6 +85,8 @@ if harden_secret_file ""; then fail "harden_secret_file: rejects empty path"; el
 # --- SQLite SQLAlchemy URL helpers ---
 assert_eq "$(normalize_posix_path '/var/lib/pasarguard///')" "/var/lib/pasarguard" \
     "normalize_posix_path: removes repeated trailing slashes"
+assert_eq "$(normalize_posix_path '//var//lib///pasarguard//db.sqlite3')" "/var/lib/pasarguard/db.sqlite3" \
+    "normalize_posix_path: collapses duplicate interior and leading slashes"
 assert_eq "$(sqlite_database_path_from_url 'sqlite:///db.sqlite3')" "db.sqlite3" \
     "sqlite_database_path_from_url: relative path"
 assert_eq "$(sqlite_database_path_from_url 'sqlite+aiosqlite:////var/lib/pasarguard/db.sqlite3')" \

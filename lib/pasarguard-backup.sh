@@ -1090,8 +1090,20 @@ write_timescaledb_single_dump_version() {
     if ! source_version=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
         psql -X -U "$backup_user" -d "$database_name" -At \
         -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';" \
-        2>>"$log_file") ||
-        [[ ! "$source_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9]+)*$ ]]; then
+        2>>"$log_file"); then
+        echo "Could not query TimescaleDB version for single-database dump" >>"$log_file"
+        return 1
+    fi
+
+    if [ -z "$source_version" ]; then
+        # The compose image can be TimescaleDB while this particular database
+        # does not use the extension. Preserve that fact so restore can use the
+        # normal PostgreSQL path instead of requiring a fake version.
+        printf '%s\n' 'none' >"$temp_dir/db_backup.timescaledb-version"
+        return 0
+    fi
+
+    if [[ ! "$source_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9]+)*$ ]]; then
         echo "Could not record TimescaleDB version for single-database dump" >>"$log_file"
         return 1
     fi
