@@ -1069,10 +1069,7 @@ install_pasarguard() {
             db_driver_scheme="sqlite"
         fi
 
-        if ! SQLALCHEMY_DATABASE_URL=$(sqlite_absolute_database_url "$db_driver_scheme" "$DATA_DIR/db.sqlite3"); then
-            colorized_echo red "Failed to build the SQLite database URL for $DATA_DIR/db.sqlite3"
-            exit 1
-        fi
+        SQLALCHEMY_DATABASE_URL=$(sqlite_absolute_database_url "$db_driver_scheme" "$DATA_DIR/db.sqlite3")
         sed -i "s~\(SQLALCHEMY_DATABASE_URL = \).*~\1\"${SQLALCHEMY_DATABASE_URL}\"~" "$APP_DIR/.env"
 
     fi

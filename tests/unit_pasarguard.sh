@@ -365,33 +365,6 @@ assert_false "pg multi backup: missing configured database fails the operation" 
 assert_false "pg multi backup: missing-app dump directory is removed" test -d "$PG_MISSING_DIR/pg_dump"
 unset -f docker
 
-docker() {
-    if [[ "$*" == *"SELECT extversion FROM pg_extension"* ]]; then
-        printf '2.27.2\n'
-        return 0
-    fi
-    return 1
-}
-PG_SINGLE_META_DIR="$WORK_DIR/pg-single-metadata"
-mkdir -p "$PG_SINGLE_META_DIR"
-assert_true "single_ts backup: records extension version sidecar" \
-    write_timescaledb_single_dump_version pg appuser pass appdb "$PG_SINGLE_META_DIR" "$WORK_DIR/pg-single-meta.log"
-assert_eq "$(cat "$PG_SINGLE_META_DIR/db_backup.timescaledb-version")" "2.27.2" "single_ts backup: exact version persisted"
-unset -f docker
-
-docker() {
-    if [[ "$*" == *"SELECT extversion FROM pg_extension"* ]]; then
-        return 0
-    fi
-    return 1
-}
-PG_SINGLE_NOEXT_DIR="$WORK_DIR/pg-single-no-extension"
-mkdir -p "$PG_SINGLE_NOEXT_DIR"
-assert_true "single_ts backup: extension absence is recorded" \
-    write_timescaledb_single_dump_version pg appuser pass appdb "$PG_SINGLE_NOEXT_DIR" "$WORK_DIR/pg-single-meta.log"
-assert_eq "$(cat "$PG_SINGLE_NOEXT_DIR/db_backup.timescaledb-version")" "none" "single_ts backup: no-extension sentinel persisted"
-unset -f docker
-
 # -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------

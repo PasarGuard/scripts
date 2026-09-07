@@ -1477,6 +1477,13 @@ restore_command() {
             cleanup_and_exit_restore_error 1
         fi
 
+        if [ "$pg_layout" = "multi" ] && ! postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then
+            colorized_echo red "Multi-database backup is incomplete or does not contain the configured database; aborting before restore."
+            echo "Multi-database dump validation failed for $temp_restore_dir/pg_dump" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
         if [ "$pg_layout" = "single" ]; then
             # Verify backup file is not empty and is readable
             if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
@@ -1698,7 +1705,8 @@ restore_command() {
         else
             colorized_echo red "Failed to restore SQLite database."
             echo "SQLite restore failed" >>"$log_file"
-            cleanup_and_exit_restore_error 1
+            rm -rf "$temp_restore_dir"
+            exit 1
         fi
     fi
 

@@ -66,15 +66,7 @@ SQLITE_HOLDER_STOP="$WORK_DIR/sqlite-holder.stop"
 stop_sqlite_holder() {
     if [ -n "$SQLITE_HOLDER_PID" ] && kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null; then
         touch "$SQLITE_HOLDER_STOP"
-        local waited=0
-        while kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null && [ "$waited" -lt 50 ]; do
-            sleep 0.2
-            waited=$((waited + 1))
-        done
-        if kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null; then
-            kill -TERM "$SQLITE_HOLDER_PID" 2>/dev/null || true
-        fi
-        wait "$SQLITE_HOLDER_PID" 2>/dev/null || true
+        wait "$SQLITE_HOLDER_PID"
     fi
     SQLITE_HOLDER_PID=""
 }

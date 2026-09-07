@@ -41,9 +41,6 @@ die() {
 normalize_posix_path() {
     local path="$1"
 
-    while [[ "$path" == *//* ]]; do
-        path="${path//\/\//\/}"
-    done
     while [[ "$path" == //* ]]; do
         path="${path#/}"
     done
