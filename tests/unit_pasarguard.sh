@@ -596,6 +596,18 @@ _globals_expected=$(printf '%s\n' \
 assert_eq "$_globals_out" "$_globals_expected" "global_filter: strips password verifiers and keeps role attributes/grants"
 assert_false "global_filter: no PASSWORD keyword remains" grep -qE '[[:space:]]PASSWORD[[:space:]]' <<<"$_globals_out"
 
+_encrypted_globals_out=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN ENCRYPTED PASSWORD 'SCRAM-SHA-256\$4096:salt\$stored:server' VALID UNTIL 'infinity';" \
+    "ALTER ROLE dev WITH LOGIN UNENCRYPTED PASSWORD 'plain-pass' NOSUPERUSER;" | pg_filter_global_passwords)
+_encrypted_globals_expected=$(printf '%s\n' \
+    "CREATE ROLE appuser;" \
+    "ALTER ROLE appuser WITH LOGIN VALID UNTIL 'infinity';" \
+    "ALTER ROLE dev WITH LOGIN NOSUPERUSER;")
+assert_eq "$_encrypted_globals_out" "$_encrypted_globals_expected" "global_filter: strips ENCRYPTED and UNENCRYPTED password verifiers cleanly"
+assert_false "global_filter: no ENCRYPTED keyword remains" grep -qE '[[:space:]]ENCRYPTED([[:space:]]|;)' <<<"$_encrypted_globals_out"
+assert_false "global_filter: no UNENCRYPTED keyword remains" grep -qE '[[:space:]]UNENCRYPTED([[:space:]]|;)' <<<"$_encrypted_globals_out"
+
 _destination_globals_out=$(printf '%s\n' \
     "CREATE ROLE appuser;" \
     "ALTER ROLE appuser WITH NOSUPERUSER PASSWORD 'old-password';" \

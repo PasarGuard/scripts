@@ -315,7 +315,7 @@ write_timescaledb_compose() {
 $EXPECTED_COMPOSE_MARKER
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg17
+    image: ${TIMESCALE_SOURCE_IMAGE:-timescale/timescaledb:latest-pg17}
 EOF
 }
 
@@ -427,6 +427,8 @@ setup_postgresql_container() {
         -e POSTGRES_USER="$DB_USER" \
         -e POSTGRES_PASSWORD="$password" \
         -e POSTGRES_DB="$DB_NAME" \
+        -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" \
+        -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
         "$image" >/dev/null
 
     wait_for_command 30 docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
