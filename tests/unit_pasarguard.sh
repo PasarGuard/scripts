@@ -252,6 +252,117 @@ assert_false "manifest: rejects tab in ts_version"     pg_manifest_encode "db" "
 assert_false "manifest: rejects newline in ts_version" pg_manifest_encode "db" "o" "1" "f.sql" "$(printf '2\n7')"
 
 # -----------------------------------------------------------------------
+# database backup completeness validation
+# -----------------------------------------------------------------------
+DB_VALIDATION_DIR="$WORK_DIR/db-validation"
+mkdir -p "$DB_VALIDATION_DIR"
+
+printf '%s\n' \
+    '-- MySQL dump 10.13  Distrib 8.0.43' \
+    'CREATE TABLE users (id int);' \
+    '-- Dump completed on 2026-08-01 12:00:00' >"$DB_VALIDATION_DIR/db_backup.sql"
+assert_true "backup validation: complete MySQL dump accepted" \
+    database_backup_looks_restorable mysql "$DB_VALIDATION_DIR" appdb ""
+sed -i '$d' "$DB_VALIDATION_DIR/db_backup.sql"
+assert_false "backup validation: truncated MySQL dump rejected" \
+    database_backup_looks_restorable mysql "$DB_VALIDATION_DIR" appdb ""
+
+printf '%s\n' \
+    '-- PostgreSQL database dump' \
+    'CREATE TABLE public.users (id integer);' \
+    '-- PostgreSQL database dump complete' >"$DB_VALIDATION_DIR/db_backup.sql"
+assert_true "backup validation: complete PostgreSQL single dump accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
+sed -i '$d' "$DB_VALIDATION_DIR/db_backup.sql"
+assert_false "backup validation: truncated PostgreSQL single dump rejected" \
+    database_backup_looks_restorable timescaledb "$DB_VALIDATION_DIR" appdb ""
+
+rm -f "$DB_VALIDATION_DIR/db_backup.sql"
+mkdir -p "$DB_VALIDATION_DIR/pg_dump"
+printf '%s\n' \
+    '-- PostgreSQL database cluster dump' \
+    'CREATE ROLE appuser;' \
+    '-- PostgreSQL database cluster dump complete' >"$DB_VALIDATION_DIR/pg_dump/globals.sql"
+printf '%s\n' \
+    '-- PostgreSQL database dump' \
+    'CREATE TABLE public.users (id integer);' \
+    '-- PostgreSQL database dump complete' >"$DB_VALIDATION_DIR/pg_dump/db-001.sql"
+printf '%s\n' "$(pg_manifest_encode appdb appuser 1 db-001.sql 2.27.2)" >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: complete TimescaleDB multi dump accepted" \
+    database_backup_looks_restorable timescaledb "$DB_VALIDATION_DIR" appdb ""
+assert_false "backup validation: configured PostgreSQL database must be present" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" missingdb ""
+
+SQLITE_VALIDATION_DIR="$WORK_DIR/sqlite-validation"
+mkdir -p "$SQLITE_VALIDATION_DIR"
+printf 'sqlite fixture\n' >"$SQLITE_VALIDATION_DIR/app.sqlite3"
+sqlite3() {
+    [ "$2" = "PRAGMA quick_check;" ] || return 1
+    printf 'ok\n'
+}
+assert_true "backup validation: SQLite quick_check success accepted" \
+    database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
+sqlite3() { printf 'database disk image is malformed\n'; }
+assert_false "backup validation: corrupt SQLite snapshot rejected" \
+    database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
+unset -f sqlite3
+
+# A multi-database PostgreSQL/TimescaleDB backup must be atomic. Previously the
+# helper returned success as long as any one database dumped successfully.
+MOCK_PG_FAIL_DB=""
+docker() {
+    local joined="$*"
+    case "$joined" in
+        *" pg_dumpall "*)
+            printf '%s\n' '-- PostgreSQL database cluster dump' '-- PostgreSQL database cluster dump complete'
+            ;;
+        *"SELECT datname FROM pg_database"*)
+            printf '%s\n' appdb analytics
+            ;;
+        *"pg_get_userbyid"*)
+            printf 'appuser\n'
+            ;;
+        *"SELECT extversion FROM pg_extension"*)
+            return 0
+            ;;
+        *" pg_dump "*)
+            if [ -n "$MOCK_PG_FAIL_DB" ] && [[ "$joined" == *" -d $MOCK_PG_FAIL_DB "* ]]; then
+                return 1
+            fi
+            printf '%s\n' \
+                '-- PostgreSQL database dump' \
+                'CREATE TABLE public.events (id integer);' \
+                '-- PostgreSQL database dump complete'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+PG_ATOMIC_DIR="$WORK_DIR/pg-atomic-success"
+mkdir -p "$PG_ATOMIC_DIR"
+assert_true "pg multi backup: every database plus configured database succeeds" \
+    pg_dump_all_user_databases pg appuser pass "$PG_ATOMIC_DIR" "$WORK_DIR/pg-success.log" appdb
+assert_true "pg multi backup: completed artifact passes final validation" \
+    postgres_backup_looks_restorable "$PG_ATOMIC_DIR" appdb
+
+PG_PARTIAL_DIR="$WORK_DIR/pg-atomic-partial"
+mkdir -p "$PG_PARTIAL_DIR"
+MOCK_PG_FAIL_DB="analytics"
+assert_false "pg multi backup: one failed database fails the whole operation" \
+    pg_dump_all_user_databases pg appuser pass "$PG_PARTIAL_DIR" "$WORK_DIR/pg-partial.log" appdb
+assert_false "pg multi backup: partial dump directory is removed" test -d "$PG_PARTIAL_DIR/pg_dump"
+
+PG_MISSING_DIR="$WORK_DIR/pg-atomic-missing-app"
+mkdir -p "$PG_MISSING_DIR"
+MOCK_PG_FAIL_DB=""
+assert_false "pg multi backup: missing configured database fails the operation" \
+    pg_dump_all_user_databases pg appuser pass "$PG_MISSING_DIR" "$WORK_DIR/pg-missing.log" missingdb
+assert_false "pg multi backup: missing-app dump directory is removed" test -d "$PG_MISSING_DIR/pg_dump"
+unset -f docker
+
+# -----------------------------------------------------------------------
 # get_acme_sh_binary
 # -----------------------------------------------------------------------
 MOCK_HOME="$WORK_DIR/mock_home"

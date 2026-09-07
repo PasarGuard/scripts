@@ -35,7 +35,27 @@ postgres_dump_looks_restorable() {
     local dump_file="$1"
     [ -s "$dump_file" ] || return 1
     # Require at least one real schema/data statement, not just comments/SET.
-    grep -qiE '^[[:space:]]*(CREATE|COPY|INSERT|ALTER)[[:space:]]' "$dump_file"
+    grep -qiE '^[[:space:]]*(CREATE|COPY|INSERT|ALTER)[[:space:]]' "$dump_file" || return 1
+    # pg_dump writes this only after completing the output. Requiring it keeps a
+    # dump truncated by a full disk or interrupted process from being accepted.
+    grep -qE '^-- PostgreSQL database dump complete([[:space:]]*)$' "$dump_file"
+}
+
+# pg_dumpall uses a different completion marker for the globals-only file.
+postgres_globals_dump_looks_complete() {
+    local dump_file="$1"
+    [ -s "$dump_file" ] || return 1
+    grep -qE '^-- PostgreSQL database cluster dump complete([[:space:]]*)$' "$dump_file"
+}
+
+# Both mysqldump and mariadb-dump emit a completion marker after a successful
+# plain-SQL dump. This accepts either tool while rejecting empty and truncated
+# files before they can be archived or restored.
+mysql_dump_looks_restorable() {
+    local dump_file="$1"
+    [ -s "$dump_file" ] || return 1
+    grep -qE '^-- (MySQL|MariaDB) dump ' "$dump_file" || return 1
+    grep -qE '^-- Dump completed on ' "$dump_file"
 }
 
 # Detect the dump layout inside an extracted backup directory.
@@ -820,6 +840,17 @@ restore_command() {
             exit 1
         fi
 
+        if ! command -v sqlite3 >/dev/null 2>&1; then
+            detect_os
+            try_install_package sqlite3 || true
+        fi
+        if ! sqlite_snapshot_looks_restorable "$sqlite_backup_source"; then
+            colorized_echo red "SQLite backup is corrupt or incomplete; aborting before replacing the current database."
+            echo "SQLite snapshot validation failed for $sqlite_backup_source" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
         rm -f "${sqlite_file}-wal" "${sqlite_file}-shm" 2>>"$log_file" || true
 
         if [ -f "$sqlite_file" ]; then
@@ -828,8 +859,9 @@ restore_command() {
         ;;
 
     mariadb|mysql)
-        if [ ! -f "$temp_restore_dir/db_backup.sql" ]; then
-            colorized_echo red "Database backup file not found in backup archive."
+        if ! mysql_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
+            colorized_echo red "Database backup is missing, truncated, or invalid; aborting before restore."
+            echo "MySQL/MariaDB dump validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -945,6 +977,13 @@ restore_command() {
 
         if [ "$pg_layout" = "none" ]; then
             colorized_echo red "Database backup not found in backup archive."
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+
+        if [ "$pg_layout" = "multi" ] && ! postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then
+            colorized_echo red "Multi-database backup is incomplete or does not contain the configured database; aborting before restore."
+            echo "Multi-database dump validation failed for $temp_restore_dir/pg_dump" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
         fi

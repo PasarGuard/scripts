@@ -144,6 +144,91 @@ pg_manifest_encode() {
     printf '%s\t%s\t%s\t%s\t%s' "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"
 }
 
+# Validate the complete database artifact that will be put in an archive. This
+# is intentionally independent of a dump command's exit status: a process can
+# be interrupted after writing a plausible-looking prefix, or its output can be
+# truncated by a full filesystem.
+postgres_backup_looks_restorable() {
+    local temp_dir="$1"
+    local expected_database="$2"
+    local layout=""
+    layout=$(pg_backup_layout "$temp_dir")
+
+    if [ "$layout" = "single" ]; then
+        postgres_dump_looks_restorable "$temp_dir/db_backup.sql"
+        return
+    fi
+    [ "$layout" = "multi" ] || return 1
+
+    local dump_dir="$temp_dir/pg_dump"
+    local manifest="$dump_dir/manifest.tsv"
+    postgres_globals_dump_looks_complete "$dump_dir/globals.sql" || return 1
+    [ -s "$manifest" ] || return 1
+
+    local manifest_line=""
+    local dbname=""
+    local has_timescaledb=""
+    local filename=""
+    local field_count=0
+    local manifest_count=0
+    local expected_found=false
+    while IFS= read -r manifest_line || [ -n "$manifest_line" ]; do
+        [ -n "$manifest_line" ] || return 1
+        field_count=$(awk -F '\t' '{ print NF }' <<<"$manifest_line")
+        [ "$field_count" -eq 5 ] || return 1
+
+        dbname="${manifest_line%%$'\t'*}"
+        has_timescaledb=$(cut -f3 <<<"$manifest_line")
+        filename=$(cut -f4 <<<"$manifest_line")
+        [ -n "$dbname" ] || return 1
+        [[ "$has_timescaledb" =~ ^[01]$ ]] || return 1
+        [[ "$filename" =~ ^db-[0-9]{3}\.sql$ ]] || return 1
+        postgres_dump_looks_restorable "$dump_dir/$filename" || return 1
+
+        manifest_count=$((manifest_count + 1))
+        if [ "$dbname" = "$expected_database" ]; then
+            expected_found=true
+        fi
+    done <"$manifest"
+
+    local dump_count=0
+    dump_count=$(find "$dump_dir" -maxdepth 1 -type f -name 'db-[0-9][0-9][0-9].sql' | wc -l | awk '{ print $1 }')
+    [ "$manifest_count" -gt 0 ] && [ "$dump_count" -eq "$manifest_count" ] && [ "$expected_found" = true ]
+}
+
+sqlite_snapshot_looks_restorable() {
+    local snapshot_file="$1"
+    [ -s "$snapshot_file" ] || return 1
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+
+    local integrity=""
+    integrity=$(sqlite3 "$snapshot_file" 'PRAGMA quick_check;' 2>/dev/null) || return 1
+    [ "$integrity" = "ok" ]
+}
+
+database_backup_looks_restorable() {
+    local db_type="$1"
+    local temp_dir="$2"
+    local expected_database="${3:-}"
+    local sqlite_file="${4:-}"
+
+    case "$db_type" in
+        mysql | mariadb)
+            mysql_dump_looks_restorable "$temp_dir/db_backup.sql"
+            ;;
+        postgresql | timescaledb)
+            postgres_backup_looks_restorable "$temp_dir" "$expected_database"
+            ;;
+        sqlite)
+            [ -n "$sqlite_file" ] || return 1
+            sqlite_snapshot_looks_restorable "$temp_dir/$(basename "$sqlite_file")"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 send_backup_to_telegram() {
     local requested_timestamp="${1:-}"
 
@@ -863,14 +948,17 @@ remove_backup_service() {
 # PostgreSQL/TimescaleDB container into <temp_dir>/pg_dump/.
 # Layout: globals.sql, db-NNN.sql per database, manifest.tsv
 # (dbname<TAB>owner<TAB>has_timescaledb<TAB>filename<TAB>ts_version).
-# Returns 0 when at least one database was dumped; otherwise removes the
-# pg_dump dir and returns 1 so the caller can fall back to single-database mode.
+# The configured application database is passed as argument 6. Returns 0 only
+# when every enumerated database was dumped and that application database is in
+# the manifest; otherwise removes the pg_dump directory and returns 1 so the
+# caller can fall back to a validated single-database dump.
 pg_dump_all_user_databases() {
     local container_name="$1"
     local backup_user="$2"
     local backup_password="$3"
     local temp_dir="$4"
     local log_file="$5"
+    local expected_database="$6"
 
     local out_dir="$temp_dir/pg_dump"
     local manifest="$out_dir/manifest.tsv"
@@ -883,13 +971,22 @@ pg_dump_all_user_databases() {
         rm -rf "$out_dir"
         return 1
     fi
+    if ! postgres_globals_dump_looks_complete "$out_dir/globals.sql"; then
+        echo "pg_dumpall globals output failed completion validation" >>"$log_file"
+        rm -rf "$out_dir"
+        return 1
+    fi
 
     # Enumerate real user databases (skip templates and the postgres maintenance DB).
     local databases=""
-    databases=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
+    if ! databases=$(docker exec -e PGPASSWORD="$backup_password" "$container_name" \
         psql -U "$backup_user" -d postgres -At \
         -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres';" \
-        2>>"$log_file")
+        2>>"$log_file"); then
+        echo "Could not enumerate user databases for multi-DB backup" >>"$log_file"
+        rm -rf "$out_dir"
+        return 1
+    fi
     if [ -z "$databases" ]; then
         echo "No user databases enumerated for multi-DB backup" >>"$log_file"
         rm -rf "$out_dir"
@@ -899,6 +996,7 @@ pg_dump_all_user_databases() {
     : >"$manifest"
     local index=0
     local dumped=0
+    local expected_found=false
     local dbname=""
     while IFS= read -r dbname; do
         [ -n "$dbname" ] || continue
@@ -913,8 +1011,9 @@ pg_dump_all_user_databases() {
             psql -U "$backup_user" -d postgres -At \
             -c "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${dbname//\'/\'\'}';" \
             2>>"$log_file") || [ -z "$owner" ]; then
-            echo "Could not determine owner for database '$dbname'; restore will fall back to the admin role" >>"$log_file"
-            owner=""
+            echo "Could not determine owner for database '$dbname'; multi-DB backup is incomplete" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
 
         # TimescaleDB presence + version for this database. One query gives both:
@@ -933,35 +1032,41 @@ pg_dump_all_user_databases() {
                 ts_version="$ext_check"
             fi
         else
-            echo "Could not check timescaledb extension for database '$dbname'; assuming not present" >>"$log_file"
+            echo "Could not check timescaledb extension for database '$dbname'; multi-DB backup is incomplete" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
 
         # Dump this database.
         if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" \
             pg_dump -U "$backup_user" -d "$dbname" --clean --if-exists >"$out_dir/$filename" 2>>"$log_file"; then
             echo "pg_dump failed for database '$dbname'" >>"$log_file"
-            rm -f "$out_dir/$filename"
-            continue
+            rm -rf "$out_dir"
+            return 1
         fi
 
         # Never trust an empty/garbage dump.
         if ! postgres_dump_looks_restorable "$out_dir/$filename"; then
-            echo "Dump for database '$dbname' failed content validation; skipping" >>"$log_file"
-            rm -f "$out_dir/$filename"
-            continue
+            echo "Dump for database '$dbname' failed completion/content validation" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
 
         local line
         if ! line=$(pg_manifest_encode "$dbname" "$owner" "$has_ts" "$filename" "$ts_version"); then
-            echo "Database name '$dbname' is not manifest-safe; skipping" >>"$log_file"
-            rm -f "$out_dir/$filename"
-            continue
+            echo "Database name '$dbname' is not manifest-safe; multi-DB backup is incomplete" >>"$log_file"
+            rm -rf "$out_dir"
+            return 1
         fi
         printf '%s\n' "$line" >>"$manifest"
         dumped=$((dumped + 1))
+        if [ "$dbname" = "$expected_database" ]; then
+            expected_found=true
+        fi
     done <<<"$databases"
 
-    if [ "$dumped" -eq 0 ]; then
+    if [ "$dumped" -eq 0 ] || [ "$dumped" -ne "$index" ] || [ "$expected_found" != true ]; then
+        echo "Multi-DB backup did not include every database and the configured database '$expected_database'" >>"$log_file"
         rm -rf "$out_dir"
         return 1
     fi
@@ -1244,11 +1349,22 @@ backup_command() {
                 # Try root user with MYSQL_ROOT_PASSWORD first for all databases backup
                 if [ -n "${MYSQL_ROOT_PASSWORD:-}" ]; then
                     colorized_echo blue "Backing up all MariaDB databases from container: $container_name (using root user)"
-                    if docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    local mariadb_databases=""
+                    local configured_db_found=false
+                    mariadb_databases=$(docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" \
+                        mariadb -N -s -u root -e "SHOW DATABASES;" 2>>"$log_file") || mariadb_databases=""
+                    while IFS= read -r _db_line; do
+                        if [ "$_db_line" = "$db_name" ]; then
+                            configured_db_found=true
+                            break
+                        fi
+                    done <<<"$mariadb_databases"
+
+                    if [ "$configured_db_found" = true ] && docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "MariaDB backup completed successfully (all databases)"
                     else
                         # Fallback to SQL URL credentials for specific database
-                        colorized_echo yellow "Root backup failed, falling back to app user for specific database"
+                        colorized_echo yellow "Root backup failed or did not include '$db_name'; falling back to app user for the configured database"
                         local backup_user="${db_user:-${DB_USER:-}}"
                         local backup_password="${db_password:-${DB_PASSWORD:-}}"
 
@@ -1332,11 +1448,17 @@ backup_command() {
                                 # Collect DB names into an array so each is passed as one argument
                                 # (a name containing a space must not be word-split).
                                 local -a database_list=()
+                                local configured_db_found=false
                                 while IFS= read -r _db_line; do
-                                    [ -n "$_db_line" ] && database_list+=("$_db_line")
+                                    if [ -n "$_db_line" ]; then
+                                        database_list+=("$_db_line")
+                                        if [ "$_db_line" = "$db_name" ]; then
+                                            configured_db_found=true
+                                        fi
+                                    fi
                                 done <<<"$databases"
-                        if [ -z "$databases" ]; then
-                            colorized_echo yellow "No user databases found, falling back to specific database backup"
+                        if [ -z "$databases" ] || [ "$configured_db_found" != true ]; then
+                            colorized_echo yellow "The configured database '$db_name' was not found in the root database list; falling back to a specific database backup"
                             # Fallback to SQL URL credentials
                             local backup_user="${db_user:-${DB_USER:-}}"
                             local backup_password="${db_password:-${DB_PASSWORD:-}}"
@@ -1434,7 +1556,7 @@ backup_command() {
                             error_messages+=("PostgreSQL database name not found.")
                         else
                             colorized_echo blue "Backing up all PostgreSQL databases from container: $container_name (using user: $backup_user)"
-                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file"; then
+                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file" "$db_name"; then
                                 colorized_echo green "PostgreSQL backup completed successfully (all databases)"
                             else
                                 colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
@@ -1505,7 +1627,7 @@ backup_command() {
                             error_messages+=("TimescaleDB database name not found.")
                         else
                             colorized_echo blue "Backing up all TimescaleDB databases from container: $container_name (using user: $backup_user)"
-                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file"; then
+                            if pg_dump_all_user_databases "$container_name" "$backup_user" "$backup_password" "$temp_dir" "$log_file" "$db_name"; then
                                 colorized_echo green "TimescaleDB backup completed successfully (all databases)"
                             else
                                 colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
@@ -1552,6 +1674,18 @@ backup_command() {
         colorized_echo yellow "Warning: No database type detected. Skipping database backup."
         echo "Warning: No database type detected." >>"$log_file"
         echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
+    fi
+
+    # Refuse to archive a database artifact unless it is complete and contains
+    # the configured application database. This applies to every supported
+    # engine and prevents a failed current run from masquerading as a usable
+    # backup (or causing an older Telegram archive to appear current).
+    if [ -n "$db_type" ] && [ ${#error_messages[@]} -eq 0 ]; then
+        if ! database_backup_looks_restorable "$db_type" "$temp_dir" "$db_name" "$sqlite_file"; then
+            colorized_echo red "Database backup artifact failed completeness validation."
+            echo "Database backup artifact failed completeness validation for $db_type" >>"$log_file"
+            error_messages+=("$db_type backup artifact is missing, truncated, corrupt, or does not contain the configured database.")
+        fi
     fi
 
     colorized_echo blue "Copying app directory..."
@@ -1615,7 +1749,9 @@ backup_command() {
 
     colorized_echo blue "Creating backup archive..."
     # Verify temp_dir exists and has content before creating archive
-    if [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
+    if [ ${#error_messages[@]} -gt 0 ]; then
+        echo "Skipping archive creation because the backup has errors." >>"$log_file"
+    elif [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
     elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
