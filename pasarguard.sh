@@ -1950,6 +1950,7 @@ usage() {
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit environment file (via nano or vi editor)"
     colorized_echo yellow "  version-script  $(tput sgr0)– Show script version and commit"
+    colorized_echo yellow "  completion      $(tput sgr0)– Install bash completion"
     colorized_echo yellow "  help            $(tput sgr0)– Show this help message"
 
     echo
