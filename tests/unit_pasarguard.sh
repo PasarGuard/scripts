@@ -295,6 +295,9 @@ assert_false "backup validation: configured PostgreSQL database must be present"
 printf '%s\n' "$(pg_manifest_encode appdb appuser 0 db-001.sql '')" >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
 assert_true "backup validation: PostgreSQL manifest with empty ts_version accepted" \
     database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
+printf 'appdb\tappuser\t0\tdb-001.sql\n' >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: legacy 4-field manifest accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
 
 SQLITE_VALIDATION_DIR="$WORK_DIR/sqlite-validation"
 mkdir -p "$SQLITE_VALIDATION_DIR"
@@ -441,6 +444,24 @@ EOF
 assert_eq "$(detect_pasarguard_backend_service)" "pasarguard" \
     "detect_pasarguard_backend_service: identifies pasarguard as fallback"
 
+# Test start_pasarguard_app_services exit status propagation
+cat > "$COMPOSE_MOCK_FILE" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"start"* ]]; then
+    exit 0
+fi
+EOF
+assert_true "start_pasarguard_app_services: propagates success (exit 0)" start_pasarguard_app_services
+
+cat > "$COMPOSE_MOCK_FILE" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"start"* ]]; then
+    exit 1
+fi
+EOF
+assert_false "start_pasarguard_app_services: propagates failure (exit 1)" start_pasarguard_app_services
+
+
 # -----------------------------------------------------------------------
 # is_port_in_use
 # -----------------------------------------------------------------------
@@ -541,6 +562,29 @@ cp "$SINGLE_TS_DIR/db_backup.sql" "$UNVERSIONED_TS_DIR/db_backup.sql"
 unset TIMESCALEDB_BACKUP_VERSION 2>/dev/null || true
 assert_false "single_ts: unversioned legacy dump fails safely" \
     pg_promote_timescaledb_single_backup "$UNVERSIONED_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+
+COMPOSE_TS_DIR="$WORK_DIR/compose-timescale"
+mkdir -p "$COMPOSE_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$COMPOSE_TS_DIR/db_backup.sql"
+printf '%s\n' \
+    'services:' \
+    '  db:' \
+    '    image: timescale/timescaledb:2.11.0-pg14' >"$COMPOSE_TS_DIR/docker-compose.yml"
+assert_true "single_ts: docker-compose timescale/timescaledb tag promoted" \
+    pg_promote_timescaledb_single_backup "$COMPOSE_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$COMPOSE_TS_DIR/pg_dump/manifest.tsv")" "2.11.0" "single_ts: source version extracted from compose"
+
+COMPOSE_TSHA_DIR="$WORK_DIR/compose-timescale-ha"
+mkdir -p "$COMPOSE_TSHA_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$COMPOSE_TSHA_DIR/db_backup.sql"
+printf '%s\n' \
+    'services:' \
+    '  db:' \
+    '    image: timescale/timescaledb-ha:pg16-ts2.13.0-all' >"$COMPOSE_TSHA_DIR/docker-compose.yml"
+assert_true "single_ts: docker-compose timescale/timescaledb-ha tag promoted" \
+    pg_promote_timescaledb_single_backup "$COMPOSE_TSHA_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$COMPOSE_TSHA_DIR/pg_dump/manifest.tsv")" "2.13.0" "single_ts: source version extracted from compose-ha"
+
 
 # -----------------------------------------------------------------------
 # pg_filter_timescaledb_extension_lines

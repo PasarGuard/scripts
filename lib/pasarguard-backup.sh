@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Mask sensitive Telegram bot token for display, showing only the last 6 chars.
 mask_telegram_bot_key() {
     local secret="$1"
     local length=${#secret}
@@ -17,6 +18,7 @@ mask_telegram_bot_key() {
     printf '****%s\n' "${secret: -6}"
 }
 
+# Remove existing PasarGuard backup cron jobs from a crontab file.
 filter_backup_cron_entries() {
     local source_file="$1"
     local target_file="$2"
@@ -108,6 +110,7 @@ format_backup_interval() {
     fi
 }
 
+# Determine whether a database hostname points to localhost/loopback.
 is_local_db_host() {
     local host="${1:-}"
 
@@ -175,7 +178,7 @@ postgres_backup_looks_restorable() {
     while IFS= read -r manifest_line || [ -n "$manifest_line" ]; do
         [ -n "$manifest_line" ] || return 1
         field_count=$(awk -F '\t' '{ print NF }' <<<"$manifest_line")
-        [ "$field_count" -eq 5 ] || return 1
+        [ "$field_count" -ge 4 ] && [ "$field_count" -le 5 ] || return 1
 
         dbname="${manifest_line%%$'\t'*}"
         has_timescaledb=$(cut -f3 <<<"$manifest_line")
@@ -196,6 +199,7 @@ postgres_backup_looks_restorable() {
     [ "$manifest_count" -gt 0 ] && [ "$dump_count" -eq "$manifest_count" ] && [ "$expected_found" = true ]
 }
 
+# Validate that an SQLite snapshot file is non-empty and passes SQLite quick_check integrity.
 sqlite_snapshot_looks_restorable() {
     local snapshot_file="$1"
     [ -s "$snapshot_file" ] || return 1
@@ -206,6 +210,7 @@ sqlite_snapshot_looks_restorable() {
     [ "$integrity" = "ok" ]
 }
 
+# Dispatcher to validate database backup restorable integrity for any supported engine.
 database_backup_looks_restorable() {
     local db_type="$1"
     local temp_dir="$2"
@@ -229,6 +234,7 @@ database_backup_looks_restorable() {
     esac
 }
 
+# Upload completed backup archive(s) to configured Telegram chat, supporting multipart archives.
 send_backup_to_telegram() {
     local requested_timestamp="${1:-}"
 
@@ -447,6 +453,7 @@ send_backup_to_telegram() {
     fi
 }
 
+# Send error notification and execution log to Telegram chat upon backup failure.
 send_backup_error_to_telegram() {
     local error_messages=$1
     local log_file=$2
@@ -500,6 +507,7 @@ send_backup_error_to_telegram() {
     fi
 }
 
+# Interactive configuration wizard for scheduled automated Telegram backups.
 backup_service() {
     local telegram_bot_key=""
     local telegram_chat_id=""
@@ -696,6 +704,7 @@ backup_service() {
     colorized_echo green "====================================="
 }
 
+# Add or update the PasarGuard backup service entry in system crontab.
 add_cron_job() {
     local schedule="$1"
     local command="$2"
@@ -715,6 +724,7 @@ add_cron_job() {
     rm -f "$temp_cron"
 }
 
+# Display current configuration details of the automated backup service.
 view_backup_service() {
     if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         colorized_echo red "Backup service is not configured."
@@ -753,6 +763,7 @@ view_backup_service() {
     read -p "Press Enter to continue..."
 }
 
+# Interactive editor for existing automated backup service settings.
 edit_backup_service() {
     if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         colorized_echo red "Backup service is not configured."
@@ -914,6 +925,7 @@ edit_backup_service() {
     colorized_echo green "Backup service configuration updated successfully."
 }
 
+# Disable and completely remove automated backup service configuration and cron task.
 remove_backup_service() {
     colorized_echo red "in process..."
 
@@ -1111,6 +1123,7 @@ write_timescaledb_single_dump_version() {
     printf '%s\n' "$source_version" >"$temp_dir/db_backup.timescaledb-version"
 }
 
+# Execute a complete PasarGuard system backup including database dumps, configuration, and data.
 backup_command() {
     colorized_echo blue "Starting backup process..."
 
@@ -1744,7 +1757,10 @@ backup_command() {
             --exclude 'db_backup.sqlite'
             --exclude 'db_backup.timescaledb-version'
             --exclude 'pg_dump'
-            --exclude 'timescaledb-compatible'
+            --exclude '.pasarguard-destination-compose.yml'
+            --exclude 'pasarguard_ts_compat.*'
+            --exclude '*_combined.zip'
+            --exclude 'pasarguard_env_cleaned'
             --exclude 'pasarguard_restore_error.log'
         )
         if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ]; then
