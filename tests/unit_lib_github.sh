@@ -12,6 +12,8 @@ mkdir -p "$APP_TMP_DIR" "$SHARED_LIB_INSTALL_DIR"
 
 source "$ROOT_DIR/lib/common.sh"
 source "$ROOT_DIR/lib/github.sh"
+original_backup_scripts_definition=$(declare -f backup_scripts)
+original_install_shared_libs_from_repo_definition=$(declare -f install_shared_libs_from_repo)
 
 PASS=0
 FAIL=0
@@ -25,6 +27,24 @@ assert_eq() {
 }
 
 echo "=== unit_lib_github.sh ==="
+
+# Production callers must propagate allocation failures before constructing
+# child paths or touching installation targets.
+original_create_temp_dir_definition=$(declare -f create_temp_dir)
+create_temp_dir() { return 73; }
+if ! backup_scripts >/dev/null 2>&1; then
+    pass "backup_scripts: temp-dir failure is propagated"
+else
+    fail "backup_scripts: temp-dir failure is propagated"
+fi
+if ! install_shared_libs_from_repo PasarGuard/scripts common.sh >/dev/null 2>&1; then
+    pass "install_shared_libs_from_repo: temp-dir failure is propagated"
+else
+    fail "install_shared_libs_from_repo: temp-dir failure is propagated"
+fi
+eval "$original_create_temp_dir_definition"
+eval "$original_backup_scripts_definition"
+eval "$original_install_shared_libs_from_repo_definition"
 
 # -----------------------------------------------------------------------
 # github_raw_url
@@ -48,7 +68,7 @@ mkdir -p "$MOCK_BIN"
 # Override the functions to use mock paths instead of /usr/local/bin
 backup_scripts() {
     local backup_dir
-    backup_dir=$(create_temp_dir "scripts-backup")
+    backup_dir=$(create_temp_dir "scripts-backup") || return 1
     [ -f "$MOCK_BIN/pasarguard" ] && cp "$MOCK_BIN/pasarguard" "$backup_dir/"
     [ -f "$MOCK_BIN/pg-node" ]    && cp "$MOCK_BIN/pg-node"    "$backup_dir/"
     if [ -d "$SHARED_LIB_INSTALL_DIR" ] && [ "$(ls -A "$SHARED_LIB_INSTALL_DIR" 2>/dev/null)" ]; then

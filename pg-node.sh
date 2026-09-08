@@ -169,6 +169,32 @@ FETCH_REPO="PasarGuard/scripts"
 NODE_SERVICE_REPO="PasarGuard/node-serviced"
 NODE_SERVICE_RELEASE_API="https://api.github.com/repos/${NODE_SERVICE_REPO}/releases/latest"
 NODE_SERVICE_BINARY_NAME="node-serviced"
+NODE_SERVICE_STAGED_PATH=""
+NODE_SERVICE_DOWNLOAD_TMP_DIR=""
+NODE_SERVICE_UPDATE_LOCK_HELD=false
+NODE_SERVICE_TRANSACTION_ACTIVE=false
+NODE_SERVICE_TRANSACTION_COMMITTED=false
+NODE_SERVICE_TRANSACTION_STATE_CAPTURED=false
+NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
+NODE_SERVICE_TRANSACTION_HAD_SERVICE=false
+NODE_SERVICE_TRANSACTION_WAS_ACTIVE=false
+NODE_SERVICE_TRANSACTION_WAS_ENABLED=false
+NODE_SERVICE_EXTERNAL_CHILD_PID=""
+NODE_SERVICE_EXTERNAL_CHILD_PGID=""
+NODE_SERVICE_EXTERNAL_WATCHDOG_PID=""
+NODE_SERVICE_UNIT_LIST_TMP=""
+NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT=""
+# Returned by node_service_api_ready when the probe itself could not run, as
+# opposed to running and finding the service unhealthy. The two must not be
+# confused: a probe that cannot execute is no evidence against the service.
+readonly NODE_SERVICE_PROBE_UNAVAILABLE=2
+declare -a NODE_SERVICE_TRANSACTION_PATHS=()
+declare -a NODE_SERVICE_TRANSACTION_HAD_PATH=()
+declare -a NODE_SERVICE_TRANSACTION_BACKUPS=()
+declare -a NODE_SERVICE_TRANSACTION_LINK_TARGETS=()
+declare -a NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET=()
+declare -a NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS=()
+declare -a NODE_SERVICE_TRANSACTION_RESTORED=()
 set_service_paths() {
     SERVICE_NAME="${APP_NAME}-service"
     SERVICE_BINARY_PATH="/usr/local/bin/${SERVICE_NAME}"
@@ -181,38 +207,959 @@ require_systemd() {
     fi
 }
 service_installed() {
+    local query_status=0
+
     if ! command -v systemctl >/dev/null 2>&1; then
         return 1
     fi
     set_service_paths
-    if [ -f "$SERVICE_UNIT" ] || systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
+    if [ -f "$SERVICE_UNIT" ]; then
         return 0
     fi
-    return 1
+    NODE_SERVICE_UNIT_LIST_TMP=$(create_temp_file "node-service-unit-list" ".txt") || return 2
+    if run_node_service_systemctl list-unit-files "${SERVICE_NAME}.service" --no-legend --no-pager \
+        >"$NODE_SERVICE_UNIT_LIST_TMP" 2>/dev/null; then
+        query_status=0
+    else
+        query_status=$?
+        rm -f "$NODE_SERVICE_UNIT_LIST_TMP"
+        NODE_SERVICE_UNIT_LIST_TMP=""
+        return "$query_status"
+    fi
+    if grep -q "^${SERVICE_NAME}.service[[:space:]]" "$NODE_SERVICE_UNIT_LIST_TMP"; then
+        query_status=0
+    else
+        query_status=1
+    fi
+    rm -f "$NODE_SERVICE_UNIT_LIST_TMP"
+    NODE_SERVICE_UNIT_LIST_TMP=""
+    return "$query_status"
 }
 restart_service_if_installed() {
-    if ! service_installed; then
-        return
+    local service_query_status=0
+
+    if service_installed; then
+        :
+    else
+        service_query_status=$?
+        if [ "$service_query_status" -eq 1 ]; then
+            return 0
+        fi
+        colorized_echo red "Failed to inspect $SERVICE_NAME before restarting it."
+        return "$service_query_status"
     fi
     if [ "$(id -u)" != "0" ]; then
         colorized_echo yellow "$SERVICE_NAME is installed; run as root to restart it."
         return
     fi
-    systemctl restart "$SERVICE_NAME"
+    run_node_service_lifecycle_command restart || return 1
     colorized_echo blue "$SERVICE_NAME service restarted."
 }
-update_service_if_installed() {
-    if ! service_installed; then
-        return
+
+# Restarting while service-update is swapping the binary starts whichever file
+# happens to be in place at that instant, which is exactly the race the update
+# transaction exists to prevent. Take the same lock, and bound the systemctl
+# call so a wedged systemd cannot hang the command indefinitely.
+run_node_service_lifecycle_command() {
+    local action="$1" status=0
+    local held_by_caller="$NODE_SERVICE_UPDATE_LOCK_HELD"
+
+    acquire_node_serviced_update_lock \
+        "${NODE_SERVICE_LIFECYCLE_LOCK_WAIT_SECONDS:-30}" || return 1
+    run_node_service_systemctl "$action" "$SERVICE_NAME" || status=$?
+    # Never release a lock an enclosing transaction is still relying on.
+    [ "$held_by_caller" = true ] || release_node_serviced_update_lock
+    if [ "$status" -ne 0 ]; then
+        colorized_echo red "Failed to $action $SERVICE_NAME."
     fi
+    return "$status"
+}
+
+require_node_service_installed() {
+    local service_query_status=0
+
+    if service_installed; then
+        return 0
+    else
+        service_query_status=$?
+    fi
+    if [ "$service_query_status" -eq 1 ]; then
+        colorized_echo red "Service not installed. Run service-install first."
+    else
+        colorized_echo red "Failed to inspect $SERVICE_NAME installation state."
+    fi
+    return "$service_query_status"
+}
+update_service_if_installed() (
+    local report_missing="${1:-false}"
+
+    set_service_paths
     if [ "$(id -u)" != "0" ]; then
         colorized_echo yellow "$SERVICE_NAME is installed; run as root to update/restart it."
         return
     fi
-    install_node_service_script
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
+    if ! acquire_node_serviced_update_lock; then
+        return 1
+    fi
+    # Arm the guard before querying systemd. A wedged systemctl must not hold
+    # the mutation lock without bounded cleanup and rollback protection.
+    if ! begin_node_service_transaction; then
+        colorized_echo red "Failed to snapshot or inspect $SERVICE_NAME before updating it."
+        return 1
+    fi
+    if [ "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" != true ]; then
+        commit_node_service_transaction
+        if [ "$report_missing" = true ]; then
+            colorized_echo red "Service not installed. Run service-install first."
+            return 1
+        fi
+        return
+    fi
+    if ! install_node_service_script; then
+        abort_node_service_transaction
+        return 1
+    fi
+    if ! run_node_service_systemctl daemon-reload || ! run_node_service_systemctl restart "$SERVICE_NAME" || ! wait_for_node_service_ready; then
+        colorized_echo red "$SERVICE_NAME failed to become ready after update; restoring the previous binary."
+        if ! abort_node_service_transaction; then
+            colorized_echo red "Failed to restore the previous $SERVICE_NAME installation."
+        fi
+        return 1
+    fi
+    commit_node_service_transaction
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
+)
+
+# $1 is how many seconds to wait for a concurrent holder; 0 fails immediately.
+acquire_node_serviced_update_lock() {
+    local wait_seconds="${1:-0}"
+    local target_dir target_name lock_path
+    local -a flock_args
+
+    if [ "$NODE_SERVICE_UPDATE_LOCK_HELD" = true ]; then
+        return 0
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        colorized_echo red "flock is required to update $SERVICE_NAME safely."
+        return 1
+    fi
+    if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]]; then
+        colorized_echo red "Invalid $SERVICE_NAME lock wait: $wait_seconds"
+        return 1
+    fi
+    target_dir=$(dirname "$SERVICE_BINARY_PATH")
+    target_name=$(basename "$SERVICE_BINARY_PATH")
+    lock_path="${NODE_SERVICE_UPDATE_LOCK_PATH:-${target_dir}/.${target_name}.update.lock}"
+    if ! exec 9>"$lock_path"; then
+        colorized_echo red "Failed to open the $SERVICE_NAME update lock at $lock_path."
+        return 1
+    fi
+    if [ "$wait_seconds" -gt 0 ]; then
+        flock_args=(-w "$wait_seconds" 9)
+    else
+        flock_args=(-n 9)
+    fi
+    if ! flock "${flock_args[@]}"; then
+        exec 9>&-
+        colorized_echo yellow "Another $SERVICE_NAME update is already in progress."
+        return 1
+    fi
+    NODE_SERVICE_UPDATE_LOCK_HELD=true
+}
+
+release_node_serviced_update_lock() {
+    if [ "$NODE_SERVICE_UPDATE_LOCK_HELD" != true ]; then
+        return 0
+    fi
+    flock -u 9 >/dev/null 2>&1 || true
+    exec 9>&-
+    NODE_SERVICE_UPDATE_LOCK_HELD=false
+}
+
+cleanup_node_service_transaction_backups() {
+    local backup
+
+    for backup in "${NODE_SERVICE_TRANSACTION_BACKUPS[@]}" "${NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[@]}"; do
+        [ -z "$backup" ] || rm -f "$backup"
+    done
+    NODE_SERVICE_TRANSACTION_PATHS=()
+    NODE_SERVICE_TRANSACTION_HAD_PATH=()
+    NODE_SERVICE_TRANSACTION_BACKUPS=()
+    NODE_SERVICE_TRANSACTION_LINK_TARGETS=()
+    NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET=()
+    NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS=()
+    NODE_SERVICE_TRANSACTION_RESTORED=()
+}
+
+cleanup_node_serviced_temporary_files() {
+    [ -z "$NODE_SERVICE_STAGED_PATH" ] || rm -f "$NODE_SERVICE_STAGED_PATH"
+    [ -z "$NODE_SERVICE_DOWNLOAD_TMP_DIR" ] || rm -rf "$NODE_SERVICE_DOWNLOAD_TMP_DIR"
+    [ -z "$NODE_SERVICE_UNIT_LIST_TMP" ] || rm -f "$NODE_SERVICE_UNIT_LIST_TMP"
+    NODE_SERVICE_STAGED_PATH=""
+    NODE_SERVICE_DOWNLOAD_TMP_DIR=""
+    NODE_SERVICE_UNIT_LIST_TMP=""
+}
+
+signal_node_service_process() {
+    local signal="$1"
+    local child_pid="$2"
+    local child_pgid="$3"
+
+    if [ -n "$child_pgid" ]; then
+        kill -"$signal" -- "-$child_pgid" >/dev/null 2>&1 || true
+    elif [ -n "$child_pid" ]; then
+        kill -"$signal" "$child_pid" >/dev/null 2>&1 || true
+    fi
+}
+
+terminate_node_service_external_child() {
+    local child_pid="$NODE_SERVICE_EXTERNAL_CHILD_PID"
+    local child_pgid="$NODE_SERVICE_EXTERNAL_CHILD_PGID"
+    local watchdog_pid="$NODE_SERVICE_EXTERNAL_WATCHDOG_PID"
+    local attempt=0
+
+    NODE_SERVICE_EXTERNAL_CHILD_PID=""
+    NODE_SERVICE_EXTERNAL_CHILD_PGID=""
+    NODE_SERVICE_EXTERNAL_WATCHDOG_PID=""
+    [ -z "$watchdog_pid" ] || kill -KILL "$watchdog_pid" >/dev/null 2>&1 || true
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" >/dev/null 2>&1; then
+        signal_node_service_process TERM "$child_pid" "$child_pgid"
+        while kill -0 "$child_pid" >/dev/null 2>&1 && [ "$attempt" -lt 20 ]; do
+            sleep 0.05
+            attempt=$((attempt + 1))
+        done
+        if kill -0 "$child_pid" >/dev/null 2>&1; then
+            signal_node_service_process KILL "$child_pid" "$child_pgid"
+        fi
+        wait "$child_pid" >/dev/null 2>&1 || true
+    fi
+    [ -z "$watchdog_pid" ] || wait "$watchdog_pid" >/dev/null 2>&1 || true
+}
+
+run_node_service_external() {
+    local timeout_seconds="$1"
+    shift
+    local child_pid child_pgid="" watchdog_pid status
+
+    # Unit tests replace external programs with shell functions. Keep those
+    # synchronous; production commands use a separate process group below.
+    if declare -F "${1:-}" >/dev/null 2>&1; then
+        local function_status=0
+        "$@" || function_status=$?
+        return "$function_status"
+    fi
+    if ! [[ "$timeout_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        colorized_echo red "Invalid node service external-command timeout: $timeout_seconds"
+        return 1
+    fi
+    if ! command -v setsid >/dev/null 2>&1; then
+        colorized_echo red "setsid is required to supervise $1 safely."
+        return 1
+    fi
+    local -a setsid_args=()
+    if node_service_setsid_supports_wait; then
+        setsid_args+=(--wait)
+    fi
+    setsid "${setsid_args[@]}" bash -c 'trap - INT TERM; exec "$@"' bash "$@" &
+    child_pid=$!
+    child_pgid="$child_pid"
+    NODE_SERVICE_EXTERNAL_CHILD_PID="$child_pid"
+    NODE_SERVICE_EXTERNAL_CHILD_PGID="$child_pgid"
+    (
+        trap - INT TERM
+        sleep "$timeout_seconds"
+        if kill -0 "$child_pid" >/dev/null 2>&1; then
+            signal_node_service_process TERM "$child_pid" "$child_pgid"
+            sleep "${NODE_SERVICE_EXTERNAL_KILL_AFTER_SECONDS:-2}"
+            if kill -0 "$child_pid" >/dev/null 2>&1; then
+                signal_node_service_process KILL "$child_pid" "$child_pgid"
+            fi
+        fi
+    ) &
+    watchdog_pid=$!
+    NODE_SERVICE_EXTERNAL_WATCHDOG_PID="$watchdog_pid"
+    if wait "$child_pid"; then
+        status=0
+    else
+        status=$?
+    fi
+    NODE_SERVICE_EXTERNAL_CHILD_PID=""
+    NODE_SERVICE_EXTERNAL_CHILD_PGID=""
+    NODE_SERVICE_EXTERNAL_WATCHDOG_PID=""
+    kill -KILL "$watchdog_pid" >/dev/null 2>&1 || true
+    wait "$watchdog_pid" >/dev/null 2>&1 || true
+    return "$status"
+}
+
+node_service_setsid_supports_wait() {
+    local help_output
+
+    if [ -n "${NODE_SERVICE_SETSID_WAIT_SUPPORTED:-}" ]; then
+        [ "$NODE_SERVICE_SETSID_WAIT_SUPPORTED" = true ]
+        return
+    fi
+    help_output=$(setsid --help 2>&1 || true)
+    [[ "$help_output" == *"--wait"* ]]
+}
+
+run_node_service_systemctl() {
+    run_node_service_external "${NODE_SERVICE_SYSTEMCTL_TIMEOUT_SECONDS:-30}" systemctl "$@"
+}
+
+snapshot_node_service_path() {
+    local source_path="$1"
+    local index="${#NODE_SERVICE_TRANSACTION_PATHS[@]}"
+    local source_dir source_name backup_path link_target="" link_target_backup=""
+    local had_path=false had_link_target=false
+
+    source_dir=$(dirname "$source_path")
+    source_name=$(basename "$source_path")
+    backup_path="${source_dir}/.${source_name}.transaction.$$.$RANDOM"
+    if [ -e "$source_path" ] || [ -L "$source_path" ]; then
+        had_path=true
+        NODE_SERVICE_TRANSACTION_PATHS[index]="$source_path"
+        NODE_SERVICE_TRANSACTION_HAD_PATH[index]="$had_path"
+        NODE_SERVICE_TRANSACTION_BACKUPS[index]="$backup_path"
+        NODE_SERVICE_TRANSACTION_LINK_TARGETS[index]=""
+        NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET[index]=false
+        NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[index]=""
+        NODE_SERVICE_TRANSACTION_RESTORED[index]=false
+        cp -a "$source_path" "$backup_path" || return 1
+        if [ "$source_path" = "$ENV_FILE" ] && [ ! -L "$backup_path" ]; then
+            chmod 600 "$backup_path" || return 1
+        fi
+        if [ -L "$source_path" ]; then
+            link_target=$(readlink -f "$source_path" 2>/dev/null || true)
+            if [ -n "$link_target" ] && { [ -e "$link_target" ] || [ -L "$link_target" ]; }; then
+                had_link_target=true
+                link_target_backup="$(dirname "$link_target")/.$(basename "$link_target").transaction-target.$$.$RANDOM"
+                NODE_SERVICE_TRANSACTION_LINK_TARGETS[index]="$link_target"
+                NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET[index]="$had_link_target"
+                NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[index]="$link_target_backup"
+                cp -a "$link_target" "$link_target_backup" || return 1
+                if [ "$source_path" = "$ENV_FILE" ] && [ ! -L "$link_target_backup" ]; then
+                    chmod 600 "$link_target_backup" || return 1
+                fi
+            fi
+        fi
+    else
+        backup_path=""
+        NODE_SERVICE_TRANSACTION_PATHS[index]="$source_path"
+        NODE_SERVICE_TRANSACTION_HAD_PATH[index]="$had_path"
+        NODE_SERVICE_TRANSACTION_BACKUPS[index]=""
+        NODE_SERVICE_TRANSACTION_LINK_TARGETS[index]=""
+        NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET[index]=false
+        NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[index]=""
+        NODE_SERVICE_TRANSACTION_RESTORED[index]=false
+    fi
+}
+
+restore_node_service_backup_copy() {
+    local backup="$1"
+    local destination="$2"
+    local destination_dir destination_name restore_path
+
+    destination_dir=$(dirname "$destination")
+    destination_name=$(basename "$destination")
+    restore_path=$(create_temp_file_in_dir "$destination_dir" ".${destination_name}.restore" "") || return 1
+    rm -f "$restore_path" || return 1
+    if ! cp -a "$backup" "$restore_path" || ! mv -f "$restore_path" "$destination"; then
+        rm -f "$restore_path"
+        return 1
+    fi
+}
+
+restore_node_service_snapshot_entry() {
+    local index="$1"
+    local path="${NODE_SERVICE_TRANSACTION_PATHS[index]}"
+    local backup="${NODE_SERVICE_TRANSACTION_BACKUPS[index]}"
+    local link_target="${NODE_SERVICE_TRANSACTION_LINK_TARGETS[index]}"
+    local link_target_backup="${NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[index]}"
+
+    [ "${NODE_SERVICE_TRANSACTION_RESTORED[index]}" != true ] || return 0
+    if [ "${NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET[index]}" = true ] && [ -n "$link_target_backup" ]; then
+        # Keep the snapshot until the complete rollback, including restoration
+        # of systemd state, has succeeded. A later systemctl failure otherwise
+        # leaves an orphaned first-install unit with no recovery copy.
+        if ! restore_node_service_backup_copy "$link_target_backup" "$link_target"; then
+            return 1
+        fi
+    fi
+    if [ "${NODE_SERVICE_TRANSACTION_HAD_PATH[index]}" = true ]; then
+        if [ -z "$backup" ] || ! restore_node_service_backup_copy "$backup" "$path"; then
+            return 1
+        fi
+    elif ! rm -f "$path"; then
+        return 1
+    fi
+    NODE_SERVICE_TRANSACTION_RESTORED[index]=true
+}
+
+rollback_node_service_transaction() {
+    local restore_failed=false index
+
+    if [ "$NODE_SERVICE_TRANSACTION_MUTATION_STARTED" != true ]; then
+        return 0
+    fi
+    for ((index = ${#NODE_SERVICE_TRANSACTION_PATHS[@]} - 1; index >= 0; index--)); do
+        restore_node_service_snapshot_entry "$index" || restore_failed=true
+    done
+    if ! run_node_service_systemctl daemon-reload; then
+        restore_failed=true
+    fi
+    if [ "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" = true ]; then
+        if [ "$NODE_SERVICE_TRANSACTION_WAS_ENABLED" = true ]; then
+            run_node_service_systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || restore_failed=true
+        else
+            run_node_service_systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || restore_failed=true
+        fi
+        if [ "$NODE_SERVICE_TRANSACTION_WAS_ACTIVE" = true ]; then
+            if ! run_node_service_systemctl restart "$SERVICE_NAME" || ! wait_for_node_service_ready; then
+                restore_failed=true
+            fi
+        else
+            run_node_service_systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || restore_failed=true
+        fi
+    else
+        if ! run_node_service_systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1; then
+            colorized_echo red "Failed to disable the newly created $SERVICE_NAME unit; it may remain loaded or active."
+            restore_failed=true
+        fi
+    fi
+    [ "$restore_failed" = false ]
+}
+
+finish_node_service_transaction() {
+    local preserve_backups="${1:-false}"
+
+    trap - EXIT
+    trap '' INT TERM
+    if [ "$preserve_backups" != true ]; then
+        cleanup_node_service_transaction_backups
+    fi
+    cleanup_node_serviced_temporary_files
+    NODE_SERVICE_TRANSACTION_ACTIVE=false
+    NODE_SERVICE_TRANSACTION_COMMITTED=false
+    if [ "$preserve_backups" != true ]; then
+        NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
+    fi
+    release_node_serviced_update_lock
+    trap - INT TERM
+}
+
+report_retained_node_service_backups() {
+    local backup
+
+    for backup in "${NODE_SERVICE_TRANSACTION_BACKUPS[@]}" "${NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS[@]}"; do
+        [ -z "$backup" ] || colorized_echo red "Retained transaction backup: $backup"
+    done
+}
+
+node_service_transaction_guard() {
+    local event="$1"
+    local status="$2"
+    local signal_status=0
+
+    local rollback_failed=false
+
+    trap - EXIT
+    trap '' INT TERM
+    terminate_node_service_external_child
+    if [ "$NODE_SERVICE_TRANSACTION_ACTIVE" = true ] && [ "$NODE_SERVICE_TRANSACTION_COMMITTED" != true ]; then
+        rollback_node_service_transaction || {
+            rollback_failed=true
+            colorized_echo red "Failed to fully restore the interrupted $SERVICE_NAME transaction."
+        }
+    fi
+    if [ "$rollback_failed" != true ]; then
+        cleanup_node_service_transaction_backups
+    else
+        colorized_echo red "Transaction backups were retained for manual recovery."
+        report_retained_node_service_backups
+    fi
+    cleanup_node_serviced_temporary_files
+    NODE_SERVICE_TRANSACTION_ACTIVE=false
+    if [ "$rollback_failed" != true ]; then
+        NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
+    fi
+    release_node_serviced_update_lock
+
+    case "$event" in
+    INT) signal_status=130 ;;
+    TERM) signal_status=143 ;;
+    EXIT) return "$status" ;;
+    esac
+    exit "$signal_status"
+}
+
+begin_node_service_transaction() {
+    local service_query_status=0 state_query_status=0
+
+    NODE_SERVICE_TRANSACTION_ACTIVE=true
+    NODE_SERVICE_TRANSACTION_COMMITTED=false
+    NODE_SERVICE_TRANSACTION_STATE_CAPTURED=false
+    NODE_SERVICE_TRANSACTION_MUTATION_STARTED=false
+    NODE_SERVICE_TRANSACTION_HAD_SERVICE=false
+    NODE_SERVICE_TRANSACTION_WAS_ACTIVE=false
+    NODE_SERVICE_TRANSACTION_WAS_ENABLED=false
+    NODE_SERVICE_TRANSACTION_PATHS=()
+    NODE_SERVICE_TRANSACTION_HAD_PATH=()
+    NODE_SERVICE_TRANSACTION_BACKUPS=()
+    NODE_SERVICE_TRANSACTION_LINK_TARGETS=()
+    NODE_SERVICE_TRANSACTION_HAD_LINK_TARGET=()
+    NODE_SERVICE_TRANSACTION_LINK_TARGET_BACKUPS=()
+    NODE_SERVICE_TRANSACTION_RESTORED=()
+    trap 'node_service_transaction_guard EXIT "$?"' EXIT
+    trap 'node_service_transaction_guard INT "$?"' INT
+    trap 'node_service_transaction_guard TERM "$?"' TERM
+
+    snapshot_node_service_path "$ENV_FILE" || return 1
+    snapshot_node_service_path "$SERVICE_UNIT" || return 1
+    snapshot_node_service_path "$SERVICE_BINARY_PATH" || return 1
+    if service_installed; then
+        NODE_SERVICE_TRANSACTION_HAD_SERVICE=true
+    else
+        service_query_status=$?
+        [ "$service_query_status" -eq 1 ] || return "$service_query_status"
+    fi
+    if [ "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" = true ]; then
+        if run_node_service_systemctl is-active --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
+            NODE_SERVICE_TRANSACTION_WAS_ACTIVE=true
+        else
+            state_query_status=$?
+            # systemctl documents 3 as the normal inactive result. Any other
+            # status is an unknown/failed query and must not arm rollback.
+            [ "$state_query_status" -eq 3 ] || return "$state_query_status"
+        fi
+        if run_node_service_systemctl is-enabled --quiet "$SERVICE_NAME" >/dev/null 2>&1; then
+            NODE_SERVICE_TRANSACTION_WAS_ENABLED=true
+        else
+            state_query_status=$?
+            # A known disabled unit returns 1. Timeouts, signals, and other
+            # inspection failures remain fatal before any mutation starts.
+            [ "$state_query_status" -eq 1 ] || return "$state_query_status"
+        fi
+    fi
+    NODE_SERVICE_TRANSACTION_STATE_CAPTURED=true
+}
+
+mark_node_service_transaction_mutation_started() {
+    if [ "$NODE_SERVICE_TRANSACTION_ACTIVE" != true ]; then
+        return 0
+    fi
+    [ "$NODE_SERVICE_TRANSACTION_STATE_CAPTURED" = true ] || return 1
+    NODE_SERVICE_TRANSACTION_MUTATION_STARTED=true
+}
+
+abort_node_service_transaction() {
+    local status=0
+
+    trap - EXIT
+    trap '' INT TERM
+    rollback_node_service_transaction || status=1
+    if [ "$status" -ne 0 ]; then
+        colorized_echo red "Transaction backups were retained for retry or manual recovery."
+        report_retained_node_service_backups
+        finish_node_service_transaction true
+    else
+        finish_node_service_transaction false
+    fi
+    return "$status"
+}
+
+commit_node_service_transaction() {
+    NODE_SERVICE_TRANSACTION_COMMITTED=true
+    finish_node_service_transaction
+}
+
+wait_for_node_service_ready() {
+    # 0 means the deadline alone bounds the wait. A fixed attempt count used to
+    # be the real limit: ten attempts a second apart gave up after roughly
+    # eleven seconds, well inside the unit's own TimeoutStartSec=30, so a node
+    # that simply started slowly was declared unhealthy and its update rolled
+    # back. An explicit count is still honoured.
+    local max_attempts="${NODE_SERVICE_READINESS_ATTEMPTS:-0}"
+    local stable_required="${NODE_SERVICE_READINESS_STABLE_CHECKS:-3}"
+    local delay_seconds="${NODE_SERVICE_READINESS_DELAY_SECONDS:-1}"
+    local deadline_seconds="${NODE_SERVICE_READINESS_DEADLINE_SECONDS:-30}"
+    local attempt=0 stable=0 started_at now remaining probe_timeout sleep_for
+    local probe_status api_probe_skipped=false
+
+    if ! [[ "$max_attempts" =~ ^[0-9]+$ && "$stable_required" =~ ^[1-9][0-9]*$ &&
+        "$deadline_seconds" =~ ^[1-9][0-9]*$ && "$delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        colorized_echo red "Invalid $SERVICE_NAME readiness limits."
+        return 1
+    fi
+    started_at=$(node_service_monotonic_seconds) || return 1
+
+    while [ "$max_attempts" -eq 0 ] || [ "$attempt" -lt "$max_attempts" ]; do
+        now=$(node_service_monotonic_seconds) || return 1
+        remaining=$((deadline_seconds - (now - started_at)))
+        [ "$remaining" -gt 0 ] || return 1
+        probe_timeout=$(awk -v timeout="${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}" -v remaining="$remaining" \
+            'BEGIN { budget = remaining / 2; print timeout < budget ? timeout : budget }')
+        if run_node_service_external "$remaining" systemctl is-active --quiet "$SERVICE_NAME"; then
+            now=$(node_service_monotonic_seconds) || return 1
+            remaining=$((deadline_seconds - (now - started_at)))
+            [ "$remaining" -gt 0 ] || return 1
+        else
+            probe_timeout=""
+        fi
+        probe_status=1
+        if [ -n "$probe_timeout" ]; then
+            node_service_api_ready "$probe_timeout"
+            probe_status=$?
+        fi
+        # A probe that cannot run at all is not evidence that the service is
+        # unhealthy. Rolling back a working update because the local curl is
+        # too old, or because the certificate has no usable identity, is worse
+        # than not checking, so fall back to the systemd state confirmed above.
+        if [ "$probe_status" -eq "$NODE_SERVICE_PROBE_UNAVAILABLE" ]; then
+            if [ "$api_probe_skipped" = false ]; then
+                api_probe_skipped=true
+                colorized_echo yellow \
+                    "Continuing with systemd state only; the $SERVICE_NAME API readiness probe could not run."
+            fi
+            probe_status=0
+        fi
+        if [ "$probe_status" -eq 0 ]; then
+            stable=$((stable + 1))
+            if [ "$stable" -ge "$stable_required" ]; then
+                return 0
+            fi
+        else
+            stable=0
+        fi
+        attempt=$((attempt + 1))
+        if [ "$max_attempts" -eq 0 ] || [ "$attempt" -lt "$max_attempts" ]; then
+            now=$(node_service_monotonic_seconds) || return 1
+            remaining=$((deadline_seconds - (now - started_at)))
+            [ "$remaining" -gt 0 ] || return 1
+            sleep_for=$(awk -v delay="$delay_seconds" -v remaining="$remaining" \
+                'BEGIN { print delay < remaining ? delay : remaining }')
+            sleep "$sleep_for"
+        fi
+    done
+    return 1
+}
+
+node_service_monotonic_seconds() {
+    if [ -r /proc/uptime ]; then
+        awk '{ print int($1); exit }' /proc/uptime
+    else
+        # Non-Linux test environments retain a bounded wall-clock fallback.
+        date +%s
+    fi
+}
+
+read_node_service_env_value() {
+    local key="$1"
+
+    [ -r "$ENV_FILE" ] || return 1
+    # node-serviced uses godotenv.Overload. Parse only data (never source/eval)
+    # while matching the relevant godotenv rules: export, last duplicate wins,
+    # comments, single/double quotes, double-quote escapes and prior-key
+    # expansion. This keeps readiness pointed at the configuration the daemon
+    # actually loaded.
+    awk -v wanted="$key" '
+        function ltrim(value) { sub(/^[ \t\v\f\r]+/, "", value); return value }
+        function rtrim(value) { sub(/[ \t\v\f\r]+$/, "", value); return value }
+        function expand_vars(value,    out, i, j, c, name, braced) {
+            out = ""
+            for (i = 1; i <= length(value); i++) {
+                c = substr(value, i, 1)
+                if (c == "\\" && substr(value, i + 1, 1) == "$") {
+                    out = out "$"
+                    i++
+                    continue
+                }
+                if (c != "$") {
+                    out = out c
+                    continue
+                }
+                j = i + 1
+                braced = substr(value, j, 1) == "{"
+                if (braced) j++
+                name = ""
+                while (j <= length(value) && substr(value, j, 1) ~ /[A-Z0-9_]/) {
+                    name = name substr(value, j, 1)
+                    j++
+                }
+                if (name == "") {
+                    out = out c
+                    continue
+                }
+                if (braced && substr(value, j, 1) == "}") j++
+                out = out vars[name]
+                i = j - 1
+            }
+            return out
+        }
+        function decode_double(value,    out, i, c, nextc) {
+            out = ""
+            for (i = 1; i <= length(value); i++) {
+                c = substr(value, i, 1)
+                if (c != "\\" || i == length(value)) {
+                    out = out c
+                    continue
+                }
+                nextc = substr(value, i + 1, 1)
+                if (nextc == "n") out = out "\n"
+                else if (nextc == "r") out = out "\r"
+                else if (nextc == "$") out = out "\\$"
+                else out = out nextc
+                i++
+            }
+            return expand_vars(out)
+        }
+        # Position of the closing quote, or 0 while the value is still open.
+        function closing_quote(value, quote,    i) {
+            for (i = 2; i <= length(value); i++) {
+                if (substr(value, i, 1) == quote && substr(value, i - 1, 1) != "\\") return i
+            }
+            return 0
+        }
+        # A later assignment overrides an earlier one, including its error, so
+        # that last-duplicate-wins holds for malformed lines too.
+        function store_quoted(name, value, quote,    closing, remainder) {
+            closing = closing_quote(value, quote)
+            remainder = ltrim(substr(value, closing + 1))
+            if (remainder != "" && substr(remainder, 1, 1) != "#") {
+                key_error[name] = 1
+                return
+            }
+            value = substr(value, 2, closing - 2)
+            if (quote == "\"") value = decode_double(value)
+            delete key_error[name]
+            vars[name] = value
+        }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            # godotenv accepts values that span lines inside quotes. Treating
+            # them as malformed used to fail the whole file, so one multi-line
+            # value anywhere hid every other key, API_KEY included.
+            if (open_key != "") {
+                open_value = open_value "\n" line
+                if (!closing_quote(open_value, open_quote)) {
+                    if (++open_lines <= 256) next
+                    key_error[open_key] = 1
+                } else {
+                    store_quoted(open_key, open_value, open_quote)
+                }
+                open_key = ""
+                next
+            }
+            line = ltrim(line)
+            if (line == "" || substr(line, 1, 1) == "#") next
+            if (line ~ /^export[ \t\v\f\r]/) {
+                sub(/^export[ \t\v\f\r]+/, "", line)
+            }
+            delimiter = match(line, /[=:]/)
+            # Nothing here names a key, so there is no key to blame; godotenv
+            # refuses to load such a file at all.
+            if (!delimiter) { file_error = 1; next }
+            name = rtrim(substr(line, 1, delimiter - 1))
+            if (name !~ /^[A-Za-z0-9_.]+$/) { file_error = 1; next }
+            value = ltrim(substr(line, delimiter + 1))
+            quote = substr(value, 1, 1)
+            if (quote == "\"" || quote == "\047") {
+                if (!closing_quote(value, quote)) {
+                    open_key = name
+                    open_value = value
+                    open_quote = quote
+                    open_lines = 0
+                    next
+                }
+                store_quoted(name, value, quote)
+            } else {
+                comment = 0
+                for (i = 2; i <= length(value); i++) {
+                    if (substr(value, i, 1) == "#" && substr(value, i - 1, 1) ~ /[ \t\v\f\r]/) {
+                        comment = i
+                        break
+                    }
+                }
+                if (comment) value = substr(value, 1, comment - 1)
+                delete key_error[name]
+                vars[name] = expand_vars(rtrim(value))
+            }
+        }
+        END {
+            if (open_key != "") key_error[open_key] = 1
+            if (file_error || (wanted in key_error) || !(wanted in vars)) exit 1
+            printf "%s", vars[wanted]
+        }
+    ' "$ENV_FILE"
+}
+
+node_service_certificate_identity() {
+    local ssl_cert="$1"
+    local timeout_seconds="${2:-${NODE_SERVICE_OPENSSL_TIMEOUT_SECONDS:-5}}"
+    local cert_output cn_output="" token dns_identity="" wildcard_identity="" ip_identity="" san_present=false
+    local wildcard_suffix subject
+
+    NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT=""
+    cert_output=$(create_temp_file "node-service-cert" ".txt") || return 1
+    if ! run_node_service_external "$timeout_seconds" \
+        openssl x509 -in "$ssl_cert" -noout -ext subjectAltName >"$cert_output" 2>/dev/null; then
+        rm -f "$cert_output"
+        return 1
+    fi
+    while IFS= read -r token; do
+        token="${token#"${token%%[![:space:]]*}"}"
+        token="${token%"${token##*[![:space:]]}"}"
+        case "$token" in
+        *"Subject Alternative Name:"*)
+            san_present=true
+            ;;
+        DNS:*)
+            token="${token#DNS:}"
+            if [ -z "$dns_identity" ] && [[ "$token" != *'*'* ]] &&
+                [[ "$token" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                dns_identity="$token"
+            elif [ -z "$wildcard_identity" ] && [[ "$token" == \*.* ]]; then
+                wildcard_suffix="${token#*.}"
+                if [[ "$wildcard_suffix" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                    # A fixed single label is covered by a left-most wildcard
+                    # and avoids DNS while retaining valid SNI/Host identity.
+                    wildcard_identity="node-serviced-health.${wildcard_suffix}"
+                fi
+            fi
+            ;;
+        "IP Address:"*)
+            token="${token#IP Address:}"
+            if [ -z "$ip_identity" ] && is_ip_address "$token"; then
+                ip_identity="$token"
+            fi
+            ;;
+        esac
+    done < <(tr ',' '\n' <"$cert_output")
+    rm -f "$cert_output"
+    if [ -n "$dns_identity" ]; then
+        NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT="$dns_identity"
+    elif [ -n "$wildcard_identity" ]; then
+        NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT="$wildcard_identity"
+    elif [ -n "$ip_identity" ]; then
+        NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT="$ip_identity"
+    elif [ "$san_present" = true ]; then
+        return 1
+    else
+        # Preserve compatibility with legacy SAN-less certificates. CN is
+        # considered only when the SAN extension is absent, matching TLS name
+        # verification precedence.
+        cn_output=$(create_temp_file "node-service-cert-cn" ".txt") || return 1
+        if ! run_node_service_external "$timeout_seconds" \
+            openssl x509 -in "$ssl_cert" -noout -subject -nameopt RFC2253 >"$cn_output" 2>/dev/null; then
+            rm -f "$cn_output"
+            return 1
+        fi
+        subject=$(<"$cn_output")
+        rm -f "$cn_output"
+        subject="${subject#subject=}"
+        subject="${subject#subject =}"
+        while IFS= read -r token; do
+            token="${token#CN=}"
+            if [[ "$token" == \*.* ]]; then
+                wildcard_suffix="${token#*.}"
+                if [[ "$wildcard_suffix" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                    NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT="node-serviced-health.${wildcard_suffix}"
+                    return 0
+                fi
+            elif [[ "$token" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT="$token"
+                return 0
+            fi
+        done < <(printf '%s\n' "$subject" | tr ',' '\n' | grep '^CN=')
+        return 1
+    fi
+}
+
+# Exit codes that mean the probe could not be carried out, rather than that
+# the service answered badly. 2/4/48 say this curl cannot express the request
+# and 127 that curl is missing; 60/77/83 are certificate-verification
+# failures, which a healthy service produces whenever SSL_CERT_FILE has been
+# renewed but the running daemon still presents the previous certificate.
+node_service_curl_probe_unavailable() {
+    case "$1" in
+    2 | 4 | 48 | 60 | 77 | 83 | 127) return 0 ;;
+    esac
+    return 1
+}
+
+# Returns 0 when the service answered, 1 when it did not, and
+# NODE_SERVICE_PROBE_UNAVAILABLE when this host cannot perform the check at
+# all. Callers roll an update back on 1 only: a probe that cannot run is no
+# evidence against the service.
+node_service_api_ready() {
+    local timeout_seconds="${1:-${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}}"
+    local api_port api_key ssl_cert tls_identity url_host curl_config curl_status
+
+    api_port=$(read_node_service_env_value API_PORT)
+    api_key=$(read_node_service_env_value API_KEY)
+    ssl_cert=$(read_node_service_env_value SSL_CERT_FILE)
+    # Match node-serviced's own default when an older environment omits
+    # API_PORT. New installations still write the script-selected port.
+    api_port="${api_port:-3000}"
+    ssl_cert="${ssl_cert:-$SSL_CERT_FILE}"
+
+    if ! [[ "$api_port" =~ ^[0-9]+$ && "$api_port" -ge 1 && "$api_port" -le 65535 ]] ||
+        [ -z "$api_key" ] || [[ "$api_key" == *$'\n'* || "$api_key" == *$'\r'* ]] ||
+        [ ! -r "$ssl_cert" ]; then
+        colorized_echo yellow "$SERVICE_NAME readiness configuration is incomplete in $ENV_FILE."
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    fi
+    if ! node_service_certificate_identity "$ssl_cert" "$timeout_seconds"; then
+        # Either the certificate carries no usable identity or this openssl
+        # predates -ext subjectAltName. Neither says anything about health.
+        colorized_echo yellow "$SERVICE_NAME certificate has no usable DNS/IP certificate identity."
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    fi
+    tls_identity="$NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT"
+    url_host="$tls_identity"
+    if [[ "$url_host" == *:* ]]; then
+        url_host="[$url_host]"
+    fi
+
+    # Keep the API key out of the process argument list. The temporary curl
+    # configuration is owner-readable only and is removed after the probe.
+    curl_config=$(create_temp_file "node-service-readiness" ".curl") ||
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    harden_secret_file "$curl_config" || {
+        rm -f "$curl_config"
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    }
+    if ! {
+        printf 'silent\nshow-error\nfail\n'
+        printf 'noproxy = "*"\n'
+        printf 'max-time = "%s"\n' "$timeout_seconds"
+        printf 'connect-timeout = "%s"\n' "${NODE_SERVICE_READINESS_CONNECT_TIMEOUT_SECONDS:-2}"
+        printf 'cacert = "%s"\n' "$(printf '%s' "$ssl_cert" | sed 's/[\\"]/\\&/g')"
+        printf 'header = "x-api-key: %s"\n' "$(printf '%s' "$api_key" | sed 's/[\\"]/\\&/g')"
+        # Preserve the certificate identity for TLS SNI and the HTTP Host
+        # header while forcing the TCP connection to the local service. Unlike
+        # DNS resolution, connect-to is deterministic during recovery.
+        # This curl invocation has exactly one URL, so wildcard source fields
+        # avoid IPv6 host-matching ambiguity while still changing only the TCP
+        # destination. TLS verification and HTTP Host continue to use the URL.
+        printf 'connect-to = "::127.0.0.1:%s"\n' "$api_port"
+        printf 'url = "https://%s:%s/"\n' "$url_host" "$api_port"
+    } >"$curl_config"; then
+        rm -f "$curl_config"
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    fi
+    run_node_service_external "$timeout_seconds" curl --config "$curl_config" >/dev/null
+    curl_status=$?
+    rm -f "$curl_config"
+    if [ "$curl_status" -eq 0 ]; then
+        return 0
+    fi
+    if node_service_curl_probe_unavailable "$curl_status"; then
+        colorized_echo yellow \
+            "The $SERVICE_NAME readiness probe could not be completed (curl exit $curl_status)."
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    fi
+    return 1
 }
 detect_node_serviced_platform() {
     local arch os platform
@@ -288,46 +1235,165 @@ install_node_script() {
         exit 1
     fi
 }
+verify_node_serviced_binary() {
+    local binary_path="$1"
+    local magic=""
+
+    if [ -L "$binary_path" ] || [ ! -f "$binary_path" ] || [ ! -s "$binary_path" ]; then
+        return 1
+    fi
+    chmod 755 "$binary_path" || return 1
+    [ -x "$binary_path" ] || return 1
+
+    # node-serviced releases are Linux ELF executables. Checking the magic
+    # catches HTML/error bodies and truncated/otherwise invalid extracted files
+    # even when their executable bit is set.
+    magic=$(LC_ALL=C od -An -tx1 -N4 "$binary_path" 2>/dev/null | tr -d ' \n')
+    [ "$magic" = "7f454c46" ]
+}
+
+verify_node_serviced_checksum() {
+    local checksum_url="$1"
+    local asset_name="$2"
+    local archive_path="$3"
+    local tmp_dir="$4"
+    local checksum_path expected actual
+
+    if [ -z "$checksum_url" ] || [ "$checksum_url" = "null" ]; then
+        case "${NODE_SERVICE_REQUIRE_CHECKSUM:-true}" in
+        false | 0 | no)
+            colorized_echo yellow "No checksums.txt asset is available; continuing because checksum verification was explicitly disabled."
+            return 0
+            ;;
+        *)
+            colorized_echo red "No checksums.txt asset is available and checksum verification is required."
+            return 1
+            ;;
+        esac
+    fi
+
+    checksum_path="${tmp_dir}/checksums.txt"
+    if ! run_node_service_external "${NODE_SERVICE_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
+        curl -fL --connect-timeout 10 --max-time 90 --retry 3 --retry-delay 1 "$checksum_url" -o "$checksum_path"; then
+        colorized_echo red "Failed to download node-serviced checksums from $checksum_url"
+        return 1
+    fi
+    expected=$(awk -v name="$asset_name" '$2 == name || $2 == "*" name { print $1; exit }' "$checksum_path")
+    if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        colorized_echo red "No valid SHA-256 checksum found for $asset_name"
+        return 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$archive_path" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$archive_path" | awk '{print $1}')
+    else
+        colorized_echo red "SHA-256 verification is required, but sha256sum/shasum is unavailable."
+        return 1
+    fi
+    if [ "${actual,,}" != "${expected,,}" ]; then
+        colorized_echo red "SHA-256 checksum mismatch for $asset_name"
+        return 1
+    fi
+}
+
+activate_node_serviced_binary() {
+    local candidate_path="$1"
+    local target_dir target_name staged_path
+
+    target_dir=$(dirname "$SERVICE_BINARY_PATH")
+    target_name=$(basename "$SERVICE_BINARY_PATH")
+    staged_path=$(create_temp_file_in_dir "$target_dir" ".${target_name}.new" "")
+    NODE_SERVICE_STAGED_PATH="$staged_path"
+
+    if ! install -m 755 "$candidate_path" "$staged_path" || ! verify_node_serviced_binary "$staged_path"; then
+        rm -f "$staged_path"
+        NODE_SERVICE_STAGED_PATH=""
+        return 1
+    fi
+    if ! mark_node_service_transaction_mutation_started; then
+        rm -f "$staged_path"
+        NODE_SERVICE_STAGED_PATH=""
+        return 1
+    fi
+    if ! mv "$staged_path" "$SERVICE_BINARY_PATH"; then
+        rm -f "$staged_path"
+        NODE_SERVICE_STAGED_PATH=""
+        return 1
+    fi
+    NODE_SERVICE_STAGED_PATH=""
+}
+
 install_node_service_script() {
     set_service_paths
+    local platform release_json release_json_path latest_tag latest_version asset_name asset_url checksum_url tmp_dir archive_path binary_path
+    tmp_dir=$(create_temp_dir "node-serviced") || {
+        colorized_echo red "Failed to create a temporary directory for the node-serviced release."
+        return 1
+    }
+    NODE_SERVICE_DOWNLOAD_TMP_DIR="$tmp_dir"
     if ! command -v jq >/dev/null 2>&1; then
         detect_os
         install_package jq
     fi
     colorized_echo blue "Installing node-serviced binary"
-    local platform release_json latest_tag latest_version asset_name asset_url tmp_dir archive_path
     platform=$(detect_node_serviced_platform)
-    if ! release_json=$(curl -fsSL "$NODE_SERVICE_RELEASE_API"); then
+    release_json_path="${tmp_dir}/release.json"
+    if ! run_node_service_external "${NODE_SERVICE_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
+        curl -fsSL --connect-timeout 10 --max-time 90 --retry 3 --retry-delay 1 \
+        "$NODE_SERVICE_RELEASE_API" -o "$release_json_path"; then
         colorized_echo red "Failed to query latest node-serviced release from $NODE_SERVICE_RELEASE_API"
-        exit 1
+        return 1
     fi
+    release_json=$(<"$release_json_path")
     latest_tag=$(echo "$release_json" | jq -r '.tag_name // empty')
     latest_version="${latest_tag#v}"
     if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
         colorized_echo red "Failed to resolve latest node-serviced version from $NODE_SERVICE_RELEASE_API"
-        exit 1
+        return 1
     fi
     asset_name="${NODE_SERVICE_BINARY_NAME}_${latest_version}_${platform}.tar.gz"
     asset_url=$(echo "$release_json" | jq -r --arg name "$asset_name" '.assets[]? | select(.name==$name) | .browser_download_url' | head -n 1)
     if [ -z "$asset_url" ] || [ "$asset_url" = "null" ]; then
         colorized_echo red "node-serviced asset not found for platform $platform (expected $asset_name)"
-        exit 1
+        return 1
     fi
-    tmp_dir=$(create_temp_dir "node-serviced")
+    checksum_url=$(echo "$release_json" | jq -r '.assets[]? | select(.name=="checksums.txt") | .browser_download_url' | head -n 1)
     archive_path="${tmp_dir}/${asset_name}"
     colorized_echo cyan "  Downloading ${asset_name}..."
-    if ! curl -sSL "$asset_url" -o "$archive_path"; then
+    if ! run_node_service_external "${NODE_SERVICE_DOWNLOAD_TIMEOUT_SECONDS:-120}" \
+        curl -fL --connect-timeout 10 --max-time 90 --retry 3 --retry-delay 1 "$asset_url" -o "$archive_path"; then
         colorized_echo red "Failed to download node-serviced from $asset_url"
         rm -rf "$tmp_dir"
-        exit 1
+        return 1
+    fi
+    if [ ! -f "$archive_path" ] || [ ! -s "$archive_path" ]; then
+        colorized_echo red "Downloaded node-serviced archive is empty or not a regular file."
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! verify_node_serviced_checksum "$checksum_url" "$asset_name" "$archive_path" "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        return 1
     fi
     colorized_echo cyan "  Extracting node-serviced..."
-    if ! tar -xzf "$archive_path" -C "$tmp_dir" "$NODE_SERVICE_BINARY_NAME" 2>/dev/null; then
+    if ! run_node_service_external "${NODE_SERVICE_EXTRACT_TIMEOUT_SECONDS:-30}" \
+        tar -xzf "$archive_path" -C "$tmp_dir" "$NODE_SERVICE_BINARY_NAME" 2>/dev/null; then
         colorized_echo red "Failed to extract node-serviced binary from archive."
         rm -rf "$tmp_dir"
-        exit 1
+        return 1
     fi
-    install -m 755 "${tmp_dir}/${NODE_SERVICE_BINARY_NAME}" "$SERVICE_BINARY_PATH"
+    binary_path="${tmp_dir}/${NODE_SERVICE_BINARY_NAME}"
+    if ! verify_node_serviced_binary "$binary_path"; then
+        colorized_echo red "Extracted node-serviced is not a non-empty Linux executable."
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! activate_node_serviced_binary "$binary_path"; then
+        colorized_echo red "Failed to atomically install node-serviced at $SERVICE_BINARY_PATH"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
     rm -rf "$tmp_dir"
     colorized_echo green "node-serviced installed successfully at $SERVICE_BINARY_PATH (v${latest_version})"
 }
@@ -879,7 +1945,7 @@ uninstall_node_script() {
 }
 uninstall_node_service_script() {
     set_service_paths
-    if [ -f "$SERVICE_BINARY_PATH" ]; then
+    if [ -e "$SERVICE_BINARY_PATH" ] || [ -L "$SERVICE_BINARY_PATH" ]; then
         colorized_echo yellow "Removing node-serviced binary"
         rm "$SERVICE_BINARY_PATH"
     fi
@@ -986,6 +2052,9 @@ sync_env_ssl_paths() {
     local current_cert current_key updated=false
     current_cert=$(grep -E '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_CERT_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
     current_key=$(grep -E '^[[:space:]]*SSL_KEY_FILE[[:space:]]*=' "$ENV_FILE" | head -n1 | sed "s/^[[:space:]]*SSL_KEY_FILE[[:space:]]*=[[:space:]]*//;s/[\"']//g")
+    if [[ -z "$current_cert" || "$current_cert" =~ /var/lib/pg-node/ || -z "$current_key" || "$current_key" =~ /var/lib/pg-node/ ]]; then
+        mark_node_service_transaction_mutation_started || return 1
+    fi
     if [[ -z "$current_cert" || "$current_cert" =~ /var/lib/pg-node/ ]]; then
         sed -i "s|^[[:space:]]*SSL_CERT_FILE[[:space:]]*=.*|SSL_CERT_FILE= ${desired_cert}|" "$ENV_FILE"
         grep -q '^[[:space:]]*SSL_CERT_FILE[[:space:]]*=' "$ENV_FILE" || echo "SSL_CERT_FILE= ${desired_cert}" >>"$ENV_FILE"
@@ -1186,7 +2255,7 @@ install_command() {
         read -p "Do you want to install and start the systemd service for $APP_NAME? (Y/n): " install_service_choice
     fi
     if [[ -z "$install_service_choice" || "$install_service_choice" =~ ^[Yy]$ ]]; then
-        install_service_command
+        install_service_command || return 1
     else
         colorized_echo yellow "Skipped installing systemd service for $APP_NAME."
     fi
@@ -1218,9 +2287,7 @@ uninstall_command() {
     if is_node_up; then
         down_node
     fi
-    if service_installed; then
-        uninstall_service_command
-    fi
+    uninstall_service_command true || return 1
     uninstall_completion
     uninstall_node_script
     uninstall_node
@@ -1341,7 +2408,82 @@ restart_command() {
         follow_node_logs
     fi
 }
-install_service_command() {
+write_node_service_unit() {
+    local unit_dir unit_temp
+
+    unit_dir=$(dirname "$SERVICE_UNIT")
+    unit_temp=$(create_temp_file_in_dir "$unit_dir" ".${SERVICE_NAME}.unit" "") || return 1
+    if ! cat >"$unit_temp" <<EOF
+[Unit]
+Description=PasarGuard Node Service API ($APP_NAME)
+After=network-online.target docker.service
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=$SERVICE_BINARY_PATH
+WorkingDirectory=$APP_DIR
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=10
+Environment="ENV_FILE=$ENV_FILE"
+Environment="APP_NAME=$APP_NAME"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        rm -f "$unit_temp"
+        return 1
+    fi
+    if ! mark_node_service_transaction_mutation_started; then
+        rm -f "$unit_temp"
+        return 1
+    fi
+    mv -f "$unit_temp" "$SERVICE_UNIT"
+}
+
+can_reuse_node_service_api_port() {
+    local had_service="$1"
+    local requested_port="$2"
+    local existing_port="$3"
+
+    [ "$had_service" = true ] && [ "$requested_port" = "$existing_port" ]
+}
+
+replace_node_service_api_port() {
+    local api_port="$1"
+    local api_port_comment="$2"
+
+    sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$ENV_FILE" || return 1
+    if ! grep -q '^# *API_PORT' "$ENV_FILE"; then
+        sed -i "/^API_PORT[[:space:]]*=.*/i ${api_port_comment}" "$ENV_FILE" || return 1
+    fi
+}
+
+append_node_service_api_port() {
+    local api_port="$1"
+    local api_port_comment="$2"
+
+    {
+        printf '\n'
+        printf '%s\n' "$api_port_comment"
+        printf 'API_PORT= %s\n' "$api_port"
+    } >>"$ENV_FILE"
+}
+
+persist_node_service_api_port() {
+    local api_port="$1"
+    local api_port_comment="$2"
+
+    if grep -q '^API_PORT[[:space:]]*=' "$ENV_FILE"; then
+        replace_node_service_api_port "$api_port" "$api_port_comment"
+    else
+        append_node_service_api_port "$api_port" "$api_port_comment"
+    fi
+}
+
+install_service_command() (
     check_running_as_root
     require_systemd
     set_service_paths
@@ -1366,31 +2508,42 @@ install_service_command() {
         colorized_echo red "node not installed! Install it before setting up the service."
         exit 1
     fi
+    # Serialize the complete installation transaction with service-update.
+    # The lock must be held before any backup or mutation so a later rollback
+    # can never overwrite a successfully completed concurrent transaction.
+    if ! acquire_node_serviced_update_lock; then
+        return 1
+    fi
+    if ! begin_node_service_transaction; then
+        colorized_echo red "Failed to snapshot $SERVICE_NAME before installation."
+        return 1
+    fi
+
     ensure_env_exists
-    sync_env_ssl_paths
+    sync_env_ssl_paths || return 1
     get_occupied_ports
     local api_port existing_api_port=""
     local default_api_port=62051
-    if existing_api_port=$(grep -E '^API_PORT[[:space:]]*=' "$ENV_FILE" | head -n1 | sed 's/^API_PORT[[:space:]]*=[[:space:]]*//'); then
-        existing_api_port=$(echo "$existing_api_port" | tr -d '"'\')
-    fi
+    existing_api_port=$(read_node_service_env_value API_PORT 2>/dev/null || true)
     if [[ "$existing_api_port" =~ ^[0-9]+$ ]] && [ "$existing_api_port" -ge 1 ] && [ "$existing_api_port" -le 65535 ]; then
         colorized_echo blue "Existing API_PORT found in $ENV_FILE: $existing_api_port"
         default_api_port="$existing_api_port"
     fi
     if [ -n "${INSTALL_API_PORT:-}" ]; then
         api_port="$INSTALL_API_PORT"
-        if is_port_occupied "$api_port"; then
-            colorized_echo red "Port $api_port is already in use."
-            exit 1
-        fi
         if ! [[ "$api_port" =~ ^[0-9]+$ && "$api_port" -ge 1 && "$api_port" -le 65535 ]]; then
             colorized_echo red "Invalid port. Please enter a port between 1 and 65535."
             exit 1
         fi
+        if is_port_occupied "$api_port" &&
+            ! can_reuse_node_service_api_port "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" "$api_port" "$existing_api_port"; then
+            colorized_echo red "Port $api_port is already in use."
+            exit 1
+        fi
     elif [ "$AUTO_CONFIRM" = true ]; then
         api_port="$default_api_port"
-        if is_port_occupied "$api_port"; then
+        if is_port_occupied "$api_port" &&
+            ! can_reuse_node_service_api_port "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" "$api_port" "$existing_api_port"; then
             colorized_echo red "Port $api_port is already in use. Run without -y to choose another port."
             exit 1
         fi
@@ -1401,7 +2554,8 @@ install_service_command() {
                 api_port="$default_api_port"
             fi
             if [[ "$api_port" =~ ^[0-9]+$ && "$api_port" -ge 1 && "$api_port" -le 65535 ]]; then
-                if is_port_occupied "$api_port"; then
+                if is_port_occupied "$api_port" &&
+                    ! can_reuse_node_service_api_port "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" "$api_port" "$existing_api_port"; then
                     colorized_echo red "Port $api_port is already in use. Please enter another port."
                 else
                     break
@@ -1412,103 +2566,121 @@ install_service_command() {
         done
     fi
     local api_port_comment="# API_PORT is used by the node service API ($APP_NAME)"
-    if grep -q '^API_PORT[[:space:]]*=' "$ENV_FILE"; then
-        sed -i "s/^API_PORT[[:space:]]*=.*/API_PORT= ${api_port}/" "$ENV_FILE"
-        if ! grep -q '^# *API_PORT' "$ENV_FILE"; then
-            sed -i "/^API_PORT[[:space:]]*=.*/i ${api_port_comment}" "$ENV_FILE"
-        fi
+    mark_node_service_transaction_mutation_started || return 1
+    if persist_node_service_api_port "$api_port" "$api_port_comment"; then
+        :
     else
-        {
-            echo ""
-            echo "$api_port_comment"
-            echo "API_PORT= ${api_port}"
-        } >>"$ENV_FILE"
+        colorized_echo red "Failed to save API_PORT in $ENV_FILE; restoring the previous service configuration."
+        abort_node_service_transaction ||
+            colorized_echo red "Failed to restore the previous $SERVICE_NAME configuration."
+        return 1
     fi
     colorized_echo magenta "API_PORT selected: ${api_port}"
     configure_firewall_for_port "$api_port" "tcp"
-    install_node_service_script
+    if ! install_node_service_script; then
+        colorized_echo red "Failed to install $SERVICE_NAME binary; restoring the previous service configuration."
+        abort_node_service_transaction ||
+            colorized_echo red "Failed to restore the previous $SERVICE_NAME configuration."
+        return 1
+    fi
     colorized_echo blue "Creating systemd unit at $SERVICE_UNIT"
-    cat >"$SERVICE_UNIT" <<EOF
-[Unit]
-Description=PasarGuard Node Service API ($APP_NAME)
-After=network-online.target docker.service
-Wants=network-online.target
-[Service]
-Type=simple
-ExecStart=$SERVICE_BINARY_PATH
-WorkingDirectory=$APP_DIR
-Restart=on-failure
-RestartSec=5
-TimeoutStartSec=30
-TimeoutStopSec=10
-Environment="ENV_FILE=$ENV_FILE"
-Environment="APP_NAME=$APP_NAME"
-Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now "$SERVICE_NAME"
+    if ! write_node_service_unit || ! run_node_service_systemctl daemon-reload || ! run_node_service_systemctl enable "$SERVICE_NAME" ||
+        ! run_node_service_systemctl restart "$SERVICE_NAME" || ! wait_for_node_service_ready; then
+        colorized_echo red "$SERVICE_NAME failed to become ready; restoring the previous installation."
+        if ! abort_node_service_transaction; then
+            colorized_echo red "Failed to restore the previous $SERVICE_NAME installation."
+        fi
+        return 1
+    fi
+    commit_node_service_transaction
     colorized_echo green "$SERVICE_NAME service installed and started."
-}
-uninstall_service_command() {
+)
+uninstall_service_command() (
+    local quiet_if_missing="${1:-false}"
+
     check_running_as_root
-    require_systemd
-    if ! service_installed; then
-        colorized_echo yellow "Service not installed; nothing to uninstall."
+    # The general node uninstall historically skipped service cleanup on
+    # non-systemd hosts. Keep that harmless behavior for its quiet probe.
+    if [ "$quiet_if_missing" = true ] && ! command -v systemctl >/dev/null 2>&1; then
         return
     fi
-    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-    if [ -f "$SERVICE_UNIT" ]; then
-        colorized_echo yellow "Removing systemd unit $SERVICE_UNIT"
-        rm "$SERVICE_UNIT"
+    require_systemd
+    set_service_paths
+    if ! acquire_node_serviced_update_lock; then
+        return 1
     fi
-    uninstall_node_service_script
-    systemctl daemon-reload
+    if ! begin_node_service_transaction; then
+        colorized_echo red "Failed to snapshot or inspect $SERVICE_NAME before uninstalling it."
+        return 1
+    fi
+    if [ "$NODE_SERVICE_TRANSACTION_HAD_SERVICE" != true ]; then
+        commit_node_service_transaction
+        if [ "$quiet_if_missing" != true ]; then
+            colorized_echo yellow "Service not installed; nothing to uninstall."
+        fi
+        return
+    fi
+    if [ "$NODE_SERVICE_TRANSACTION_WAS_ACTIVE" = true ]; then
+        mark_node_service_transaction_mutation_started || return 1
+        if ! run_node_service_systemctl stop "$SERVICE_NAME" >/dev/null 2>&1; then
+            colorized_echo red "Failed to stop $SERVICE_NAME; keeping the installed service intact."
+            abort_node_service_transaction ||
+                colorized_echo red "Failed to fully restore the previous $SERVICE_NAME state."
+            return 1
+        fi
+    fi
+    if [ "$NODE_SERVICE_TRANSACTION_WAS_ENABLED" = true ]; then
+        mark_node_service_transaction_mutation_started || return 1
+        if ! run_node_service_systemctl disable "$SERVICE_NAME" >/dev/null 2>&1; then
+            colorized_echo red "Failed to disable $SERVICE_NAME; restoring its previous state."
+            abort_node_service_transaction ||
+                colorized_echo red "Failed to fully restore the previous $SERVICE_NAME state."
+            return 1
+        fi
+    fi
+    mark_node_service_transaction_mutation_started || return 1
+    if [ -e "$SERVICE_UNIT" ] || [ -L "$SERVICE_UNIT" ]; then
+        colorized_echo yellow "Removing systemd unit $SERVICE_UNIT"
+        rm "$SERVICE_UNIT" || {
+            abort_node_service_transaction ||
+                colorized_echo red "Failed to fully restore the previous $SERVICE_NAME installation."
+            return 1
+        }
+    fi
+    if ! uninstall_node_service_script || ! run_node_service_systemctl daemon-reload; then
+        colorized_echo red "Failed to remove $SERVICE_NAME cleanly; restoring the previous installation."
+        abort_node_service_transaction ||
+            colorized_echo red "Failed to fully restore the previous $SERVICE_NAME installation."
+        return 1
+    fi
+    commit_node_service_transaction
     colorized_echo green "$SERVICE_NAME service uninstalled."
-}
+)
 
 service_start_command() {
     check_running_as_root
     require_systemd
-    if ! service_installed; then
-        colorized_echo red "Service not installed. Run service-install first."
-        exit 1
-    fi
-    systemctl start "$SERVICE_NAME"
+    require_node_service_installed || return 1
+    run_node_service_lifecycle_command start || return 1
     colorized_echo green "$SERVICE_NAME service started."
 }
 service_stop_command() {
     check_running_as_root
     require_systemd
-    if ! service_installed; then
-        colorized_echo red "Service not installed. Run service-install first."
-        exit 1
-    fi
-    systemctl stop "$SERVICE_NAME"
+    require_node_service_installed || return 1
+    run_node_service_lifecycle_command stop || return 1
     colorized_echo green "$SERVICE_NAME service stopped."
 }
 
 service_update_command() {
     check_running_as_root
     require_systemd
-    if ! service_installed; then
-        colorized_echo red "Service not installed. Run service-install first."
-        exit 1
-    fi
-    install_node_service_script
-    systemctl daemon-reload
-    systemctl restart "$SERVICE_NAME"
-    colorized_echo green "$SERVICE_NAME service updated and restarted."
+    update_service_if_installed true
 }
 
 service_logs_command() {
     require_systemd
-    if ! service_installed; then
-        colorized_echo red "Service not installed. Run service-install first."
-        exit 1
-    fi
+    require_node_service_installed || return 1
     local no_follow=false
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
@@ -1538,18 +2710,12 @@ service_logs_command() {
 restart_service_command() {
     check_running_as_root
     require_systemd
-    if ! service_installed; then
-        colorized_echo red "Service not installed. Run service-install first."
-        exit 1
-    fi
+    require_node_service_installed || return 1
     restart_service_if_installed
 }
 status_service_command() {
     require_systemd
-    if ! service_installed; then
-        colorized_echo red "Service not installed. Run service-install first."
-        exit 1
-    fi
+    require_node_service_installed || return 1
     systemctl status --no-pager "$SERVICE_NAME"
 }
 status_command() {
@@ -2273,10 +3439,10 @@ pg_node_main() {
         ;;
     service-install)
         shift
-        install_service_command "$@"
+        install_service_command "$@" || return 1
         ;;
     service-uninstall)
-        uninstall_service_command
+        uninstall_service_command || return 1
         ;;
     service-restart)
         restart_service_command

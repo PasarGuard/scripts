@@ -108,3 +108,27 @@
 
 Use `help` to view all commands:
 `pg-node help`
+
+### node-serviced update safety
+
+`service-install`, `service-update`, and `service-uninstall` serialize mutations with a persistent `flock` lock and require
+Linux `setsid` (both normally provided by `util-linux`). Older `setsid` versions without `--wait` are supported. Update and
+rollback probes also require Bash, `awk`, `curl`, and `openssl`; release installation requires `jq`, `tar`, and a SHA-256
+tool (`sha256sum` or `shasum`).
+
+`service-start`, `service-stop`, and `service-restart` take the same lock, so they cannot restart the service midway
+through a binary swap. They wait `NODE_SERVICE_LIFECYCLE_LOCK_WAIT_SECONDS` (default `30`) for an update in progress
+before giving up, and their `systemctl` call is time-bounded rather than able to hang indefinitely.
+
+Readiness uses the same `.env` semantics as `node-serviced`: optional `export`, `=` or `:`, last duplicate wins, comments,
+single- and double-quoted values (including values spanning several lines), double-quote escapes, and prior-key
+expansion. The file is parsed as data and is never sourced or evaluated. A malformed entry is charged to its own key, so
+it cannot hide the keys the probe actually reads. `NODE_SERVICE_READINESS_DEADLINE_SECONDS` bounds the complete readiness
+loop (default `30`, matching the unit's `TimeoutStartSec`), while `NODE_SERVICE_READINESS_TIMEOUT_SECONDS` bounds an
+individual authenticated HTTPS probe. Set `NODE_SERVICE_READINESS_ATTEMPTS` to cap the number of probes as well; by
+default the deadline alone bounds the wait.
+
+The probe needs `curl` 7.49 or newer for `--connect-to` and `openssl` 1.1.1 or newer for `x509 -ext subjectAltName`.
+Where either is older, or where the certificate in `SSL_CERT_FILE` cannot be verified against what the running daemon
+presents (during a renewal, for instance), the probe reports that it could not run. An update then falls back to the
+systemd unit state with a warning instead of rolling back an installation that is working.
