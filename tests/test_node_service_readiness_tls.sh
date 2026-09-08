@@ -135,11 +135,16 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -addext 'subjectAltName=email:health@example.test' \
     -keyout "$KEY_FILE" -out "$CERT_FILE" >/dev/null 2>&1
 printf 'API_PORT= 3000\nAPI_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$CERT_FILE" > "$ENV_FILE"
-if node_service_api_ready >/dev/null 2>&1; then
-    printf '✗ readiness: unusable SAN incorrectly fell back to CN\n'
-    exit 1
+set +e
+node_service_api_ready >/dev/null 2>&1
+unusable_san_status=$?
+set -e
+if [ "$unusable_san_status" -eq "$NODE_SERVICE_PROBE_UNAVAILABLE" ]; then
+    printf '✓ readiness: an unusable SAN never falls back to CN and is reported unprobeable\n'
 else
-    printf '✓ readiness: SAN without DNS/IP identity fails closed\n'
+    printf '✗ readiness: unusable SAN gave rc%s instead of rc%s\n' \
+        "$unusable_san_status" "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    exit 1
 fi
 
 CERT_FILE="$WORK_DIR/ipv6-san-cert.pem"
@@ -167,5 +172,63 @@ if node_service_api_ready; then
     printf '✓ readiness: IPv6 IP SAN keeps TLS identity while TCP connects to IPv4 loopback\n'
 else
     printf '✗ readiness: IPv6 IP SAN probe was not forced to IPv4 loopback\n'
+    exit 1
+fi
+
+kill "$SERVER_PID" >/dev/null 2>&1 || true
+wait "$SERVER_PID" >/dev/null 2>&1 || true
+SERVER_PID=""
+# Certificate renewal is the ordinary way a healthy service fails to verify:
+# SSL_CERT_FILE already holds the new certificate while the running daemon is
+# still presenting the previous one. Reporting that as a readiness failure
+# rolls back an update that worked, so it must be reported as unprobeable.
+SERVED_CERT="$WORK_DIR/served-cert.pem"
+SERVED_KEY="$WORK_DIR/served-key.pem"
+CERT_FILE="$WORK_DIR/renewed-cert.pem"
+KEY_FILE="$WORK_DIR/renewed-key.pem"
+PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+for pair in "$SERVED_CERT:$SERVED_KEY" "$CERT_FILE:$KEY_FILE"; do
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+        -subj '/CN=node.example.test' \
+        -addext 'subjectAltName=DNS:node.example.test' \
+        -keyout "${pair#*:}" -out "${pair%:*}" >/dev/null 2>&1
+done
+printf 'API_PORT= %s\nAPI_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$PORT" "$CERT_FILE" > "$ENV_FILE"
+openssl s_server -accept "127.0.0.1:$PORT" -cert "$SERVED_CERT" -key "$SERVED_KEY" -www \
+    >"$WORK_DIR/renewed-server.log" 2>&1 &
+SERVER_PID=$!
+for _ in {1..100}; do
+    if (exec 7<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+        exec 7>&-
+        break
+    fi
+    sleep 0.02
+done
+set +e
+node_service_api_ready >/dev/null 2>&1
+renewal_status=$?
+set -e
+if [ "$renewal_status" -eq "$NODE_SERVICE_PROBE_UNAVAILABLE" ]; then
+    printf '✓ readiness: a certificate the daemon has not picked up yet is unprobeable, not unhealthy\n'
+else
+    printf '✗ readiness: expected rc%s for a rotated certificate, got %s\n' \
+        "$NODE_SERVICE_PROBE_UNAVAILABLE" "$renewal_status"
+    exit 1
+fi
+
+# The service is genuinely refusing the request: that is a readiness failure
+# and must stay distinguishable from the case above.
+printf 'API_PORT= %s\nAPI_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$PORT" "$SERVED_CERT" > "$ENV_FILE"
+kill "$SERVER_PID" >/dev/null 2>&1 || true
+wait "$SERVER_PID" >/dev/null 2>&1 || true
+SERVER_PID=""
+set +e
+node_service_api_ready >/dev/null 2>&1
+closed_port_status=$?
+set -e
+if [ "$closed_port_status" -eq 1 ]; then
+    printf '✓ readiness: a service that does not answer is a readiness failure\n'
+else
+    printf '✗ readiness: expected rc1 for a closed port, got %s\n' "$closed_port_status"
     exit 1
 fi

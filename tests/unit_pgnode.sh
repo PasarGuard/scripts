@@ -19,6 +19,7 @@ export -f curl
 export PG_NODE_SOURCE_ONLY="true"
 # shellcheck source=pg-node.sh
 source "$ROOT_DIR/pg-node.sh"
+original_run_node_service_external_definition=$(declare -f run_node_service_external)
 
 PASS=0
 FAIL=0
@@ -323,6 +324,25 @@ assert_eq "$(read_node_service_env_value API_KEY)" $'unit\nkey-$literal' \
 printf 'API_KEY="valid-prefix" trailing-garbage\n' > "$ready_env"
 assert_false "read_node_service_env_value: rejects garbage after a quoted value" \
     read_node_service_env_value API_KEY
+printf 'API_KEY="valid-prefix" trailing-garbage\nAPI_KEY=recovered\n' > "$ready_env"
+assert_eq "$(read_node_service_env_value API_KEY)" "recovered" \
+    "read_node_service_env_value: a later assignment overrides an earlier malformed one"
+cat > "$ready_env" <<'EOF'
+CERT_PEM="-----BEGIN CERTIFICATE-----
+MIIB
+-----END CERTIFICATE-----"
+API_KEY=unit-test-key
+EOF
+assert_eq "$(read_node_service_env_value API_KEY)" "unit-test-key" \
+    "read_node_service_env_value: a multi-line value elsewhere does not hide other keys"
+assert_eq "$(read_node_service_env_value CERT_PEM)" \
+    $'-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----' \
+    "read_node_service_env_value: keeps godotenv multi-line quoted values intact"
+printf 'API_KEY=unit-test-key\nOTHER="never closed\n' > "$ready_env"
+assert_eq "$(read_node_service_env_value API_KEY)" "unit-test-key" \
+    "read_node_service_env_value: an unterminated quote is charged to its own key"
+assert_false "read_node_service_env_value: reports the unterminated key itself as unreadable" \
+    read_node_service_env_value OTHER
 printf 'API_PORT= 62051\nAPI_KEY= "unit#test-key" # deployment note\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
 SERVICE_NAME="pg-node-test-service"
 NODE_SERVICE_READINESS_ATTEMPTS=1
@@ -401,6 +421,41 @@ assert_false "wait_for_node_service_ready: rejects active service with unavailab
     wait_for_node_service_ready
 unset NODE_SERVICE_API_READY
 
+# A probe that cannot run is not evidence that the service is unhealthy, so it
+# must be distinguishable from one that ran and failed. Callers roll a
+# completed update back on the latter only.
+probe_status=0
+curl() { return 60; }
+node_service_api_ready >/dev/null 2>&1 || probe_status=$?
+assert_eq "$probe_status" "$NODE_SERVICE_PROBE_UNAVAILABLE" \
+    "node_service_api_ready: reports a certificate that cannot be verified as unprobeable"
+probe_status=0
+curl() { return 22; }
+node_service_api_ready >/dev/null 2>&1 || probe_status=$?
+assert_eq "$probe_status" "1" \
+    "node_service_api_ready: an HTTP error is a genuine readiness failure"
+probe_status=0
+printf 'API_PORT= 62051\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+node_service_api_ready >/dev/null 2>&1 || probe_status=$?
+assert_eq "$probe_status" "$NODE_SERVICE_PROBE_UNAVAILABLE" \
+    "node_service_api_ready: reports incomplete readiness configuration as unprobeable"
+printf 'API_PORT= 62051\nAPI_KEY= unit-test-key\nSSL_CERT_FILE= %s\n' "$ready_cert" > "$ready_env"
+curl() {
+    api_ready_calls=$((api_ready_calls + 1))
+    return 60
+}
+api_ready_calls=0
+assert_true "wait_for_node_service_ready: falls back to systemd state when the probe cannot run" \
+    wait_for_node_service_ready
+assert_eq "$api_ready_calls" "1" \
+    "wait_for_node_service_ready: still attempts the probe before falling back"
+curl() {
+    api_ready_config=$(cat "$2")
+    api_ready_config_path="$2"
+    api_ready_calls=$((api_ready_calls + 1))
+    [ "${NODE_SERVICE_API_READY:-true}" = true ]
+}
+
 # Capability detection permits older util-linux setsid releases that do not
 # implement --wait; run_node_service_external falls back to plain setsid.
 setsid() { printf 'Usage: setsid [options] program\n'; }
@@ -432,6 +487,30 @@ assert_eq "$(cat "$deadline_clock_file")" "103" \
 eval "$original_node_service_monotonic_seconds_definition"
 unset -f systemctl sleep
 unset NODE_SERVICE_READINESS_DEADLINE_SECONDS
+
+# An attempt count that expires before the deadline used to end the wait after
+# roughly eleven seconds, far inside the unit's own TimeoutStartSec, so a node
+# that merely started slowly had its update rolled back. Unset, the budget is
+# the deadline.
+printf '200\n' > "$deadline_clock_file"
+node_service_monotonic_seconds() {
+    local now
+    now=$(cat "$deadline_clock_file")
+    printf '%s\n' "$now"
+    printf '%s\n' "$((now + 1))" > "$deadline_clock_file"
+}
+systemctl() { return 3; }
+sleep() { return 0; }
+unset NODE_SERVICE_READINESS_ATTEMPTS
+NODE_SERVICE_READINESS_DEADLINE_SECONDS=20
+assert_false "wait_for_node_service_ready: spends the whole deadline without an attempt cap" \
+    wait_for_node_service_ready
+assert_eq "$(cat "$deadline_clock_file")" "221" \
+    "wait_for_node_service_ready: uses the full deadline rather than a fixed attempt count"
+eval "$original_node_service_monotonic_seconds_definition"
+unset -f systemctl sleep
+unset NODE_SERVICE_READINESS_DEADLINE_SECONDS
+NODE_SERVICE_READINESS_ATTEMPTS=1
 
 # The lock is held for the entire update transaction so a second updater
 # cannot create a stale backup and later overwrite a successful install.
@@ -485,6 +564,63 @@ assert_true "node-serviced update lock: becomes available after transaction exit
     acquire_node_serviced_update_lock
 release_node_serviced_update_lock
 unset NODE_SERVICE_UPDATE_LOCK_PATH
+
+# service-start/stop/restart used to call systemctl directly, so a restart
+# issued while service-update was swapping the binary started whichever file
+# was in place at that instant. They now take the same lock and time out.
+NODE_SERVICE_UPDATE_LOCK_PATH="$service_test_dir/lifecycle.lock"
+NODE_SERVICE_LIFECYCLE_LOCK_WAIT_SECONDS=1
+lifecycle_action=""
+lifecycle_timeout=""
+lifecycle_command=""
+# Stub the process supervisor only, so the real run_node_service_systemctl
+# wrapper is what supplies the command and its time bound.
+run_node_service_external() {
+    lifecycle_timeout="$1"
+    lifecycle_command="$2"
+    lifecycle_action="$3"
+    return "${NODE_SERVICE_LIFECYCLE_STATUS:-0}"
+}
+assert_true "run_node_service_lifecycle_command: restarts while holding the update lock" \
+    run_node_service_lifecycle_command restart
+assert_eq "$lifecycle_action" "restart" \
+    "run_node_service_lifecycle_command: forwards the requested action"
+assert_eq "$NODE_SERVICE_UPDATE_LOCK_HELD" "false" \
+    "run_node_service_lifecycle_command: releases the lock it acquired"
+NODE_SERVICE_LIFECYCLE_STATUS=1
+assert_false "run_node_service_lifecycle_command: reports a failed systemctl action" \
+    run_node_service_lifecycle_command stop
+assert_eq "$NODE_SERVICE_UPDATE_LOCK_HELD" "false" \
+    "run_node_service_lifecycle_command: releases the lock after a failure"
+unset NODE_SERVICE_LIFECYCLE_STATUS
+# The bare systemctl call had no time bound at all.
+assert_eq "$lifecycle_command" "systemctl" \
+    "run_node_service_lifecycle_command: acts through the supervised systemctl wrapper"
+assert_eq "$lifecycle_timeout" "30" \
+    "run_node_service_lifecycle_command: bounds systemctl with a timeout"
+# A concurrent updater must block the lifecycle command instead of racing it.
+lifecycle_ready="$service_test_dir/lifecycle-ready"
+lifecycle_release="$service_test_dir/lifecycle-release"
+(
+    exec 8>"$NODE_SERVICE_UPDATE_LOCK_PATH"
+    flock 8
+    : > "$lifecycle_ready"
+    while [ ! -e "$lifecycle_release" ]; do
+        sleep 0.01
+    done
+) &
+lifecycle_holder_pid=$!
+lock_wait_attempt=0
+while [ ! -e "$lifecycle_ready" ] && [ "$lock_wait_attempt" -lt 100 ]; do
+    sleep 0.01
+    lock_wait_attempt=$((lock_wait_attempt + 1))
+done
+assert_false "run_node_service_lifecycle_command: refuses to race an in-progress update" \
+    run_node_service_lifecycle_command restart
+: > "$lifecycle_release"
+wait "$lifecycle_holder_pid"
+eval "$original_run_node_service_external_definition"
+unset NODE_SERVICE_UPDATE_LOCK_PATH NODE_SERVICE_LIFECYCLE_LOCK_WAIT_SECONDS
 
 assert_true "can_reuse_node_service_api_port: permits the current service port" \
     can_reuse_node_service_api_port true 62051 62051

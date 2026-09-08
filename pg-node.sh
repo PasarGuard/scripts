@@ -184,6 +184,10 @@ NODE_SERVICE_EXTERNAL_CHILD_PGID=""
 NODE_SERVICE_EXTERNAL_WATCHDOG_PID=""
 NODE_SERVICE_UNIT_LIST_TMP=""
 NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT=""
+# Returned by node_service_api_ready when the probe itself could not run, as
+# opposed to running and finding the service unhealthy. The two must not be
+# confused: a probe that cannot execute is no evidence against the service.
+readonly NODE_SERVICE_PROBE_UNAVAILABLE=2
 declare -a NODE_SERVICE_TRANSACTION_PATHS=()
 declare -a NODE_SERVICE_TRANSACTION_HAD_PATH=()
 declare -a NODE_SERVICE_TRANSACTION_BACKUPS=()
@@ -248,8 +252,27 @@ restart_service_if_installed() {
         colorized_echo yellow "$SERVICE_NAME is installed; run as root to restart it."
         return
     fi
-    systemctl restart "$SERVICE_NAME"
+    run_node_service_lifecycle_command restart || return 1
     colorized_echo blue "$SERVICE_NAME service restarted."
+}
+
+# Restarting while service-update is swapping the binary starts whichever file
+# happens to be in place at that instant, which is exactly the race the update
+# transaction exists to prevent. Take the same lock, and bound the systemctl
+# call so a wedged systemd cannot hang the command indefinitely.
+run_node_service_lifecycle_command() {
+    local action="$1" status=0
+    local held_by_caller="$NODE_SERVICE_UPDATE_LOCK_HELD"
+
+    acquire_node_serviced_update_lock \
+        "${NODE_SERVICE_LIFECYCLE_LOCK_WAIT_SECONDS:-30}" || return 1
+    run_node_service_systemctl "$action" "$SERVICE_NAME" || status=$?
+    # Never release a lock an enclosing transaction is still relying on.
+    [ "$held_by_caller" = true ] || release_node_serviced_update_lock
+    if [ "$status" -ne 0 ]; then
+        colorized_echo red "Failed to $action $SERVICE_NAME."
+    fi
+    return "$status"
 }
 
 require_node_service_installed() {
@@ -307,14 +330,21 @@ update_service_if_installed() (
     colorized_echo blue "$SERVICE_NAME service updated and restarted."
 )
 
+# $1 is how many seconds to wait for a concurrent holder; 0 fails immediately.
 acquire_node_serviced_update_lock() {
+    local wait_seconds="${1:-0}"
     local target_dir target_name lock_path
+    local -a flock_args
 
     if [ "$NODE_SERVICE_UPDATE_LOCK_HELD" = true ]; then
         return 0
     fi
     if ! command -v flock >/dev/null 2>&1; then
         colorized_echo red "flock is required to update $SERVICE_NAME safely."
+        return 1
+    fi
+    if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]]; then
+        colorized_echo red "Invalid $SERVICE_NAME lock wait: $wait_seconds"
         return 1
     fi
     target_dir=$(dirname "$SERVICE_BINARY_PATH")
@@ -324,7 +354,12 @@ acquire_node_serviced_update_lock() {
         colorized_echo red "Failed to open the $SERVICE_NAME update lock at $lock_path."
         return 1
     fi
-    if ! flock -n 9; then
+    if [ "$wait_seconds" -gt 0 ]; then
+        flock_args=(-w "$wait_seconds" 9)
+    else
+        flock_args=(-n 9)
+    fi
+    if ! flock "${flock_args[@]}"; then
         exec 9>&-
         colorized_echo yellow "Another $SERVICE_NAME update is already in progress."
         return 1
@@ -738,20 +773,26 @@ commit_node_service_transaction() {
 }
 
 wait_for_node_service_ready() {
-    local max_attempts="${NODE_SERVICE_READINESS_ATTEMPTS:-10}"
+    # 0 means the deadline alone bounds the wait. A fixed attempt count used to
+    # be the real limit: ten attempts a second apart gave up after roughly
+    # eleven seconds, well inside the unit's own TimeoutStartSec=30, so a node
+    # that simply started slowly was declared unhealthy and its update rolled
+    # back. An explicit count is still honoured.
+    local max_attempts="${NODE_SERVICE_READINESS_ATTEMPTS:-0}"
     local stable_required="${NODE_SERVICE_READINESS_STABLE_CHECKS:-3}"
     local delay_seconds="${NODE_SERVICE_READINESS_DELAY_SECONDS:-1}"
     local deadline_seconds="${NODE_SERVICE_READINESS_DEADLINE_SECONDS:-30}"
     local attempt=0 stable=0 started_at now remaining probe_timeout sleep_for
+    local probe_status api_probe_skipped=false
 
-    if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ && "$stable_required" =~ ^[1-9][0-9]*$ &&
+    if ! [[ "$max_attempts" =~ ^[0-9]+$ && "$stable_required" =~ ^[1-9][0-9]*$ &&
         "$deadline_seconds" =~ ^[1-9][0-9]*$ && "$delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         colorized_echo red "Invalid $SERVICE_NAME readiness limits."
         return 1
     fi
     started_at=$(node_service_monotonic_seconds) || return 1
 
-    while [ "$attempt" -lt "$max_attempts" ]; do
+    while [ "$max_attempts" -eq 0 ] || [ "$attempt" -lt "$max_attempts" ]; do
         now=$(node_service_monotonic_seconds) || return 1
         remaining=$((deadline_seconds - (now - started_at)))
         [ "$remaining" -gt 0 ] || return 1
@@ -764,7 +805,24 @@ wait_for_node_service_ready() {
         else
             probe_timeout=""
         fi
-        if [ -n "$probe_timeout" ] && node_service_api_ready "$probe_timeout"; then
+        probe_status=1
+        if [ -n "$probe_timeout" ]; then
+            node_service_api_ready "$probe_timeout"
+            probe_status=$?
+        fi
+        # A probe that cannot run at all is not evidence that the service is
+        # unhealthy. Rolling back a working update because the local curl is
+        # too old, or because the certificate has no usable identity, is worse
+        # than not checking, so fall back to the systemd state confirmed above.
+        if [ "$probe_status" -eq "$NODE_SERVICE_PROBE_UNAVAILABLE" ]; then
+            if [ "$api_probe_skipped" = false ]; then
+                api_probe_skipped=true
+                colorized_echo yellow \
+                    "Continuing with systemd state only; the $SERVICE_NAME API readiness probe could not run."
+            fi
+            probe_status=0
+        fi
+        if [ "$probe_status" -eq 0 ]; then
             stable=$((stable + 1))
             if [ "$stable" -ge "$stable_required" ]; then
                 return 0
@@ -773,7 +831,7 @@ wait_for_node_service_ready() {
             stable=0
         fi
         attempt=$((attempt + 1))
-        if [ "$attempt" -lt "$max_attempts" ]; then
+        if [ "$max_attempts" -eq 0 ] || [ "$attempt" -lt "$max_attempts" ]; then
             now=$(node_service_monotonic_seconds) || return 1
             remaining=$((deadline_seconds - (now - started_at)))
             [ "$remaining" -gt 0 ] || return 1
@@ -854,36 +912,66 @@ read_node_service_env_value() {
             }
             return expand_vars(out)
         }
+        # Position of the closing quote, or 0 while the value is still open.
+        function closing_quote(value, quote,    i) {
+            for (i = 2; i <= length(value); i++) {
+                if (substr(value, i, 1) == quote && substr(value, i - 1, 1) != "\\") return i
+            }
+            return 0
+        }
+        # A later assignment overrides an earlier one, including its error, so
+        # that last-duplicate-wins holds for malformed lines too.
+        function store_quoted(name, value, quote,    closing, remainder) {
+            closing = closing_quote(value, quote)
+            remainder = ltrim(substr(value, closing + 1))
+            if (remainder != "" && substr(remainder, 1, 1) != "#") {
+                key_error[name] = 1
+                return
+            }
+            value = substr(value, 2, closing - 2)
+            if (quote == "\"") value = decode_double(value)
+            delete key_error[name]
+            vars[name] = value
+        }
         {
             line = $0
             sub(/\r$/, "", line)
+            # godotenv accepts values that span lines inside quotes. Treating
+            # them as malformed used to fail the whole file, so one multi-line
+            # value anywhere hid every other key, API_KEY included.
+            if (open_key != "") {
+                open_value = open_value "\n" line
+                if (!closing_quote(open_value, open_quote)) {
+                    if (++open_lines <= 256) next
+                    key_error[open_key] = 1
+                } else {
+                    store_quoted(open_key, open_value, open_quote)
+                }
+                open_key = ""
+                next
+            }
             line = ltrim(line)
             if (line == "" || substr(line, 1, 1) == "#") next
             if (line ~ /^export[ \t\v\f\r]/) {
                 sub(/^export[ \t\v\f\r]+/, "", line)
             }
             delimiter = match(line, /[=:]/)
-            if (!delimiter) { parse_error = 1; next }
+            # Nothing here names a key, so there is no key to blame; godotenv
+            # refuses to load such a file at all.
+            if (!delimiter) { file_error = 1; next }
             name = rtrim(substr(line, 1, delimiter - 1))
-            if (name !~ /^[A-Za-z0-9_.]+$/) { parse_error = 1; next }
+            if (name !~ /^[A-Za-z0-9_.]+$/) { file_error = 1; next }
             value = ltrim(substr(line, delimiter + 1))
             quote = substr(value, 1, 1)
             if (quote == "\"" || quote == "\047") {
-                closing = 0
-                for (i = 2; i <= length(value); i++) {
-                    if (substr(value, i, 1) == quote && substr(value, i - 1, 1) != "\\") {
-                        closing = i
-                        break
-                    }
-                }
-                if (!closing) { parse_error = 1; next }
-                remainder = ltrim(substr(value, closing + 1))
-                if (remainder != "" && substr(remainder, 1, 1) != "#") {
-                    parse_error = 1
+                if (!closing_quote(value, quote)) {
+                    open_key = name
+                    open_value = value
+                    open_quote = quote
+                    open_lines = 0
                     next
                 }
-                value = substr(value, 2, closing - 2)
-                if (quote == "\"") value = decode_double(value)
+                store_quoted(name, value, quote)
             } else {
                 comment = 0
                 for (i = 2; i <= length(value); i++) {
@@ -893,12 +981,13 @@ read_node_service_env_value() {
                     }
                 }
                 if (comment) value = substr(value, 1, comment - 1)
-                value = expand_vars(rtrim(value))
+                delete key_error[name]
+                vars[name] = expand_vars(rtrim(value))
             }
-            vars[name] = value
         }
         END {
-            if (parse_error || !(wanted in vars)) exit 1
+            if (open_key != "") key_error[open_key] = 1
+            if (file_error || (wanted in key_error) || !(wanted in vars)) exit 1
             printf "%s", vars[wanted]
         }
     ' "$ENV_FILE"
@@ -986,6 +1075,22 @@ node_service_certificate_identity() {
     fi
 }
 
+# Exit codes that mean the probe could not be carried out, rather than that
+# the service answered badly. 2/4/48 say this curl cannot express the request
+# and 127 that curl is missing; 60/77/83 are certificate-verification
+# failures, which a healthy service produces whenever SSL_CERT_FILE has been
+# renewed but the running daemon still presents the previous certificate.
+node_service_curl_probe_unavailable() {
+    case "$1" in
+    2 | 4 | 48 | 60 | 77 | 83 | 127) return 0 ;;
+    esac
+    return 1
+}
+
+# Returns 0 when the service answered, 1 when it did not, and
+# NODE_SERVICE_PROBE_UNAVAILABLE when this host cannot perform the check at
+# all. Callers roll an update back on 1 only: a probe that cannot run is no
+# evidence against the service.
 node_service_api_ready() {
     local timeout_seconds="${1:-${NODE_SERVICE_READINESS_TIMEOUT_SECONDS:-5}}"
     local api_port api_key ssl_cert tls_identity url_host curl_config curl_status
@@ -1001,12 +1106,14 @@ node_service_api_ready() {
     if ! [[ "$api_port" =~ ^[0-9]+$ && "$api_port" -ge 1 && "$api_port" -le 65535 ]] ||
         [ -z "$api_key" ] || [[ "$api_key" == *$'\n'* || "$api_key" == *$'\r'* ]] ||
         [ ! -r "$ssl_cert" ]; then
-        colorized_echo red "$SERVICE_NAME readiness configuration is incomplete in $ENV_FILE."
-        return 1
+        colorized_echo yellow "$SERVICE_NAME readiness configuration is incomplete in $ENV_FILE."
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
     fi
     if ! node_service_certificate_identity "$ssl_cert" "$timeout_seconds"; then
-        colorized_echo red "$SERVICE_NAME certificate has no usable DNS/IP certificate identity."
-        return 1
+        # Either the certificate carries no usable identity or this openssl
+        # predates -ext subjectAltName. Neither says anything about health.
+        colorized_echo yellow "$SERVICE_NAME certificate has no usable DNS/IP certificate identity."
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
     fi
     tls_identity="$NODE_SERVICE_CERTIFICATE_IDENTITY_RESULT"
     url_host="$tls_identity"
@@ -1016,10 +1123,11 @@ node_service_api_ready() {
 
     # Keep the API key out of the process argument list. The temporary curl
     # configuration is owner-readable only and is removed after the probe.
-    curl_config=$(create_temp_file "node-service-readiness" ".curl") || return 1
+    curl_config=$(create_temp_file "node-service-readiness" ".curl") ||
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
     harden_secret_file "$curl_config" || {
         rm -f "$curl_config"
-        return 1
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
     }
     if ! {
         printf 'silent\nshow-error\nfail\n'
@@ -1038,12 +1146,20 @@ node_service_api_ready() {
         printf 'url = "https://%s:%s/"\n' "$url_host" "$api_port"
     } >"$curl_config"; then
         rm -f "$curl_config"
-        return 1
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
     fi
     run_node_service_external "$timeout_seconds" curl --config "$curl_config" >/dev/null
     curl_status=$?
     rm -f "$curl_config"
-    return "$curl_status"
+    if [ "$curl_status" -eq 0 ]; then
+        return 0
+    fi
+    if node_service_curl_probe_unavailable "$curl_status"; then
+        colorized_echo yellow \
+            "The $SERVICE_NAME readiness probe could not be completed (curl exit $curl_status)."
+        return "$NODE_SERVICE_PROBE_UNAVAILABLE"
+    fi
+    return 1
 }
 detect_node_serviced_platform() {
     local arch os platform
@@ -2545,14 +2661,14 @@ service_start_command() {
     check_running_as_root
     require_systemd
     require_node_service_installed || return 1
-    systemctl start "$SERVICE_NAME"
+    run_node_service_lifecycle_command start || return 1
     colorized_echo green "$SERVICE_NAME service started."
 }
 service_stop_command() {
     check_running_as_root
     require_systemd
     require_node_service_installed || return 1
-    systemctl stop "$SERVICE_NAME"
+    run_node_service_lifecycle_command stop || return 1
     colorized_echo green "$SERVICE_NAME service stopped."
 }
 
