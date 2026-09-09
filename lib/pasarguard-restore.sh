@@ -91,7 +91,9 @@ pg_promote_timescaledb_single_backup() {
     elif [ -n "$requested_source_version" ]; then
         source_version="$requested_source_version"
     elif [ -s "$restore_dir/docker-compose.yml" ]; then
-        source_version=$(sed -nE 's#^[[:space:]]*image:[[:space:]]*timescale/timescaledb:([0-9]+([.][0-9]+){1,3})(-pg[0-9]+.*)?[[:space:]]*$#\1#p' \
+        source_version=$(sed -nE \
+            -e 's#^[[:space:]]*image:[[:space:]]*timescale/timescaledb:([0-9]+([.][0-9]+){1,3})(-pg[0-9]+.*)?[[:space:]]*$#\1#p' \
+            -e 's#^[[:space:]]*image:[[:space:]]*timescale/timescaledb-ha:pg[0-9]+-ts([0-9]+([.][0-9]+){1,3})(-all)?[[:space:]]*$#\1#p' \
             "$restore_dir/docker-compose.yml" | head -n 1)
     fi
 
@@ -171,10 +173,14 @@ timescaledb_version_matches() {
     [ "$1" = "$2" ]
 }
 
+# Validate that a TimescaleDB extension version string consists solely of safe
+# semantic version numbers and optional hyphen/dot pre-release qualifiers.
 timescaledb_version_is_safe() {
     [[ "$1" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-.][A-Za-z0-9]+)*$ ]]
 }
 
+# Stop and remove the temporary TimescaleDB compatibility container and its
+# associated Docker volume if they exist.
 cleanup_timescaledb_compat_container() {
     local container_name="$1"
     local volume_name="$2"
@@ -186,9 +192,12 @@ cleanup_timescaledb_compat_container() {
 TIMESCALEDB_COMPAT_CONTAINER=""
 TIMESCALEDB_COMPAT_VOLUME=""
 
+# Signal handler invoked when the process receives HUP, INT, or TERM during
+# compatibility container operations. Ensures temporary containers and volumes
+# are cleaned up and application services are restarted before exiting.
 handle_timescaledb_compat_signal() {
     local exit_code="$1"
-    trap - INT TERM
+    trap - HUP INT TERM
     cleanup_timescaledb_compat_container "$TIMESCALEDB_COMPAT_CONTAINER" "$TIMESCALEDB_COMPAT_VOLUME"
     TIMESCALEDB_COMPAT_CONTAINER=""
     TIMESCALEDB_COMPAT_VOLUME=""
@@ -198,15 +207,20 @@ handle_timescaledb_compat_signal() {
     exit "$exit_code"
 }
 
+# Arm signal traps for HUP, INT, and TERM to guarantee cleanup of temporary
+# compatibility containers and volumes if interrupted.
 arm_timescaledb_compat_cleanup() {
     TIMESCALEDB_COMPAT_CONTAINER="$1"
     TIMESCALEDB_COMPAT_VOLUME="$2"
+    trap 'handle_timescaledb_compat_signal 129' HUP
     trap 'handle_timescaledb_compat_signal 130' INT
     trap 'handle_timescaledb_compat_signal 143' TERM
 }
 
+# Disarm signal traps and perform final cleanup of the temporary TimescaleDB
+# compatibility container and volume.
 finish_timescaledb_compat_cleanup() {
-    trap - INT TERM
+    trap - HUP INT TERM
     cleanup_timescaledb_compat_container "$TIMESCALEDB_COMPAT_CONTAINER" "$TIMESCALEDB_COMPAT_VOLUME"
     TIMESCALEDB_COMPAT_CONTAINER=""
     TIMESCALEDB_COMPAT_VOLUME=""
@@ -299,7 +313,8 @@ pg_prepare_timescaledb_compatible_dumps() {
             return 1
             ;;
     esac
-    local compat_suffix="${$}-${RANDOM}-$(date +%s)"
+    local compat_suffix
+    compat_suffix="${$}-${RANDOM}-$(date +%s)"
     local compat_container="pasarguard-ts-compat-${compat_suffix}"
     local compat_volume=""
 
@@ -686,6 +701,7 @@ pg_restore_all_user_databases() {
     [ "$total" -gt 0 ] && [ "$ok" -eq "$total" ]
 }
 
+# Execute interactive restore of PasarGuard databases, configurations, and data.
 restore_command() {
     colorized_echo blue "Starting restore process..."
 
@@ -712,9 +728,11 @@ restore_command() {
     local sqlite_basename=""
     local sqlite_backup_source=""
     local sqlite_safety_backup=""
+    local services_stopped=false
     local restore_timestamp=""
     restore_timestamp=$(date +%Y%m%d%H%M%S)
 
+    # Redact credentials embedded in a database connection URL for safe logging.
     redact_database_url() {
         local url="$1"
 
@@ -786,8 +804,17 @@ restore_command() {
     >"$log_file"
     echo "Restore Log - $(date)" >>"$log_file"
 
+    # Clean up staging files, display and persist the error log, restart stopped
+    # application services if they were shut down, and terminate with the error code.
     cleanup_and_exit_restore_error() {
         local code="${1:-1}"
+        if [ "$services_stopped" = true ]; then
+            if [[ "$db_type" == "sqlite" ]]; then
+                up_pasarguard || echo "Failed to restart pasarguard after SQLite restore failure" >>"$log_file"
+            else
+                start_pasarguard_app_services || echo "Failed to restart pasarguard services after restore failure" >>"$log_file"
+            fi
+        fi
         if [ -n "$log_file" ] && [ -f "$log_file" ]; then
             if [ -s "$log_file" ]; then
                 colorized_echo yellow "=== Restore Error Log ===" >&2
@@ -1218,6 +1245,7 @@ restore_command() {
             db_name="${db_name%%\?*}"
             db_name="${db_name%%#*}"
 
+            # Decode URL-encoded strings (percent-encoding).
             urldecode() { local url_encoded="${1//+/ }"; printf '%b' "${url_encoded//%/\\x}"; }
             db_user=$(urldecode "$db_user")
             db_password=$(urldecode "$db_password")
@@ -1278,10 +1306,16 @@ restore_command() {
     colorized_echo blue "Stopping pasarguard services for clean restore..."
     if [[ "$db_type" == "sqlite" ]]; then
         # For SQLite, stop all services since we need to restore files
-        down_pasarguard
+        services_stopped=true
+        if ! down_pasarguard; then
+            colorized_echo red "Failed to stop pasarguard services for SQLite restore."
+            echo "Failed to stop pasarguard services via down_pasarguard" >>"$log_file"
+            cleanup_and_exit_restore_error 1
+        fi
     else
         # For containerized databases, stop only application services
         # Keep database containers running for restore via docker exec
+        services_stopped=true
         stop_pasarguard_app_services
     fi
 
@@ -1301,8 +1335,7 @@ restore_command() {
 
         if [ -z "$sqlite_backup_source" ]; then
             colorized_echo red "SQLite backup file not found in backup archive (looked for $sqlite_basename or db_backup.sqlite)."
-            rm -rf "$temp_restore_dir"
-            exit 1
+            cleanup_and_exit_restore_error 1
         fi
 
         if ! command -v sqlite3 >/dev/null 2>&1; then
@@ -1312,14 +1345,12 @@ restore_command() {
         if ! command -v sqlite3 >/dev/null 2>&1; then
             colorized_echo red "sqlite3 is required to validate the SQLite snapshot before restore. Install sqlite3 and run the restore again."
             echo "sqlite3 unavailable; cannot validate $sqlite_backup_source" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
+            cleanup_and_exit_restore_error 1
         fi
         if ! sqlite_snapshot_looks_restorable "$sqlite_backup_source"; then
             colorized_echo red "SQLite backup is corrupt or incomplete; aborting before replacing the current database."
             echo "SQLite snapshot validation failed for $sqlite_backup_source" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
+            cleanup_and_exit_restore_error 1
         fi
 
         if [ -f "$sqlite_file" ]; then
@@ -1328,8 +1359,7 @@ restore_command() {
                 colorized_echo red "Failed to create a safety snapshot of the current SQLite database; restore aborted."
                 echo "SQLite safety snapshot failed: $sqlite_file -> $sqlite_safety_backup" >>"$log_file"
                 rm -f "$sqlite_safety_backup"
-                rm -rf "$temp_restore_dir"
-                exit 1
+                cleanup_and_exit_restore_error 1
             fi
             colorized_echo blue "Current SQLite database saved to $sqlite_safety_backup"
         fi
@@ -1339,22 +1369,19 @@ restore_command() {
         if ! mysql_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
             colorized_echo red "Database backup is missing, truncated, or invalid; aborting before restore."
             echo "MySQL/MariaDB dump validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
+            cleanup_and_exit_restore_error 1
         fi
 
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
             if [ -z "$container_name" ]; then
                 colorized_echo red "Error: MySQL/MariaDB container not found. Is the container running?"
                 echo "MySQL/MariaDB container not found. Container name: ${container_name:-empty}" >>"$log_file"
-                rm -rf "$temp_restore_dir"
-                exit 1
+                cleanup_and_exit_restore_error 1
             else
                 local verified_container=$(verify_and_start_container "$container_name" "$db_type")
                 if [ -z "$verified_container" ]; then
                     colorized_echo red "Failed to start database container. Please start it manually."
-                    rm -rf "$temp_restore_dir"
-                    exit 1
+                    cleanup_and_exit_restore_error 1
                 fi
                 container_name="$verified_container"
 
@@ -1457,7 +1484,6 @@ restore_command() {
                 "$requested_timescaledb_backup_version"; then
                 colorized_echo red "This TimescaleDB backup does not record its source extension version; restore stopped before changing the current database."
                 colorized_echo yellow "For a legacy archive, set TIMESCALEDB_BACKUP_VERSION to its exact source version and run restore again."
-                start_pasarguard_app_services
                 cleanup_and_exit_restore_error 1
             fi
             pg_layout="multi"
@@ -1466,29 +1492,19 @@ restore_command() {
 
         if [ "$pg_layout" = "none" ]; then
             colorized_echo red "Database backup not found in backup archive."
-            start_pasarguard_app_services
             cleanup_and_exit_restore_error 1
         fi
 
         if [ "$pg_layout" = "multi" ] && ! postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then
             colorized_echo red "Multi-database backup is incomplete or does not contain the configured database; aborting before restore."
             echo "Multi-database dump validation failed for $temp_restore_dir/pg_dump" >>"$log_file"
-            start_pasarguard_app_services
             cleanup_and_exit_restore_error 1
-        fi
-
-        if [ "$pg_layout" = "multi" ] && ! postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then
-            colorized_echo red "Multi-database backup is incomplete or does not contain the configured database; aborting before restore."
-            echo "Multi-database dump validation failed for $temp_restore_dir/pg_dump" >>"$log_file"
-            rm -rf "$temp_restore_dir"
-            exit 1
         fi
 
         if [ "$pg_layout" = "single" ]; then
             # Verify backup file is not empty and is readable
             if [ ! -s "$temp_restore_dir/db_backup.sql" ]; then
                 colorized_echo red "Database backup file is empty or unreadable."
-                start_pasarguard_app_services
                 cleanup_and_exit_restore_error 1
             fi
 
@@ -1498,7 +1514,6 @@ restore_command() {
             if ! postgres_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then
                 colorized_echo red "Database backup does not look like a valid SQL dump; aborting before any changes."
                 echo "Dump content validation failed for $temp_restore_dir/db_backup.sql" >>"$log_file"
-                start_pasarguard_app_services
                 cleanup_and_exit_restore_error 1
             fi
 
@@ -1509,13 +1524,11 @@ restore_command() {
         if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
             if [ -z "$container_name" ]; then
                 colorized_echo red "Error: Database container not found. Please start the DB container or specify a valid container name."
-                start_pasarguard_app_services
                 cleanup_and_exit_restore_error 1
             fi
             local verified_container=$(verify_and_start_container "$container_name" "$db_type")
             if [ -z "$verified_container" ]; then
                 colorized_echo red "Failed to start database container. Please start it manually."
-                start_pasarguard_app_services
                 cleanup_and_exit_restore_error 1
             fi
             container_name="$verified_container"
@@ -1531,7 +1544,6 @@ restore_command() {
 
                 if [ -z "$restore_password" ]; then
                     colorized_echo red "No database password found for restore."
-                    start_pasarguard_app_services
                     cleanup_and_exit_restore_error 1
                 fi
 
@@ -1542,7 +1554,6 @@ restore_command() {
                 local compat_restore_root=""
                 if ! compat_restore_root=$(mktemp -d "$temp_restore_dir/pasarguard_ts_compat.XXXXXX"); then
                     colorized_echo red "Could not create TimescaleDB compatibility staging directory."
-                    start_pasarguard_app_services
                     cleanup_and_exit_restore_error 1
                 fi
                 if ! pg_prepare_timescaledb_compatible_dumps \
@@ -1551,7 +1562,6 @@ restore_command() {
                     "$log_file" "$db_name" "$requested_timescaledb_compat_image"; then
                     colorized_echo red "TimescaleDB version compatibility preflight failed. The current database was not changed."
                     colorized_echo yellow "Check log file for details: $log_file"
-                    start_pasarguard_app_services
                     cleanup_and_exit_restore_error 1
                 fi
                 prepared_pg_dump_dir="$PG_PREPARED_DUMP_DIR"
@@ -1705,7 +1715,6 @@ restore_command() {
         else
             colorized_echo red "Failed to restore SQLite database."
             echo "SQLite restore failed" >>"$log_file"
-            up_pasarguard || echo "Failed to restart pasarguard after SQLite restore failure" >>"$log_file"
             cleanup_and_exit_restore_error 1
         fi
     fi
@@ -1721,7 +1730,6 @@ restore_command() {
         if [[ "$db_type" != "sqlite" ]] && [ -f "$COMPOSE_FILE" ]; then
             if ! cp "$COMPOSE_FILE" "$current_compose_snapshot"; then
                 colorized_echo red "Failed to snapshot destination docker-compose.yml."
-                start_pasarguard_app_services
                 cleanup_and_exit_restore_error 1
             fi
         fi
@@ -1774,7 +1782,6 @@ restore_command() {
     if [[ "$db_type" != "sqlite" ]] && [ -s "$current_compose_snapshot" ]; then
         if ! cp "$current_compose_snapshot" "$COMPOSE_FILE"; then
             colorized_echo red "Failed to preserve the destination docker-compose.yml."
-            start_pasarguard_app_services
             cleanup_and_exit_restore_error 1
         fi
         colorized_echo blue "Preserved destination docker-compose.yml."

@@ -668,10 +668,13 @@ setup_pasarguard_ssl_during_install() {
     return 0
 }
 
+# Check if a specific service is defined in docker-compose.yml.
 compose_service_exists() {
     local service_name="$1"
     [ -z "$service_name" ] && return 1
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>/dev/null | grep -Fxq "$service_name"
+    local services
+    services=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>/dev/null) || return 1
+    grep -Fxq "$service_name" <<< "$services"
 }
 
 list_pasarguard_app_services() {
@@ -801,6 +804,7 @@ detect_pasarguard_backend_service() {
     return 1
 }
 
+# Stop application services defined in docker-compose.yml while keeping database containers running.
 stop_pasarguard_app_services() {
     local services
     services=$(list_pasarguard_app_services | xargs)
@@ -808,12 +812,14 @@ stop_pasarguard_app_services() {
     $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" stop $services 2>/dev/null || true
 }
 
+# Start application services defined in docker-compose.yml and propagate Compose exit status.
 start_pasarguard_app_services() {
     local services
     services=$(list_pasarguard_app_services | xargs)
     [ -z "$services" ] && services="pasarguard"
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start $services 2>/dev/null || true
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start $services 2>/dev/null
 }
+
 
 find_container() {
     local db_type=$1
