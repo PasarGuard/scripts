@@ -1565,22 +1565,18 @@ status_command() {
         colorized_echo blue "Down"
         exit 1
     fi
-    echo -n "Status: "
-    colorized_echo green "Up"
-    json=$($COMPOSE -f $COMPOSE_FILE ps -a --format=json)
-    services=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .Service')
-    states=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .State')
-    # Print out the service names and statuses
-    for i in $(seq 0 $(expr $(echo $services | wc -w) - 1)); do
-        service=$(echo $services | cut -d' ' -f $(expr $i + 1))
-        state=$(echo $states | cut -d' ' -f $(expr $i + 1))
-        echo -n "- $service: "
-        if [ "$state" == "running" ]; then
-            colorized_echo green $state
-        else
-            colorized_echo red $state
-        fi
-    done
+    json=$($COMPOSE -f "$COMPOSE_FILE" ps -a --format=json 2>/dev/null || true)
+    if [ -n "$json" ]; then
+        while read -r service state; do
+            [ -z "$service" ] && continue
+            echo -n "- $service: "
+            if [ "$state" = "running" ]; then
+                colorized_echo green "$state"
+            else
+                colorized_echo red "$state"
+            fi
+        done < <(echo "$json" | jq -r 'if type == "array" then .[] else . end | "\(.Service // "unknown") \(.State // "unknown")"' 2>/dev/null || true)
+    fi
 }
 logs_command() {
     help() {
@@ -1877,6 +1873,212 @@ edit_env_command() {
         exit 1
     fi
 }
+
+# Manage domestic Iranian mirrors for Docker and APT (status, test, apply).
+mirror_command() {
+    local mirror_script="$SCRIPT_DIR/iran-sanction/mirror.sh"
+    [ ! -f "$mirror_script" ] && mirror_script="/usr/local/lib/pasarguard-scripts/iran-sanction/mirror.sh"
+    [ ! -f "$mirror_script" ] && mirror_script="/opt/$APP_NAME/iran-sanction/mirror.sh"
+
+    if [ ! -f "$mirror_script" ]; then
+        colorized_echo red "Error: Mirror script not found."
+        exit 1
+    fi
+
+    bash "$mirror_script" "$@"
+}
+
+# Run automated node health checks inspecting Docker, ports, storage, TLS, and Xray-core.
+doctor_command() {
+    colorized_echo blue "=============================================="
+    colorized_echo blue "          pg-node System Diagnostics          "
+    colorized_echo blue "=============================================="
+
+    local errors=0
+    local warnings=0
+
+    doc_pass() { printf "\e[92m[✓ PASS]\e[0m %s\n" "$1"; }
+    doc_warn() { printf "\e[93m[! WARN]\e[0m %s\n" "$1"; warnings=$((warnings + 1)); }
+    doc_fail() { printf "\e[91m[✗ FAIL]\e[0m %s\n" "$1"; errors=$((errors + 1)); }
+    doc_info() { printf "\e[94m[i INFO]\e[0m %s\n" "$1"; }
+
+    # 1. OS & Architecture
+    if [ "$(uname)" = "Linux" ]; then
+        identify_the_operating_system_and_architecture 2>/dev/null || true
+        doc_pass "Operating System: Linux (${ARCH:-unknown})"
+    else
+        doc_fail "Unsupported operating system: $(uname)"
+    fi
+
+    # 2. Privileges
+    if [ "$(id -u)" -eq 0 ]; then
+        doc_pass "Running as root user"
+    else
+        doc_warn "Not running as root (some diagnostic checks may be limited)"
+    fi
+
+    # 3. Docker Engine & Compose
+    if command -v docker >/dev/null 2>&1; then
+        if docker info >/dev/null 2>&1; then
+            local docker_ver
+            docker_ver=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+            doc_pass "Docker Engine is active (v$docker_ver)"
+        else
+            doc_fail "Docker daemon is not running or current user lacks access"
+        fi
+    else
+        doc_fail "Docker is not installed"
+    fi
+
+    if docker compose version >/dev/null 2>&1; then
+        local compose_ver
+        compose_ver=$(docker compose version --short 2>/dev/null || docker compose version 2>/dev/null | awk '{print $4}')
+        doc_pass "Docker Compose v2 plugin available ($compose_ver)"
+    else
+        doc_fail "Docker Compose v2 plugin is missing"
+    fi
+
+    # 4. Storage & Paths
+    if [ -d "$APP_DIR" ]; then
+        if [ -w "$APP_DIR" ]; then
+            doc_pass "Node app directory writable: $APP_DIR"
+        else
+            doc_fail "Node app directory not writable: $APP_DIR"
+        fi
+    else
+        doc_warn "Node app directory not found: $APP_DIR (node may not be installed yet)"
+    fi
+
+    if [ -d "$DATA_DIR" ]; then
+        if [ -w "$DATA_DIR" ]; then
+            doc_pass "Node data directory writable: $DATA_DIR"
+        else
+            doc_fail "Node data directory not writable: $DATA_DIR"
+        fi
+        local disk_avail disk_pct
+        disk_avail=$(df -h "$DATA_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+        disk_pct=$(df "$DATA_DIR" 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+        if [ -n "$disk_pct" ] && [ "$disk_pct" -ge 90 ]; then
+            doc_warn "Low disk space on $DATA_DIR (${disk_avail} available, ${disk_pct}% used)"
+        elif [ -n "$disk_avail" ]; then
+            doc_pass "Disk space on $DATA_DIR: ${disk_avail} available (${disk_pct}% used)"
+        fi
+    fi
+
+    # 5. Environment & Ports
+    local env_file="$APP_DIR/.env"
+    if [ -f "$env_file" ]; then
+        doc_pass "Node environment file exists: $env_file"
+        local s_port a_port api_key
+        s_port=$(awk -F'=' '/^SERVICE_PORT=/ {print $2}' "$env_file" | tr -d ' "')
+        a_port=$(awk -F'=' '/^API_PORT=/ {print $2}' "$env_file" | tr -d ' "')
+        api_key=$(awk -F'=' '/^API_KEY=/ {print $2}' "$env_file" | tr -d ' "')
+        s_port="${s_port:-62050}"
+        a_port="${a_port:-62051}"
+
+        if [ -n "$api_key" ]; then
+            doc_pass "API_KEY is configured"
+        else
+            doc_fail "API_KEY is missing or empty in $env_file"
+        fi
+
+        if is_port_in_use "$s_port" 2>/dev/null; then
+            doc_info "Service port $s_port is active"
+        else
+            doc_info "Service port $s_port is not active"
+        fi
+
+        if is_port_in_use "$a_port" 2>/dev/null; then
+            doc_info "API port $a_port is active"
+        else
+            doc_info "API port $a_port is not active"
+        fi
+    else
+        doc_warn "Node environment file not found: $env_file"
+    fi
+
+    # 6. SSL / TLS Certificate Validation
+    local cert_file="${SSL_CERT_FILE:-$DATA_DIR/certs/ssl_cert.pem}"
+    local key_file="${SSL_KEY_FILE:-$DATA_DIR/certs/ssl_key.pem}"
+    if [ -f "$cert_file" ]; then
+        if command -v openssl >/dev/null 2>&1; then
+            if openssl x509 -in "$cert_file" -noout >/dev/null 2>&1; then
+                local enddate
+                enddate=$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2)
+                local exp_epoch now_epoch days_left
+                exp_epoch=$(date -d "$enddate" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$enddate" +%s 2>/dev/null || echo 0)
+                now_epoch=$(date +%s)
+                if [ "$exp_epoch" -gt 0 ]; then
+                    days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+                    if [ "$days_left" -lt 0 ]; then
+                        doc_fail "TLS Certificate $cert_file EXPIRED on $enddate"
+                    elif [ "$days_left" -lt 30 ]; then
+                        doc_warn "TLS Certificate $cert_file expires in $days_left days ($enddate)"
+                    else
+                        doc_pass "TLS Certificate valid for $days_left more days (expires $enddate)"
+                    fi
+                fi
+            else
+                doc_fail "Invalid TLS certificate file: $cert_file"
+            fi
+        fi
+    else
+        doc_warn "TLS Certificate file not found: $cert_file"
+    fi
+
+    if [ -f "$key_file" ]; then
+        local key_perm
+        key_perm=$(stat -c "%a" "$key_file" 2>/dev/null || stat -f "%Op" "$key_file" 2>/dev/null | tail -c 4 || echo "unknown")
+        if [ "$key_perm" = "600" ] || [ "$key_perm" = "0600" ]; then
+            doc_pass "TLS private key file permissions secure ($key_file: 0600)"
+        else
+            doc_warn "TLS private key file permissions ($key_perm) are not 0600: $key_file"
+        fi
+    fi
+
+    # 7. Companion Systemd Service
+    if command -v systemctl >/dev/null 2>&1; then
+        local svc_name="pg-node-service"
+        [ "$APP_NAME" != "pg-node" ] && svc_name="pg-node-service-${APP_NAME}"
+        if systemctl list-unit-files "${svc_name}.service" >/dev/null 2>&1; then
+            if systemctl is-active --quiet "$svc_name"; then
+                doc_pass "Systemd unit $svc_name is active (running)"
+            else
+                doc_warn "Systemd unit $svc_name is installed but not active"
+            fi
+        else
+            doc_info "Systemd unit $svc_name is not registered"
+        fi
+    fi
+
+    # 8. Xray-core Binary & Routing Assets
+    if [ -f "/usr/local/bin/xray" ] && [ -x "/usr/local/bin/xray" ]; then
+        local xray_ver
+        xray_ver=$(/usr/local/bin/xray version 2>/dev/null | head -n1 || echo "installed")
+        doc_pass "Xray-core binary present ($xray_ver)"
+    else
+        doc_warn "Xray-core binary not found at /usr/local/bin/xray"
+    fi
+
+    if [ -f "/usr/local/share/xray/geoip.dat" ] && [ -f "/usr/local/share/xray/geosite.dat" ]; then
+        doc_pass "GeoIP and GeoSite routing assets are installed"
+    else
+        doc_warn "Missing routing assets in /usr/local/share/xray/ (run: pg-node geofiles)"
+    fi
+
+    # 9. Summary
+    echo "----------------------------------------------"
+    if [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ]; then
+        colorized_echo green "System Doctor check completed: all checks passed healthy!"
+    elif [ "$errors" -eq 0 ]; then
+        colorized_echo yellow "System Doctor check completed with $warnings warning(s). Review recommendations above."
+    else
+        colorized_echo red "System Doctor check completed with $errors error(s) and $warnings warning(s)."
+        return 1
+    fi
+    return 0
+}
+
 generate_bash_completion() {
     cat <<'EOF'
 _node_completions()
@@ -1884,7 +2086,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    cmds="up down restart status logs doctor mirror install update uninstall install-script uninstall-script core-update geofiles renew-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1903,6 +2105,8 @@ commands=(
   down
   restart
   status
+  doctor
+  mirror
   logs
   install
   update
@@ -1983,6 +2187,8 @@ usage() {
     colorized_echo yellow "  down              $(tput sgr0)✓  Stop services"
     colorized_echo yellow "  restart           $(tput sgr0)✓  Restart services"
     colorized_echo yellow "  status            $(tput sgr0)✓  Show status"
+    colorized_echo yellow "  doctor            $(tput sgr0)✓  Run automated node health checks"
+    colorized_echo yellow "  mirror            $(tput sgr0)✓  Domestic Iranian mirror manager (status/test/apply)"
     colorized_echo yellow "  logs              $(tput sgr0)✓  Show logs"
     colorized_echo yellow "  install           $(tput sgr0)✓  Install/reinstall node"
     colorized_echo yellow "  update            $(tput sgr0)✓  Update to latest version"
@@ -2254,6 +2460,14 @@ pg_node_main() {
         ;;
     status)
         status_command
+        ;;
+    doctor)
+        shift
+        doctor_command "$@"
+        ;;
+    mirror)
+        shift
+        mirror_command "$@"
         ;;
     logs)
         shift

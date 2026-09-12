@@ -102,8 +102,9 @@ sudo pasarguard backup-service
 In the wizard (or directly in `/opt/pasarguard/.env`), configure:
 ```env
 BACKUP_SERVICE_ENABLED=true
-TELEGRAM_TOKEN="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-TELEGRAM_CHAT_ID="-1001234567890"
+BACKUP_TELEGRAM_BOT_KEY="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+BACKUP_TELEGRAM_CHAT_ID="-1001234567890"
+# Note: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID are also accepted as backward-compatible aliases.
 ```
 *Note: Tokens are automatically masked in CLI output for security (e.g. `****TUVwxyz`).*
 
@@ -119,9 +120,10 @@ The service maps friendly minute intervals into standard crontab entries:
 | `60` | `0 * * * *` | Hourly |
 | `120` | `0 */2 * * *` | Every 2 hours |
 | `360` | `0 */6 * * *` | Every 6 hours |
-| `1440` | `0 0 * * *` | Daily at midnight |
+| `720` | `0 */12 * * *` | Every 12 hours |
+| `1440`| `0 0 * * *` | Daily at midnight |
 
-### Proxy Support for Filtered Networks
+### Proxy Support for Restricted Networks
 
 If your host is in an environment with outbound network restrictions to Telegram servers, PasarGuard supports SOCKS5 and HTTP proxies:
 
@@ -137,6 +139,27 @@ PasarGuard automatically validates the proxy scheme and routes `curl` requests t
 ---
 
 ## Disaster Recovery & Restore
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Admin
+    participant Script as pasarguard restore
+    participant Preflight as Safety Preflights
+    participant Engine as Database Engine
+    participant Log as Restore Error Log
+
+    Admin->>Script: Execute restore command
+    Script->>Script: Validate archive paths & integrity
+    Script->>Preflight: Check database engine & TimescaleDB versions
+    alt Incompatible Versions or Damaged Dump
+        Preflight-->>Log: Record failure reason
+        Preflight-->>Admin: Abort safely (Fail-Closed, Data Untouched)
+    else Preflights Pass
+        Preflight->>Engine: Sequential restore per database
+        Engine-->>Admin: Restore completed & services restarted
+    end
+```
 
 ### Interactive Restore Flow
 

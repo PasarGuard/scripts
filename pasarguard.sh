@@ -90,10 +90,8 @@ if [ -z "${APP_NAME:-}" ]; then
 fi
 APP_DIR="${APP_DIR:-$INSTALL_DIR/$APP_NAME}"
 DATA_DIR="${DATA_DIR:-/var/lib/$APP_NAME}"
-THEMES_DIR="$APP_DIR/themes"
 COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
-LAST_XRAY_CORES=10
 
 is_valid_proxy_url() {
     local proxy_url="$1"
@@ -1115,20 +1113,18 @@ status_command() {
     echo -n "Status: "
     colorized_echo green "Up"
 
-    json=$($COMPOSE -f $COMPOSE_FILE ps -a --format=json)
-    services=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .Service')
-    states=$(echo "$json" | jq -r 'if type == "array" then .[] else . end | .State')
-    # Print out the service names and statuses
-    for i in $(seq 0 $(expr $(echo $services | wc -w) - 1)); do
-        service=$(echo $services | cut -d' ' -f $(expr $i + 1))
-        state=$(echo $states | cut -d' ' -f $(expr $i + 1))
-        echo -n "- $service: "
-        if [ "$state" == "running" ]; then
-            colorized_echo green $state
-        else
-            colorized_echo red $state
-        fi
-    done
+    json=$($COMPOSE -f "$COMPOSE_FILE" ps -a --format=json 2>/dev/null || true)
+    if [ -n "$json" ]; then
+        while read -r service state; do
+            [ -z "$service" ] && continue
+            echo -n "- $service: "
+            if [ "$state" = "running" ]; then
+                colorized_echo green "$state"
+            else
+                colorized_echo red "$state"
+            fi
+        done < <(echo "$json" | jq -r 'if type == "array" then .[] else . end | "\(.Service // "unknown") \(.State // "unknown")"' 2>/dev/null || true)
+    fi
 }
 
 prompt_for_db_password() {
@@ -1894,6 +1890,161 @@ install_node_command() {
     fi
 }
 
+# Manage domestic Iranian mirrors for Docker and APT (status, test, apply).
+mirror_command() {
+    local mirror_script="$SCRIPT_DIR/iran-sanction/mirror.sh"
+    [ ! -f "$mirror_script" ] && mirror_script="/usr/local/lib/pasarguard-scripts/iran-sanction/mirror.sh"
+    [ ! -f "$mirror_script" ] && mirror_script="/opt/$APP_NAME/iran-sanction/mirror.sh"
+
+    if [ ! -f "$mirror_script" ]; then
+        colorized_echo red "Error: Mirror script not found."
+        exit 1
+    fi
+
+    bash "$mirror_script" "$@"
+}
+
+# Run automated system health checks inspecting Docker, ports, storage, and TLS.
+doctor_command() {
+    colorized_echo blue "=============================================="
+    colorized_echo blue "         PasarGuard System Diagnostics        "
+    colorized_echo blue "=============================================="
+
+    local errors=0
+    local warnings=0
+
+    doc_pass() { printf "\e[92m[✓ PASS]\e[0m %s\n" "$1"; }
+    doc_warn() { printf "\e[93m[! WARN]\e[0m %s\n" "$1"; warnings=$((warnings + 1)); }
+    doc_fail() { printf "\e[91m[✗ FAIL]\e[0m %s\n" "$1"; errors=$((errors + 1)); }
+    doc_info() { printf "\e[94m[i INFO]\e[0m %s\n" "$1"; }
+
+    # 1. OS & Architecture
+    if [ "$(uname)" = "Linux" ]; then
+        identify_the_operating_system_and_architecture 2>/dev/null || true
+        doc_pass "Operating System: Linux (${ARCH:-unknown})"
+    else
+        doc_fail "Unsupported operating system: $(uname)"
+    fi
+
+    # 2. Privileges
+    if [ "$(id -u)" -eq 0 ]; then
+        doc_pass "Running as root user"
+    else
+        doc_warn "Not running as root (some diagnostic checks may be limited)"
+    fi
+
+    # 3. Docker Engine & Compose
+    if command -v docker >/dev/null 2>&1; then
+        if docker info >/dev/null 2>&1; then
+            local docker_ver
+            docker_ver=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+            doc_pass "Docker Engine is active (v$docker_ver)"
+        else
+            doc_fail "Docker daemon is not running or current user lacks access"
+        fi
+    else
+        doc_fail "Docker is not installed"
+    fi
+
+    if docker compose version >/dev/null 2>&1; then
+        local compose_ver
+        compose_ver=$(docker compose version --short 2>/dev/null || docker compose version 2>/dev/null | awk '{print $4}')
+        doc_pass "Docker Compose v2 plugin available ($compose_ver)"
+    else
+        doc_fail "Docker Compose v2 plugin is missing"
+    fi
+
+    # 4. Storage & Paths
+    if [ -d "$APP_DIR" ]; then
+        if [ -w "$APP_DIR" ]; then
+            doc_pass "App directory writable: $APP_DIR"
+        else
+            doc_fail "App directory not writable: $APP_DIR"
+        fi
+    else
+        doc_warn "App directory not found: $APP_DIR (PasarGuard may not be installed yet)"
+    fi
+
+    if [ -d "$DATA_DIR" ]; then
+        if [ -w "$DATA_DIR" ]; then
+            doc_pass "Data directory writable: $DATA_DIR"
+        else
+            doc_fail "Data directory not writable: $DATA_DIR"
+        fi
+        local disk_avail disk_pct
+        disk_avail=$(df -h "$DATA_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+        disk_pct=$(df "$DATA_DIR" 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+        if [ -n "$disk_pct" ] && [ "$disk_pct" -ge 90 ]; then
+            doc_warn "Low disk space on $DATA_DIR (${disk_avail} available, ${disk_pct}% used)"
+        elif [ -n "$disk_avail" ]; then
+            doc_pass "Disk space on $DATA_DIR: ${disk_avail} available (${disk_pct}% used)"
+        fi
+    fi
+
+    # 5. Environment & Ports
+    if [ -f "$ENV_FILE" ]; then
+        doc_pass "Environment file exists: $ENV_FILE"
+        local port
+        port=$(awk -F'=' '/^UVICORN_PORT=/ {print $2}' "$ENV_FILE" | tr -d ' "')
+        port="${port:-8000}"
+        if is_port_in_use "$port" 2>/dev/null; then
+            doc_info "Panel port $port is currently listening"
+        else
+            doc_info "Panel port $port is not listening (stack may be stopped)"
+        fi
+    else
+        doc_warn "Environment file not found: $ENV_FILE"
+    fi
+
+    # 6. SSL Certificate Expiry Check
+    if [ -f "$ENV_FILE" ]; then
+        local cert_file
+        cert_file=$(awk -F'=' '/^UVICORN_SSL_CERTFILE=/ {print $2}' "$ENV_FILE" | tr -d ' "')
+        if [ -n "$cert_file" ] && [ -f "$cert_file" ]; then
+            if command -v openssl >/dev/null 2>&1; then
+                local enddate
+                enddate=$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2)
+                if [ -n "$enddate" ]; then
+                    local exp_epoch now_epoch days_left
+                    exp_epoch=$(date -d "$enddate" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$enddate" +%s 2>/dev/null || echo 0)
+                    now_epoch=$(date +%s)
+                    if [ "$exp_epoch" -gt 0 ]; then
+                        days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+                        if [ "$days_left" -lt 0 ]; then
+                            doc_fail "SSL Certificate $cert_file EXPIRED on $enddate"
+                        elif [ "$days_left" -lt 30 ]; then
+                            doc_warn "SSL Certificate $cert_file expires in $days_left days ($enddate)"
+                        else
+                            doc_pass "SSL Certificate valid for $days_left more days (expires $enddate)"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    # 7. Backup Service Status
+    if [ -f "$ENV_FILE" ] && grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
+        if crontab -l 2>/dev/null | grep -q "pasarguard backup"; then
+            doc_pass "Automated backup cron job is registered in crontab"
+        else
+            doc_warn "Backup service is enabled in .env, but no crontab job found"
+        fi
+    fi
+
+    # 8. Summary
+    echo "----------------------------------------------"
+    if [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ]; then
+        colorized_echo green "System Doctor check completed: all checks passed healthy!"
+    elif [ "$errors" -eq 0 ]; then
+        colorized_echo yellow "System Doctor check completed with $warnings warning(s). Review recommendations above."
+    else
+        colorized_echo red "System Doctor check completed with $errors error(s) and $warnings warning(s)."
+        return 1
+    fi
+    return 0
+}
+
 generate_completion() {
     cat <<'EOF'
 _pasarguard_completions()
@@ -1901,7 +2052,7 @@ _pasarguard_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs cli tui install update uninstall install-script install-node backup backup-service restore core-update edit edit-env version-script script-version help completion"
+    cmds="up down restart status logs cli tui doctor mirror install update uninstall install-script install-node backup backup-service restore core-update edit edit-env version-script script-version help completion"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -1943,6 +2094,8 @@ usage() {
     colorized_echo yellow "  down            $(tput sgr0)– Stop services"
     colorized_echo yellow "  restart         $(tput sgr0)– Restart services"
     colorized_echo yellow "  status          $(tput sgr0)– Show status"
+    colorized_echo yellow "  doctor          $(tput sgr0)– Run automated system health checks"
+    colorized_echo yellow "  mirror          $(tput sgr0)– Domestic Iranian mirror manager (status/test/apply)"
     colorized_echo yellow "  logs            $(tput sgr0)– Show logs"
     colorized_echo yellow "  cli             $(tput sgr0)– pasarguard CLI"
     colorized_echo yellow "  tui             $(tput sgr0)– pasarguard TUI"
@@ -1985,6 +2138,14 @@ pasarguard_main() {
     status)
         shift
         status_command "$@"
+        ;;
+    doctor)
+        shift
+        doctor_command "$@"
+        ;;
+    mirror)
+        shift
+        mirror_command "$@"
         ;;
     logs)
         shift

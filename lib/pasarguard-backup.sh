@@ -262,16 +262,22 @@ send_backup_to_telegram() {
         return
     fi
 
+    local bot_key="${BACKUP_TELEGRAM_BOT_KEY:-${TELEGRAM_TOKEN:-}}"
+    local chat_id="${BACKUP_TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
+
     # Validate Telegram configuration
-    if [ -z "$BACKUP_TELEGRAM_BOT_KEY" ]; then
-        colorized_echo red "Error: BACKUP_TELEGRAM_BOT_KEY is not set in .env file"
+    if [ -z "$bot_key" ]; then
+        colorized_echo red "Error: BACKUP_TELEGRAM_BOT_KEY (or TELEGRAM_TOKEN) is not set in .env file"
         return 1
     fi
 
-    if [ -z "$BACKUP_TELEGRAM_CHAT_ID" ]; then
-        colorized_echo red "Error: BACKUP_TELEGRAM_CHAT_ID is not set in .env file"
+    if [ -z "$chat_id" ]; then
+        colorized_echo red "Error: BACKUP_TELEGRAM_CHAT_ID (or TELEGRAM_CHAT_ID) is not set in .env file"
         return 1
     fi
+
+    BACKUP_TELEGRAM_BOT_KEY="$bot_key"
+    BACKUP_TELEGRAM_CHAT_ID="$chat_id"
 
     local proxy_url=""
     local curl_proxy_args=()
@@ -481,8 +487,15 @@ send_backup_error_to_telegram() {
 [Message truncated]"
     fi
 
-    curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendMessage" \
-        -d chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
+    local bot_key="${BACKUP_TELEGRAM_BOT_KEY:-${TELEGRAM_TOKEN:-}}"
+    local chat_id="${BACKUP_TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}"
+
+    if [ -z "$bot_key" ] || [ -z "$chat_id" ]; then
+        return 0
+    fi
+
+    curl "${curl_proxy_args[@]}" -s -X POST "https://api.telegram.org/bot$bot_key/sendMessage" \
+        -d chat_id="$chat_id" \
         -d text="$message" >/dev/null 2>&1 &&
         colorized_echo green "Backup error notification sent to Telegram." ||
         colorized_echo red "Failed to send error notification to Telegram."
@@ -490,10 +503,10 @@ send_backup_error_to_telegram() {
     if [ -f "$log_file" ]; then
 
         response=$(curl "${curl_proxy_args[@]}" -s -w "%{http_code}" -o /tmp/tg_response.json \
-            -F chat_id="$BACKUP_TELEGRAM_CHAT_ID" \
+            -F chat_id="$chat_id" \
             -F document=@"$log_file;filename=backup_error.log" \
             -F caption="📜 Backup Error Log - $error_time" \
-            "https://api.telegram.org/bot$BACKUP_TELEGRAM_BOT_KEY/sendDocument")
+            "https://api.telegram.org/bot$bot_key/sendDocument")
 
         http_code="${response:(-3)}"
         if [ "$http_code" -eq 200 ]; then
@@ -523,7 +536,9 @@ backup_service() {
     if grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         while true; do
             telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+            [ -z "$telegram_bot_key" ] && telegram_bot_key=$(awk -F'=' '/^TELEGRAM_TOKEN=/ {print $2}' "$ENV_FILE")
             telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+            [ -z "$telegram_chat_id" ] && telegram_chat_id=$(awk -F'=' '/^TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
             cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
             backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
             backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
@@ -732,7 +747,9 @@ view_backup_service() {
     fi
 
     local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+    [ -z "$telegram_bot_key" ] && telegram_bot_key=$(awk -F'=' '/^TELEGRAM_TOKEN=/ {print $2}' "$ENV_FILE")
     local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    [ -z "$telegram_chat_id" ] && telegram_chat_id=$(awk -F'=' '/^TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
     local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
     local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
     local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
@@ -771,7 +788,9 @@ edit_backup_service() {
     fi
 
     local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+    [ -z "$telegram_bot_key" ] && telegram_bot_key=$(awk -F'=' '/^TELEGRAM_TOKEN=/ {print $2}' "$ENV_FILE")
     local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    [ -z "$telegram_chat_id" ] && telegram_chat_id=$(awk -F'=' '/^TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
     local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
     local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
     local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
@@ -1231,7 +1250,7 @@ backup_command() {
         rm -rf "$lock_dir"
     }
 
-    >"$log_file"
+    : >"$log_file"
     echo "Backup Log - $(date)" >>"$log_file"
 
     colorized_echo blue "Reading environment configuration..."

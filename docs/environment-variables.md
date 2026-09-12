@@ -80,8 +80,9 @@ Configured via `pasarguard backup-service` or directly in `.env`:
 | Variable | Description | Example |
 | :--- | :--- | :--- |
 | `BACKUP_SERVICE_ENABLED` | Toggle automated recurring backup cron job. | `true` |
-| `TELEGRAM_TOKEN` | Telegram Bot API token. | `123456789:ABCdefGHIjklMNO...` |
-| `TELEGRAM_CHAT_ID` | Telegram chat ID, channel ID, or user ID for backup drops. | `-1001234567890` |
+| `BACKUP_TELEGRAM_BOT_KEY` | Telegram Bot API token (canonical; accepts `TELEGRAM_TOKEN` as fallback). | `123456789:ABCdefGHIjklMNO...` |
+| `BACKUP_TELEGRAM_CHAT_ID` | Telegram chat ID or channel ID (canonical; accepts `TELEGRAM_CHAT_ID` as fallback). | `-1001234567890` |
+| `BACKUP_CRON_SCHEDULE` | Standard 5-field crontab expression for recurring backups. | `0 */2 * * *` |
 | `BACKUP_PROXY_ENABLED` | Route Telegram API calls through a local proxy. | `true` |
 | `BACKUP_PROXY_URL` | SOCKS5 or HTTP proxy URL for Telegram requests. | `socks5://127.0.0.1:1080` |
 

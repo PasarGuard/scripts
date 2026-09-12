@@ -277,7 +277,11 @@ EOF
 
     success "Written new $sources_file"
     info "Running apt-get update to verify..."
-    apt-get update -qq && success "apt-get update succeeded" || warn "apt-get update returned errors; check $sources_file"
+    if apt-get update -qq; then
+        success "apt-get update succeeded"
+    else
+        warn "apt-get update returned errors; check $sources_file"
+    fi
 }
 
 write_docker_daemon_json() {
@@ -477,8 +481,30 @@ is_script_managed_apt_mirror() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    status=0
-    select_and_apply_apt_mirror || status=1
-    select_and_apply_docker_mirror || status=1
-    exit "$status"
+    case "${1:-apply}" in
+        status)
+            cur_docker=$(get_current_docker_mirror 2>/dev/null || echo "default (Docker Hub)")
+            cur_apt=$(get_current_apt_mirror 2>/dev/null || echo "default")
+            printf "\e[94m=== Domestic Mirror Status ===\e[0m\n"
+            printf "Active Docker Mirror: %s\n" "${cur_docker:-default (Docker Hub)}"
+            printf "Active APT Mirror   : %s\n" "${cur_apt:-default}"
+            ;;
+        test)
+            DRY_RUN=true
+            status=0
+            select_and_apply_apt_mirror || status=1
+            select_and_apply_docker_mirror || status=1
+            exit "$status"
+            ;;
+        apply)
+            status=0
+            select_and_apply_apt_mirror || status=1
+            select_and_apply_docker_mirror || status=1
+            exit "$status"
+            ;;
+        *)
+            echo "Usage: $0 [status|test|apply]"
+            exit 1
+            ;;
+    esac
 fi
