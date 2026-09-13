@@ -194,7 +194,7 @@ benchmark_mirror() {
 #   $1 - Label describing mirror category (e.g. "APT", "Docker").
 #   $2 - Relative HTTP probe endpoint.
 #   $3 - Flag ("true"/"false") whether to accept HTTP 401 response code.
-#   $@ - List of mirror URLs to test.
+#   $4... - List of mirror URLs to test.
 # Returns:
 #   0 on success, 1 if all tested mirrors fail.
 benchmark_list() {
