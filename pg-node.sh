@@ -269,6 +269,7 @@ install_node_script() {
     fi
 
     install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh
+    install_mirror_from_repo "$FETCH_REPO"
     
     # Remove old file if it exists
     if [ -f "$TARGET_PATH" ]; then
@@ -940,7 +941,7 @@ update_node_script() {
     local backup_dir
     backup_dir=$(backup_scripts)
 
-    if ! install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh; then
+    if ! install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh || ! install_mirror_from_repo "$FETCH_REPO"; then
         colorized_echo red "Failed to update shared libraries. Restoring from backup..."
         restore_scripts "$backup_dir"
         cleanup_backup "$backup_dir"
@@ -1970,9 +1971,12 @@ doctor_command() {
     if [ -f "$env_file" ]; then
         doc_pass "Node environment file exists: $env_file"
         local s_port a_port api_key
-        s_port=$(awk -F'=' '/^SERVICE_PORT=/ {print $2}' "$env_file" | tr -d ' "')
-        a_port=$(awk -F'=' '/^API_PORT=/ {print $2}' "$env_file" | tr -d ' "')
-        api_key=$(awk -F'=' '/^API_KEY=/ {print $2}' "$env_file" | tr -d ' "')
+        s_port=$(grep -E '^[[:space:]]*SERVICE_PORT[[:space:]]*=' "$env_file" 2>/dev/null \
+            | head -1 | sed 's/^[^=]*=//' | tr -d '[:space:]"')
+        a_port=$(grep -E '^[[:space:]]*API_PORT[[:space:]]*=' "$env_file" 2>/dev/null \
+            | head -1 | sed 's/^[^=]*=//' | tr -d '[:space:]"')
+        api_key=$(grep -E '^[[:space:]]*API_KEY[[:space:]]*=' "$env_file" 2>/dev/null \
+            | head -1 | sed 's/^[^=]*=//' | tr -d '[:space:]"')
         s_port="${s_port:-62050}"
         a_port="${a_port:-62051}"
 
@@ -2038,8 +2042,8 @@ doctor_command() {
 
     # 7. Companion Systemd Service
     if command -v systemctl >/dev/null 2>&1; then
-        local svc_name="pg-node-service"
-        [ "$APP_NAME" != "pg-node" ] && svc_name="pg-node-service-${APP_NAME}"
+        set_service_paths
+        local svc_name="$SERVICE_NAME"
         if systemctl list-unit-files "${svc_name}.service" >/dev/null 2>&1; then
             if systemctl is-active --quiet "$svc_name"; then
                 doc_pass "Systemd unit $svc_name is active (running)"
@@ -2052,18 +2056,32 @@ doctor_command() {
     fi
 
     # 8. Xray-core Binary & Routing Assets
-    if [ -f "/usr/local/bin/xray" ] && [ -x "/usr/local/bin/xray" ]; then
-        local xray_ver
-        xray_ver=$(/usr/local/bin/xray version 2>/dev/null | head -n1 || echo "installed")
-        doc_pass "Xray-core binary present ($xray_ver)"
-    else
-        doc_warn "Xray-core binary not found at /usr/local/bin/xray"
+    local xray_bin=""
+    if [ -x "$DATA_DIR/xray-core/xray" ]; then
+        xray_bin="$DATA_DIR/xray-core/xray"
+    elif [ -x "/usr/local/bin/xray" ]; then
+        xray_bin="/usr/local/bin/xray"
     fi
 
-    if [ -f "/usr/local/share/xray/geoip.dat" ] && [ -f "/usr/local/share/xray/geosite.dat" ]; then
-        doc_pass "GeoIP and GeoSite routing assets are installed"
+    if [ -n "$xray_bin" ]; then
+        local xray_ver
+        xray_ver=$("$xray_bin" version 2>/dev/null | head -n1 || echo "installed")
+        doc_pass "Xray-core binary present at $xray_bin ($xray_ver)"
     else
-        doc_warn "Missing routing assets in /usr/local/share/xray/ (run: pg-node geofiles)"
+        doc_warn "Xray-core binary not found at $DATA_DIR/xray-core/xray or /usr/local/bin/xray (run: $APP_NAME core-update)"
+    fi
+
+    local geo_dir=""
+    if [ -f "$DATA_DIR/assets/geoip.dat" ] && [ -f "$DATA_DIR/assets/geosite.dat" ]; then
+        geo_dir="$DATA_DIR/assets"
+    elif [ -f "/usr/local/share/xray/geoip.dat" ] && [ -f "/usr/local/share/xray/geosite.dat" ]; then
+        geo_dir="/usr/local/share/xray"
+    fi
+
+    if [ -n "$geo_dir" ]; then
+        doc_pass "GeoIP and GeoSite routing assets are installed in $geo_dir"
+    else
+        doc_warn "Missing routing assets in $DATA_DIR/assets or /usr/local/share/xray (run: $APP_NAME geofiles)"
     fi
 
     # 9. Summary

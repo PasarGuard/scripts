@@ -746,13 +746,18 @@ view_backup_service() {
         return 1
     fi
 
-    local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+    local telegram_bot_key=""
+    telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
     [ -z "$telegram_bot_key" ] && telegram_bot_key=$(awk -F'=' '/^TELEGRAM_TOKEN=/ {print $2}' "$ENV_FILE")
-    local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    local telegram_chat_id=""
+    telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
     [ -z "$telegram_chat_id" ] && telegram_chat_id=$(awk -F'=' '/^TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
-    local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
-    local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
-    local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
+    local cron_schedule=""
+    cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+    local backup_proxy_enabled=""
+    backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
+    local backup_proxy_url=""
+    backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
     backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
     [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
     local interval_minutes=""
@@ -787,17 +792,32 @@ edit_backup_service() {
         return 1
     fi
 
-    local telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
+    local telegram_bot_key=""
+    telegram_bot_key=$(awk -F'=' '/^BACKUP_TELEGRAM_BOT_KEY=/ {print $2}' "$ENV_FILE")
     [ -z "$telegram_bot_key" ] && telegram_bot_key=$(awk -F'=' '/^TELEGRAM_TOKEN=/ {print $2}' "$ENV_FILE")
-    local telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+    local telegram_chat_id=""
+    telegram_chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
     [ -z "$telegram_chat_id" ] && telegram_chat_id=$(awk -F'=' '/^TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
-    local cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
-    local backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
-    local backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
+    local cron_schedule=""
+    cron_schedule=$(awk -F'=' '/^BACKUP_CRON_SCHEDULE=/ {print $2}' "$ENV_FILE" | tr -d '"')
+    local backup_proxy_enabled=""
+    backup_proxy_enabled=$(awk -F'=' '/^BACKUP_PROXY_ENABLED=/ {print $2}' "$ENV_FILE")
+    local backup_proxy_url=""
+    backup_proxy_url=$(awk -F'=' '/^BACKUP_PROXY_URL=/ {print substr($0, index($0,"=")+1); exit}' "$ENV_FILE")
     backup_proxy_url=$(echo "$backup_proxy_url" | sed -e 's/^"//' -e 's/"$//')
     [ -z "$backup_proxy_enabled" ] && backup_proxy_enabled="false"
     local interval_minutes=""
     local masked_telegram_bot_key=""
+
+    local bot_key_var="BACKUP_TELEGRAM_BOT_KEY"
+    if ! grep -q "^BACKUP_TELEGRAM_BOT_KEY=" "$ENV_FILE" && grep -q "^TELEGRAM_TOKEN=" "$ENV_FILE"; then
+        bot_key_var="TELEGRAM_TOKEN"
+    fi
+
+    local chat_id_var="BACKUP_TELEGRAM_CHAT_ID"
+    if ! grep -q "^BACKUP_TELEGRAM_CHAT_ID=" "$ENV_FILE" && grep -q "^TELEGRAM_CHAT_ID=" "$ENV_FILE"; then
+        chat_id_var="TELEGRAM_CHAT_ID"
+    fi
 
     interval_minutes=$(backup_interval_minutes_from_cron "$cron_schedule")
 
@@ -823,9 +843,9 @@ edit_backup_service() {
     1)
         while true; do
             printf "Enter new Telegram bot API key [current: %s]: " "$masked_telegram_bot_key"
-            read new_bot_key
+            read -r new_bot_key
             if [[ -n "$new_bot_key" ]]; then
-                sed -i "s|^BACKUP_TELEGRAM_BOT_KEY=.*|BACKUP_TELEGRAM_BOT_KEY=$new_bot_key|" "$ENV_FILE"
+                replace_or_append_env_var "$bot_key_var" "$new_bot_key" false "$ENV_FILE"
                 colorized_echo green "Telegram Bot API Key updated successfully."
                 break
             else
@@ -835,10 +855,10 @@ edit_backup_service() {
         ;;
     2)
         while true; do
-            printf "Enter new Telegram chat ID [current: $telegram_chat_id]: "
-            read new_chat_id
+            printf "Enter new Telegram chat ID [current: %s]: " "$telegram_chat_id"
+            read -r new_chat_id
             if [[ -n "$new_chat_id" ]]; then
-                sed -i "s|^BACKUP_TELEGRAM_CHAT_ID=.*|BACKUP_TELEGRAM_CHAT_ID=$new_chat_id|" "$ENV_FILE"
+                replace_or_append_env_var "$chat_id_var" "$new_chat_id" false "$ENV_FILE"
                 colorized_echo green "Telegram Chat ID updated successfully."
                 break
             else
@@ -849,7 +869,7 @@ edit_backup_service() {
     3)
         while true; do
             printf "How often should backups run? Enter minutes\n(e.g. 30 = every 30 min, 60 = hourly, 1440 = once a day) [current: %s]: " "$(format_backup_interval "$interval_minutes" "$cron_schedule")"
-            read new_interval_minutes
+            read -r new_interval_minutes
 
             local new_cron_schedule=""
             if new_cron_schedule=$(backup_cron_from_interval_minutes "$new_interval_minutes"); then
@@ -868,7 +888,8 @@ edit_backup_service() {
             fi
             # Set PATH for cron to ensure docker and other tools are found
             local backup_command="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash $script_path backup"
-            local temp_cron=$(mktemp)
+            local temp_cron=""
+            temp_cron=$(mktemp)
             local filtered_cron="${temp_cron}.tmp"
             crontab -l 2>/dev/null >"$temp_cron" || true
             filter_backup_cron_entries "$temp_cron" "$filtered_cron"

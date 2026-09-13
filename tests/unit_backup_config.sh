@@ -98,6 +98,21 @@ chat_id=$(awk -F'=' '/^BACKUP_TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
 assert_eq "$bot_key" "legacy_token_456" "telegram env: falls back to TELEGRAM_TOKEN"
 assert_eq "$chat_id" "-100222222" "telegram env: falls back to TELEGRAM_CHAT_ID"
 
+# Case 3: Interactive edit persists legacy TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
+cat << 'EOF' > "$ENV_FILE"
+BACKUP_SERVICE_ENABLED=true
+TELEGRAM_TOKEN=legacy_token_old
+TELEGRAM_CHAT_ID=-100333333
+EOF
+
+printf "1\nnew_token_value\n" | edit_backup_service >/dev/null 2>&1 || true
+updated_token=$(awk -F'=' '/^TELEGRAM_TOKEN=/ {print $2}' "$ENV_FILE")
+assert_eq "$updated_token" "new_token_value" "edit_backup_service: updates legacy TELEGRAM_TOKEN"
+
+printf "2\n-100444444\n" | edit_backup_service >/dev/null 2>&1 || true
+updated_chat_id=$(awk -F'=' '/^TELEGRAM_CHAT_ID=/ {print $2}' "$ENV_FILE")
+assert_eq "$updated_chat_id" "-100444444" "edit_backup_service: updates legacy TELEGRAM_CHAT_ID"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

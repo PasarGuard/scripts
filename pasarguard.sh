@@ -936,6 +936,7 @@ install_pasarguard_script() {
     FETCH_REPO="PasarGuard/scripts"
     colorized_echo blue "Installing pasarguard script"
     install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh
+    install_mirror_from_repo "$FETCH_REPO"
     github_install_script_from_repo "$FETCH_REPO" "pasarguard.sh" "pasarguard"
     colorized_echo green "pasarguard script installed successfully"
 }
@@ -1824,7 +1825,7 @@ update_pasarguard_script() {
     local backup_dir
     backup_dir=$(backup_scripts)
 
-    if ! install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh; then
+    if ! install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh env.sh pasarguard-backup.sh pasarguard-restore.sh || ! install_mirror_from_repo "$FETCH_REPO"; then
         colorized_echo red "Failed to update shared libraries. Restoring from backup..."
         restore_scripts "$backup_dir"
         cleanup_backup "$backup_dir"
@@ -1985,7 +1986,8 @@ doctor_command() {
     if [ -f "$ENV_FILE" ]; then
         doc_pass "Environment file exists: $ENV_FILE"
         local port
-        port=$(awk -F'=' '/^UVICORN_PORT=/ {print $2}' "$ENV_FILE" | tr -d ' "')
+        port=$(grep -E '^[[:space:]]*UVICORN_PORT[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
+            | head -1 | sed 's/^[^=]*=//' | tr -d '[:space:]"')
         port="${port:-8000}"
         if is_port_in_use "$port" 2>/dev/null; then
             doc_info "Panel port $port is currently listening"
@@ -1999,7 +2001,8 @@ doctor_command() {
     # 6. SSL Certificate Expiry Check
     if [ -f "$ENV_FILE" ]; then
         local cert_file
-        cert_file=$(awk -F'=' '/^UVICORN_SSL_CERTFILE=/ {print $2}' "$ENV_FILE" | tr -d ' "')
+        cert_file=$(grep -E '^[[:space:]]*UVICORN_SSL_CERTFILE[[:space:]]*=' "$ENV_FILE" 2>/dev/null \
+            | head -1 | sed 's/^[^=]*=//' | tr -d '[:space:]"')
         if [ -n "$cert_file" ] && [ -f "$cert_file" ]; then
             if command -v openssl >/dev/null 2>&1; then
                 local enddate
@@ -2024,7 +2027,7 @@ doctor_command() {
     fi
 
     # 7. Backup Service Status
-    if [ -f "$ENV_FILE" ] && grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
+    if [ -f "$ENV_FILE" ] && grep -qE '^[[:space:]]*BACKUP_SERVICE_ENABLED[[:space:]]*=[[:space:]]*(true|"true")[[:space:]]*$' "$ENV_FILE"; then
         if crontab -l 2>/dev/null | grep -q "pasarguard backup"; then
             doc_pass "Automated backup cron job is registered in crontab"
         else

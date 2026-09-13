@@ -86,6 +86,38 @@ else
 fi
 
 # -----------------------------------------------------------------------
+# Test whitespace-tolerant .env parsing in pasarguard
+# -----------------------------------------------------------------------
+cat << 'EOF' > "$ENV_FILE"
+APP_NAME=pasarguard
+# UVICORN_PORT = 7777
+UVICORN_PORT = 9999
+# BACKUP_SERVICE_ENABLED=true
+EOF
+doctor_out=$(doctor_command 2>&1)
+if echo "$doctor_out" | grep -q "Panel port 9999"; then
+    pass "pasarguard doctor: parses spaced UVICORN_PORT and ignores comments"
+else
+    fail "pasarguard doctor: parses spaced UVICORN_PORT and ignores comments"
+fi
+
+if ! echo "$doctor_out" | grep -q "Backup service is enabled in .env"; then
+    pass "pasarguard doctor: ignores commented BACKUP_SERVICE_ENABLED"
+else
+    fail "pasarguard doctor: ignores commented BACKUP_SERVICE_ENABLED"
+fi
+
+cat << 'EOF' >> "$ENV_FILE"
+BACKUP_SERVICE_ENABLED = true
+EOF
+doctor_out=$(doctor_command 2>&1)
+if echo "$doctor_out" | grep -q "Backup service is enabled in .env"; then
+    pass "pasarguard doctor: parses spaced BACKUP_SERVICE_ENABLED = true"
+else
+    fail "pasarguard doctor: parses spaced BACKUP_SERVICE_ENABLED = true"
+fi
+
+# -----------------------------------------------------------------------
 # Test pg-node.sh doctor command
 # -----------------------------------------------------------------------
 export PG_NODE_SOURCE_ONLY="true"
@@ -127,6 +159,65 @@ if echo "$node_doctor_out" | grep -q "Node app directory writable"; then
     pass "pg-node doctor: verifies node app directory writable"
 else
     fail "pg-node doctor: verifies node app directory writable"
+fi
+
+# -----------------------------------------------------------------------
+# Test pg-node spaced .env, custom service name, and xray paths
+# -----------------------------------------------------------------------
+cat << 'EOF' > "$NODE_APP_DIR/.env"
+SERVICE_PORT = 63050
+API_PORT = 63051
+API_KEY = test-secret-key-1234
+EOF
+APP_DIR="$NODE_APP_DIR"
+DATA_DIR="$NODE_DATA_DIR"
+node_doctor_out=$(doctor_command 2>&1)
+if echo "$node_doctor_out" | grep -q "Service port 63050"; then
+    pass "pg-node doctor: parses spaced SERVICE_PORT"
+else
+    fail "pg-node doctor: parses spaced SERVICE_PORT"
+fi
+
+APP_NAME="custom-node"
+systemctl() {
+    if [ "${1:-}" = "list-unit-files" ]; then
+        if [ "${2:-}" = "custom-node-service.service" ]; then return 0; fi
+        return 1
+    fi
+    if [ "${1:-}" = "is-active" ]; then
+        if [ "${3:-}" = "custom-node-service" ]; then return 0; fi
+        return 1
+    fi
+    return 1
+}
+export -f systemctl
+node_doctor_out=$(doctor_command 2>&1)
+if echo "$node_doctor_out" | grep -q "Systemd unit custom-node-service is active"; then
+    pass "pg-node doctor: uses custom APP_NAME service name"
+else
+    fail "pg-node doctor: uses custom APP_NAME service name"
+fi
+unset -f systemctl
+
+mkdir -p "$NODE_DATA_DIR/xray-core" "$NODE_DATA_DIR/assets"
+cat << 'EOF' > "$NODE_DATA_DIR/xray-core/xray"
+#!/usr/bin/env bash
+if [ "${1:-}" = "version" ]; then echo "Xray 1.8.24 (custom)"; exit 0; fi
+EOF
+chmod +x "$NODE_DATA_DIR/xray-core/xray"
+touch "$NODE_DATA_DIR/assets/geoip.dat" "$NODE_DATA_DIR/assets/geosite.dat"
+
+node_doctor_out=$(doctor_command 2>&1)
+if echo "$node_doctor_out" | grep -q "Xray-core binary present at $NODE_DATA_DIR/xray-core/xray (Xray 1.8.24 (custom))"; then
+    pass "pg-node doctor: detects Xray-core in DATA_DIR layout"
+else
+    fail "pg-node doctor: detects Xray-core in DATA_DIR layout"
+fi
+
+if echo "$node_doctor_out" | grep -q "GeoIP and GeoSite routing assets are installed in $NODE_DATA_DIR/assets"; then
+    pass "pg-node doctor: detects routing assets in DATA_DIR layout"
+else
+    fail "pg-node doctor: detects routing assets in DATA_DIR layout"
 fi
 
 unset -f docker
