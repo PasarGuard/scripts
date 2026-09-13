@@ -10,8 +10,11 @@ source "$ROOT_DIR/pg-node-service.sh"
 
 PASS=0
 FAIL=0
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
@@ -23,20 +26,24 @@ echo "=== unit_pgnode_service.sh ==="
 # message. The original code read $? inside `if ...; then`, where it is always
 # 0, so the self-signed (2) and invalid (1) branches were dead.
 
+# Mock check_certificate returning 0 (CA-signed).
 check_certificate() { return 0; }   # CA-signed
 out=$(describe_certificate "/tmp/cert.pem" 2>&1)
 if echo "$out" | grep -q "CA-signed"; then pass "describe_certificate: status 0 -> CA-signed"; else fail "describe_certificate: status 0 -> CA-signed (got: $out)"; fi
 
+# Mock check_certificate returning 2 (self-signed).
 check_certificate() { return 2; }   # self-signed
 out=$(describe_certificate "/tmp/cert.pem" 2>&1)
 if echo "$out" | grep -q "self-signed"; then pass "describe_certificate: status 2 -> self-signed"; else fail "describe_certificate: status 2 -> self-signed (got: $out)"; fi
 
+# Mock check_certificate returning 1 (invalid).
 check_certificate() { return 1; }   # invalid
 out=$(describe_certificate "/tmp/cert.pem" 2>&1)
 if echo "$out" | grep -q "validation failed"; then pass "describe_certificate: status 1 -> validation failed"; else fail "describe_certificate: status 1 -> validation failed (got: $out)"; fi
 
 # describe_certificate must not abort the caller under set -e when the cert is
 # self-signed/invalid (non-zero check_certificate).
+# Mock check_certificate returning 2 for set -e survival test.
 check_certificate() { return 2; }
 if ( set -e; describe_certificate "/tmp/cert.pem" >/dev/null 2>&1; echo ok ) | grep -q ok; then
     pass "describe_certificate: survives set -e on non-zero status"
@@ -45,10 +52,13 @@ else
 fi
 
 # tls_verify_level: client-cert verification on only for CA-signed certs.
+# Mock check_certificate returning 0 for tls_verify_level test.
 check_certificate() { return 0; }
 assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=1" "tls_verify_level: CA-signed -> verify=1"
+# Mock check_certificate returning 2 for tls_verify_level test.
 check_certificate() { return 2; }
 assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=0" "tls_verify_level: self-signed -> verify=0"
+# Mock check_certificate returning 1 for tls_verify_level test.
 check_certificate() { return 1; }
 assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=0" "tls_verify_level: invalid -> verify=0"
 

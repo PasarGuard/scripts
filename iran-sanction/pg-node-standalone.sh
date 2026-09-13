@@ -51,6 +51,13 @@ fi
 
 eval "$(declare -f detect_compose | sed '1s/detect_compose/original_detect_compose/')"
 
+# Install a file to a destination path with specific permissions if different.
+# Arguments:
+#   $1 - File mode permissions (e.g. 755, 644).
+#   $2 - Source file path.
+#   $3 - Destination file path.
+# Returns:
+#   0 on success.
 install_if_different() {
     local mode="$1"
     local source_path="$2"
@@ -64,15 +71,24 @@ install_if_different() {
     install -m "$mode" "$source_path" "$dest_path"
 }
 
+# Verify that bundled standalone environment and compose templates exist.
+# Returns:
+#   0 if templates exist; terminates via die otherwise.
 ensure_standalone_assets() {
     [ -f "$LOCAL_ENV_TEMPLATE" ] || die "Missing bundled env template: $LOCAL_ENV_TEMPLATE"
     [ -f "$LOCAL_COMPOSE_TEMPLATE" ] || die "Missing bundled compose template: $LOCAL_COMPOSE_TEMPLATE"
 }
 
+# Check whether apt-get is available on the system.
+# Returns:
+#   0 if apt-get exists, 1 otherwise.
 has_apt() {
     command -v apt-get >/dev/null 2>&1
 }
 
+# Validate presence of required standard CLI utility binaries.
+# Returns:
+#   0 if all utilities exist; terminates via die otherwise.
 ensure_package_prerequisites() {
     local cmd=""
     for cmd in curl awk sort sed grep cp install tar; do
@@ -80,6 +96,9 @@ ensure_package_prerequisites() {
     done
 }
 
+# Detect system package manager (apt-get, dnf, or yum) for standalone mode.
+# Returns:
+#   0 if a supported package manager is found; terminates via die otherwise.
 detect_standalone_package_manager() {
     if [ -n "$STANDALONE_PKG_MANAGER" ]; then
         return
@@ -96,6 +115,9 @@ detect_standalone_package_manager() {
     fi
 }
 
+# Select and configure the best APT mirror for systems running in Iran.
+# Returns:
+#   0 on completion.
 prepare_apt_mirror() {
     local current_mirror=""
     local recalibrate_choice=""
@@ -132,6 +154,11 @@ prepare_apt_mirror() {
     APT_MIRROR_PREPARED=true
 }
 
+# Install system packages using apt-get with mirror optimization.
+# Arguments:
+#   $@ - Package names to install.
+# Returns:
+#   0 on success.
 apt_install_packages() {
     local packages=("$@")
     prepare_apt_mirror
@@ -139,6 +166,9 @@ apt_install_packages() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
 }
 
+# Initialize package manager caches and repository sources.
+# Returns:
+#   0 on success.
 prepare_standalone_package_manager() {
     detect_standalone_package_manager
 
@@ -157,6 +187,11 @@ prepare_standalone_package_manager() {
     STANDALONE_PKG_MANAGER_UPDATED=true
 }
 
+# Install system packages using the detected standalone package manager.
+# Arguments:
+#   $@ - Package names to install.
+# Returns:
+#   0 on success.
 standalone_install_packages() {
     local packages=("$@")
 
@@ -174,6 +209,11 @@ standalone_install_packages() {
     esac
 }
 
+# Install a single package using the standalone package manager.
+# Arguments:
+#   $1 - Package name to install.
+# Returns:
+#   0 on success.
 install_package() {
     local package="$1"
     detect_standalone_package_manager
@@ -181,6 +221,9 @@ install_package() {
     standalone_install_packages "$package"
 }
 
+# Install Docker Engine and compose plugin if not already installed.
+# Returns:
+#   0 on success; terminates via die on installation failure.
 install_docker() {
     if command -v docker >/dev/null 2>&1; then
         ensure_docker_running
@@ -201,6 +244,9 @@ install_docker() {
     ensure_docker_running
 }
 
+# Configure optimal Docker registry mirror for Iranian servers.
+# Returns:
+#   0 on success.
 prepare_docker_mirror() {
     local current_mirror=""
     local recalibrate_choice=""
@@ -230,26 +276,44 @@ prepare_docker_mirror() {
     DOCKER_MIRROR_PREPARED=true
 }
 
+# No-op override for yq dependency since compose files are bundled locally.
+# Returns:
+#   0 on success.
 install_yq() {
     return
 }
 
+# Terminate execution because systemd integration is disabled in standalone mode.
+# Returns:
+#   Terminates execution via die.
 require_systemd() {
     die "systemd support is disabled in pg-node-standalone for now."
 }
 
+# Check whether systemd node service is installed (disabled in standalone mode).
+# Returns:
+#   Always returns 1.
 service_installed() {
     return 1
 }
 
+# No-op stub for restarting systemd service in standalone mode.
+# Returns:
+#   0 on completion.
 restart_service_if_installed() {
     return
 }
 
+# No-op stub for updating systemd service in standalone mode.
+# Returns:
+#   0 on completion.
 update_service_if_installed() {
     return
 }
 
+# Prepare Docker daemon and mirror if needed, then invoke original compose detection.
+# Returns:
+#   0 on successful detection.
 detect_compose() {
     if [[ "${COMMAND:-}" =~ ^(install|update)$ ]] && command -v docker >/dev/null 2>&1 && [ "$DOCKER_MIRROR_PREPARED" != "true" ] && [ "$(id -u)" = "0" ]; then
         prepare_docker_mirror
@@ -258,6 +322,9 @@ detect_compose() {
     original_detect_compose
 }
 
+# Ensure Docker service daemon is active and running.
+# Returns:
+#   0 on success; terminates via die if Docker cannot run.
 ensure_docker_running() {
     if docker info >/dev/null 2>&1; then
         return
@@ -276,10 +343,16 @@ ensure_docker_running() {
     fi
 }
 
+# Attempt to install systemd service (calls require_systemd and fails).
+# Returns:
+#   Terminates execution via die.
 install_node_service_script() {
     require_systemd
 }
 
+# Install standalone node wrapper script and supporting asset templates.
+# Returns:
+#   0 on success; terminates via die on missing files.
 install_node_script() {
     print_script_execution_header "pg-node-standalone" "$SCRIPT_COMMIT_SHA" "install"
     local target_path="/usr/local/bin/$APP_NAME"
@@ -307,6 +380,9 @@ install_node_script() {
     colorized_echo green "Standalone node script installed successfully at $target_path"
 }
 
+# Remove standalone node wrapper script and supporting installation directory.
+# Returns:
+#   0 on completion.
 uninstall_node_script() {
     local target_path="/usr/local/bin/$APP_NAME"
 
@@ -320,6 +396,9 @@ uninstall_node_script() {
     fi
 }
 
+# Collect list of currently occupied network ports on host using ss or netstat.
+# Returns:
+#   0 on success.
 get_occupied_ports() {
     if command -v ss >/dev/null 2>&1; then
         OCCUPIED_PORTS=$(ss -tuln | awk '{print $5}' | grep -Eo '[0-9]+$' | sort | uniq)
@@ -332,6 +411,11 @@ get_occupied_ports() {
     fi
 }
 
+# Set up directories, certificates, environment configuration, and compose files for node.
+# Arguments:
+#   $1 - PasarGuard node version tag to install.
+# Returns:
+#   0 on success.
 install_node() {
     local node_version="$1"
     local ssl_cert_env="$DATA_DIR/certs/ssl_cert.pem"
@@ -416,10 +500,18 @@ install_node() {
     colorized_echo green "Bundled node configuration prepared successfully"
 }
 
+# Warn that automatic script updates are disabled in standalone distribution.
+# Returns:
+#   0 on completion.
 update_node_script() {
     colorized_echo yellow "Automatic script updates are disabled in pg-node-standalone."
 }
 
+# Parse options and execute full node installation workflow.
+# Arguments:
+#   $@ - Command-line arguments passed to install command.
+# Returns:
+#   0 on success; exits with code 1 on error or abort.
 install_command() {
     check_running_as_root
     local node_version="latest"
@@ -485,6 +577,11 @@ install_command() {
     install_yq
     detect_compose
 
+    # Check whether the requested node release version exists or is accessible.
+    # Arguments:
+    #   $1 - Version tag to check.
+    # Returns:
+    #   0 if valid/exists or unreachable, 1 if version does not exist.
     check_version_exists() {
         local version="$1"
         local repo_url="https://api.github.com/repos/PasarGuard/node/releases"
@@ -539,6 +636,9 @@ install_command() {
     colorized_echo red "${API_KEY}"
 }
 
+# Pull latest node container images and restart running node services.
+# Returns:
+#   0 on success; exits with code 1 if node is not installed.
 update_command() {
     check_running_as_root
     if ! is_node_installed; then
@@ -554,6 +654,11 @@ update_command() {
     colorized_echo blue "node updated successfully"
 }
 
+# Display help information and list of commands for standalone node CLI.
+# Outputs:
+#   Writes formatted CLI usage and commands to stdout.
+# Returns:
+#   0 on success.
 usage() {
     colorized_echo blue "================================"
     colorized_echo magenta "   $APP_NAME Standalone Node CLI"

@@ -16,9 +16,12 @@ source "$ROOT_DIR/lib/github.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
@@ -57,6 +60,7 @@ backup_scripts() {
     fi
     printf '%s\n' "$backup_dir"
 }
+# Restore scripts from backup directory to mock bin.
 restore_scripts() {
     local backup_dir="$1"
     [ -z "$backup_dir" ] && return 1

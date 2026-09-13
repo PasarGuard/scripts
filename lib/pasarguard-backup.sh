@@ -1173,6 +1173,7 @@ backup_command() {
         return 1
     fi
 
+    # Acquire an exclusive directory-based lock to ensure only one backup runs at a time.
     acquire_backup_lock() {
         local lock_pid=""
 
@@ -1220,6 +1221,7 @@ backup_command() {
         ;;
     esac
 
+    # Clean up temporary staging directories, snapshot files, and release the backup lock.
     cleanup_backup_command() {
         rm -rf "$temp_dir"
         if [ -n "$sqlite_snapshot_dir" ]; then
@@ -1361,6 +1363,7 @@ backup_command() {
                 db_name="${db_name%%\?*}"
                 db_name="${db_name%%#*}"
 
+                # Decode percent-encoded characters and plus signs into standard text.
                 urldecode() { local url_encoded="${1//+/ }"; printf '%b' "${url_encoded//%/\\x}"; }
                 db_user=$(urldecode "$db_user")
                 db_password=$(urldecode "$db_password")

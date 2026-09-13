@@ -71,8 +71,9 @@ echo "original-lib" > "$MOCK_LIB/common.sh"
 chmod 644 "$MOCK_LIB/common.sh"
 
 echo "Running Test 1: Successful update simulation..."
-# Mock github functions to succeed
+# Mock download of github files to simulate success.
 github_download_file() { echo "new-lib-content" > "$2"; }
+# Mock installation of github script to simulate success.
 github_install_script_from_repo() { echo "new-script-content" > "$MOCK_BIN/$3"; chmod 755 "$MOCK_BIN/$3"; }
 
 backup_dir=$(backup_scripts)
@@ -114,8 +115,9 @@ echo "Running Test 3: Failed update simulation (script installation failure)..."
 echo "current-pasarguard" > "$MOCK_BIN/pasarguard"
 echo "current-lib" > "$MOCK_LIB/common.sh"
 
-# Mock success for libs, failure for script
+# Mock success for libs
 github_download_file() { echo "new-lib-content" > "$2"; }
+# Mock failure for script install
 github_install_script_from_repo() { return 1; }
 
 backup_dir=$(backup_scripts)

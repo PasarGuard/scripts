@@ -12,14 +12,18 @@ source "$ROOT_DIR/lib/system.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
 }
 
+# Assert command exits with expected exit code.
 assert_exit() {
     local expected_code="$1" label="$2"; shift 2
     local actual_code=0
@@ -32,10 +36,12 @@ echo "=== unit_lib_system.sh ==="
 # -----------------------------------------------------------------------
 # check_running_as_root
 # -----------------------------------------------------------------------
+# Mock id to return non-root user ID.
 id() { echo "1000"; }
 export -f id
 assert_exit 1 "check_running_as_root: fails when not root" check_running_as_root
 
+# Mock id to return root user ID.
 id() { echo "0"; }
 export -f id
 assert_exit 0 "check_running_as_root: passes when root" check_running_as_root
@@ -79,6 +85,7 @@ assert_exit 1 "is_redhat_family_os: rejects Ubuntu" is_redhat_family_os
 # -----------------------------------------------------------------------
 OS="CentOS Linux"
 unset PKG_MANAGER
+# Mock yum to simulate package manager command failure.
 yum() { return 1; }
 export -f yum
 assert_exit 0 "detect_and_update_package_manager: CentOS metadata refresh failure is nonfatal" detect_and_update_package_manager
@@ -89,6 +96,7 @@ unset -f yum
 # -----------------------------------------------------------------------
 # identify_the_operating_system_and_architecture
 # -----------------------------------------------------------------------
+# Mock uname to simulate x86_64 architecture.
 uname() {
     case "${1:-}" in
         "") echo "Linux" ;;
@@ -99,6 +107,7 @@ export -f uname
 identify_the_operating_system_and_architecture
 assert_eq "$ARCH" "64" "identify_the_operating_system_and_architecture: x86_64 -> 64"
 
+# Mock uname to simulate aarch64 architecture.
 uname() {
     case "${1:-}" in
         "") echo "Linux" ;;
@@ -109,6 +118,7 @@ export -f uname
 identify_the_operating_system_and_architecture
 assert_eq "$ARCH" "arm64-v8a" "identify_the_operating_system_and_architecture: aarch64 -> arm64-v8a"
 
+# Mock uname to simulate non-Linux OS.
 uname() {
     case "${1:-}" in
         "") echo "Darwin" ;;

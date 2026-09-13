@@ -15,19 +15,24 @@ source "$ROOT_DIR/lib/env.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
 }
 
+# Assert that a file contains the specified literal pattern.
 assert_grep() {
     local pattern="$1" file="$2" label="$3"
     if grep -qF "$pattern" "$file"; then pass "$label"; else fail "$label (pattern='$pattern' not in file)"; fi
 }
 
+# Assert that a file does not contain the specified literal pattern.
 assert_no_grep() {
     local pattern="$1" file="$2" label="$3"
     if ! grep -qF "$pattern" "$file"; then pass "$label"; else fail "$label (pattern='$pattern' should NOT be in file)"; fi

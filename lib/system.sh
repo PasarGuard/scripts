@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
+# Verify that the effective user ID is 0 (root), terminating with an error otherwise.
 check_running_as_root() {
     if [ "$(id -u)" != "0" ]; then
         die "This command must be run as root."
     fi
 }
 
+# Detect and populate the running Linux distribution name in the global OS variable.
 detect_os() {
     if [ -f /etc/lsb-release ] && command -v lsb_release >/dev/null 2>&1; then
         OS=$(lsb_release -si)
@@ -20,6 +22,7 @@ detect_os() {
     fi
 }
 
+# Check whether the detected operating system belongs to the Red Hat enterprise family.
 is_redhat_family_os() {
     [[ "${OS:-}" == "CentOS"* ]] ||
         [[ "${OS:-}" == "AlmaLinux"* ]] ||
@@ -29,6 +32,7 @@ is_redhat_family_os() {
         [[ "${OS:-}" == "Amazon Linux"* ]]
 }
 
+# Select either dnf or yum as the active package manager for Red Hat distributions.
 select_redhat_package_manager() {
     if command -v dnf >/dev/null 2>&1; then
         PKG_MANAGER="dnf"
@@ -39,6 +43,7 @@ select_redhat_package_manager() {
     fi
 }
 
+# Attempt to install and enable the EPEL repository on Red Hat family distributions.
 enable_epel_if_available() {
     if $PKG_MANAGER install -y -q epel-release >/dev/null 2>&1; then
         return
@@ -47,10 +52,12 @@ enable_epel_if_available() {
     colorized_echo yellow "Could not enable EPEL automatically; continuing with configured repositories."
 }
 
+# Emit a warning when package manager repository metadata refresh cannot be completed.
 warn_package_metadata_refresh_failed() {
     colorized_echo yellow "Could not refresh package metadata; continuing with configured repositories."
 }
 
+# Identify the system package manager and refresh available repository metadata.
 detect_and_update_package_manager() {
     if [ -z "${OS:-}" ]; then
         detect_os
@@ -110,10 +117,12 @@ try_install_package() {
     fi
 }
 
+# Install a system package via the active package manager or exit with a failure message.
 install_package() {
     try_install_package "$1" || die "Failed to install $1 with ${PKG_MANAGER:-the package manager}. Check your package repositories and try again."
 }
 
+# Verify or install an interactive terminal editor (nano or vi) and assign EDITOR.
 check_editor() {
     if [ -z "${EDITOR:-}" ]; then
         if command -v nano >/dev/null 2>&1; then
@@ -128,6 +137,7 @@ check_editor() {
     fi
 }
 
+# Identify the Linux machine architecture and assign the normalized ARCH variable.
 identify_the_operating_system_and_architecture() {
     if [[ "$(uname)" != "Linux" ]]; then
         die "error: This operating system is not supported."
@@ -185,6 +195,7 @@ identify_the_operating_system_and_architecture() {
     esac
 }
 
+# Download and install the architecture-appropriate yq YAML processor binary into /usr/local/bin.
 install_yq() {
     local base_url="https://github.com/mikefarah/yq/releases/latest/download"
     local yq_binary=""
