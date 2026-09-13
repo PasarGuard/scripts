@@ -236,7 +236,7 @@ PasarGuard features an automated disaster recovery engine:
 1. **Atomic Dumps**: Creates consistent snapshots. SQLite WAL files are safely truncated, and PostgreSQL/TimescaleDB clusters are dumped with explicit table manifests and role permissions.
 2. **Scheduled Telegram Dispatch**: Configure recurring cron intervals (from 5 minutes to daily) using `pasarguard backup-service`. Backups are dispatched directly to your Telegram chat or channel.
 3. **Proxy Support**: Connect via SOCKS5 or HTTP proxy (`BACKUP_PROXY_URL`) to bypass Telegram network restrictions.
-4. **TimescaleDB Version Safety Preflight**: The restore engine validates source and destination TimescaleDB extension versions, enforcing a fail-closed safety gate that skips mismatched databases before modifying live data.
+4. **TimescaleDB Version Safety Preflight**: The restore engine validates source and destination TimescaleDB extension versions; `pg_prepare_timescaledb_compatible_dumps` converts supported source/destination version mismatches before `pg_restore_all_user_databases` runs, while unsafe or unsupported mismatches stop the restore before modifying live data.
 5. **Fail-Safe Rollback**: Rejects truncated dumps and path traversal attacks before touching live data. If a restore encounters issues, diagnostics are logged to `/opt/pasarguard/backup/pasarguard_restore_error.log`.
 
 👉 *Read the disaster recovery runbook in [docs/backup-and-restore.md](docs/backup-and-restore.md).*

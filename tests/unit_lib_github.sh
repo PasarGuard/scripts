@@ -140,6 +140,20 @@ else
     fail "install_shared_libs_from_local: docker.sh installed"
 fi
 
+# -----------------------------------------------------------------------
+# install_mirror_from_local
+# -----------------------------------------------------------------------
+export MIRROR_INSTALL_DIR="$WORK_DIR/mirror-install"
+mkdir -p "$SRC_DIR/iran-sanction"
+echo "echo mirror" > "$SRC_DIR/iran-sanction/mirror.sh"
+
+install_mirror_from_local "$SRC_DIR"
+if [ -f "$MIRROR_INSTALL_DIR/mirror.sh" ] && [ -x "$MIRROR_INSTALL_DIR/mirror.sh" ]; then
+    pass "install_mirror_from_local: mirror.sh installed and executable"
+else
+    fail "install_mirror_from_local: mirror.sh installed and executable"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

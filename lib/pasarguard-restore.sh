@@ -801,7 +801,7 @@ restore_command() {
     current_compose_snapshot="$temp_restore_dir/.pasarguard-destination-compose.yml"
 
     local log_file="${temp_restore_dir}/pasarguard_restore_error.log"
-    >"$log_file"
+    : >"$log_file"
     echo "Restore Log - $(date)" >>"$log_file"
 
     # Clean up staging files, display and persist the error log, restart stopped
@@ -977,7 +977,7 @@ restore_command() {
             exit 1
         fi
         local concatenated_file="$temp_restore_dir/${base_name}_combined.zip"
-        >"$concatenated_file"
+        : >"$concatenated_file"
         local part_count=0
         local expected_part_number="$first_part_number"
         while IFS= read -r part_file; do
@@ -1386,11 +1386,9 @@ restore_command() {
                 container_name="$verified_container"
 
                 # Check if this is actually a MariaDB container
-                local is_mariadb=false
                 local mysql_cmd="mysql"
                 local db_type_name="MySQL"
                 if docker exec "$container_name" mariadb --version >/dev/null 2>&1; then
-                    is_mariadb=true
                     mysql_cmd="mariadb"
                     db_type_name="MariaDB"
                 fi

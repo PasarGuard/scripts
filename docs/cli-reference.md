@@ -2,6 +2,20 @@
 
 Comprehensive command-line interface documentation for **PasarGuard Panel** (`pasarguard.sh` / `pasarguard`) and **PasarGuard Node** (`pg-node.sh` / `pg-node`).
 
+```mermaid
+graph TD
+    Panel["PasarGuard Panel (pasarguard.sh)"]
+    DB[("Database Engine\nSQLite / Postgres / Timescale / MySQL")]
+    Node["PasarGuard Node (pg-node.sh)"]
+    Service["Node Daemon (pg-node-service.sh)"]
+    Xray["Xray-Core (install_core.sh)"]
+
+    Panel -->|Orchestrates| DB
+    Panel -->|gRPC / REST API| Service
+    Service -->|Controls| Node
+    Node -->|Executes| Xray
+```
+
 ---
 
 ## Table of Contents
@@ -14,6 +28,7 @@ Comprehensive command-line interface documentation for **PasarGuard Panel** (`pa
   - [Command Reference](#node-command-reference)
   - [Systemd Service Commands](#node-systemd-service-commands)
   - [Directory Structure](#node-directory-structure)
+- [Standalone Xray-Core Installer (`install_core.sh`)](#standalone-xray-core-installer-install_coresh)
 
 ---
 
@@ -84,6 +99,23 @@ sudo pasarguard restart
 Displays real-time container states, port bindings, database connectivity status, and disk usage for data directories.
 ```bash
 sudo pasarguard status
+```
+
+#### `doctor`
+Runs comprehensive system diagnostics, verifying Docker and Compose health, port occupancy, storage permissions, SSL certificate expiration windows, and backup scheduler status.
+```bash
+sudo pasarguard doctor
+```
+
+#### `mirror`
+Manages Iranian domestic mirrors for Docker registry and APT repositories:
+- `status`: Displays current active Docker and APT mirror configuration.
+- `test`: Benchmarks domestic mirrors without applying changes (dry-run mode).
+- `apply`: Benchmarks mirrors and automatically configures the fastest responsive mirror.
+```bash
+sudo pasarguard mirror status
+sudo pasarguard mirror test
+sudo pasarguard mirror apply
 ```
 
 #### `logs`
@@ -233,6 +265,20 @@ Displays node IP address, active service port, certificate path, API key, and cu
 sudo pg-node status
 ```
 
+#### `doctor`
+Runs comprehensive worker node diagnostics: audits service and API ports, validates TLS certificate files and SAN entries, checks companion systemd service status, verifies `xray` binary integrity, and checks routing databases.
+```bash
+sudo pg-node doctor
+```
+
+#### `mirror`
+Tests and configures domestic Iranian Docker and APT mirrors on the node:
+```bash
+sudo pg-node mirror status
+sudo pg-node mirror test
+sudo pg-node mirror apply
+```
+
 #### `logs`
 Streams real-time container logs.
 ```bash
@@ -290,3 +336,37 @@ The companion `pg-node-service` background daemon maintains synchronization and 
 | `/usr/local/share/xray/` | Installed `geoip.dat` and `geosite.dat` databases. |
 | `/usr/local/bin/xray` | Installed Xray-core binary. |
 | `/etc/systemd/system/pg-node-service.service` | Systemd service unit. |
+
+---
+
+## Standalone Xray-Core Installer (`install_core.sh`)
+
+[`install_core.sh`](../install_core.sh) is an independent installer and updater script for official `Xray-core` releases and routing databases (`geoip.dat`, `geosite.dat`).
+
+### Command-Line Usage
+
+```bash
+sudo ./install_core.sh [options]
+```
+
+### Options
+
+| Flag | Argument | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `--tag` | `<release-tag>` | Explicit release tag (e.g. `v1.8.24` or `latest`). | `latest` |
+| `--os` | `linux` | Target operating system (autodetected). | `linux` |
+| `--arch` | `<arch>` | Target CPU architecture (`64`, `32`, `arm64-v8a`, `arm32-v7a`, `mips32le`, etc.). | Autodetected |
+| `-h`, `--help` | *(flag)* | Display help and usage instructions. | - |
+
+### Examples
+
+```bash
+# Install the newest stable release automatically matching host architecture:
+sudo ./install_core.sh
+
+# Install a specific release version:
+sudo ./install_core.sh --tag v1.8.24
+
+# Force a specific architecture on ARM64 platforms:
+sudo ./install_core.sh --arch arm64-v8a
+```

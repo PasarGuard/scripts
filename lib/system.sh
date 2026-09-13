@@ -241,3 +241,18 @@ install_yq() {
 
     rm -f "$binary_tmp"
 }
+
+# Check if a specific TCP or UDP port is actively listening on the host.
+is_port_in_use() {
+    local port="$1"
+    [ -n "$port" ] || return 1
+    if command -v ss >/dev/null 2>&1; then
+        ss -tuln 2>/dev/null | awk '{print $5}' | grep -Eo '[0-9]+$' | grep -qw "$port"
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tuln 2>/dev/null | awk '{print $4}' | grep -Eo '[0-9]+$' | grep -qw "$port"
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    else
+        return 1
+    fi
+}

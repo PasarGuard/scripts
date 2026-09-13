@@ -46,7 +46,7 @@ get_script_commit_sha() {
     # install_core.sh is normally piped straight into bash, so there is no git
     # checkout and no baked-in SHA. Ask GitHub which commit "main" currently
     # points to instead of printing the literal branch name.
-    commit_sha=$(resolve_remote_commit_sha)
+    commit_sha=$(resolve_remote_commit_sha "${PASARGUARD_SCRIPT_REPO:-PasarGuard/scripts}" "${PASARGUARD_SCRIPT_BRANCH:-main}")
     if [ -n "$commit_sha" ]; then
         printf '%s\n' "$commit_sha"
         return 0
@@ -97,8 +97,6 @@ parse_args() {
     done
 }
 
-parse_args "$@"
-printf '# Executing install_core script, commit: %s\n' "$(get_script_commit_sha)"
 
 check_if_running_as_root() {
     # If you want to run as another user, please modify $EUID to be owned by this user
@@ -298,17 +296,21 @@ place_xray() {
     echo "Xray files installed"
 }
 
-check_if_running_as_root
-identify_the_operating_system_and_architecture
-ensure_dependencies
+if [ "${INSTALL_CORE_SOURCE_ONLY:-false}" != "true" ]; then
+    parse_args "$@"
+    printf '# Executing install_core script, commit: %s\n' "$(get_script_commit_sha)"
+    check_if_running_as_root
+    identify_the_operating_system_and_architecture
+    ensure_dependencies
 
-TMP_DIRECTORY="$(mktemp -d)"
-ZIP_FILE="${TMP_DIRECTORY}/Xray-linux-$ARCH.zip"
+    TMP_DIRECTORY="$(mktemp -d)"
+    ZIP_FILE="${TMP_DIRECTORY}/Xray-linux-$ARCH.zip"
 
-download_xray
-extract_xray
-place_xray
+    download_xray
+    extract_xray
+    place_xray
 
-rm -rf "$TMP_DIRECTORY"
-echo "Installation complete!"
-exit 0
+    rm -rf "$TMP_DIRECTORY"
+    echo "Installation complete!"
+    exit 0
+fi

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 
 SHARED_LIB_INSTALL_DIR="${SHARED_LIB_INSTALL_DIR:-/usr/local/lib/pasarguard-scripts/lib}"
+MIRROR_INSTALL_DIR="${MIRROR_INSTALL_DIR:-/usr/local/lib/pasarguard-scripts/iran-sanction}"
 
+# Construct the raw GitHub download URL for a file in a given repository.
 github_raw_url() {
     local repo="$1"
     local path="$2"
@@ -9,6 +11,7 @@ github_raw_url() {
     printf 'https://github.com/%s/raw/main/%s\n' "$repo" "$path"
 }
 
+# Download a remote file using curl with fail-fast and silent options.
 github_download_file() {
     local url="$1"
     local target_path="$2"
@@ -16,6 +19,7 @@ github_download_file() {
     curl -fsSL "$url" -o "$target_path"
 }
 
+# Back up installed scripts and shared libraries into a temporary directory.
 backup_scripts() {
     local backup_dir=""
     backup_dir=$(create_temp_dir "scripts-backup")
@@ -33,9 +37,16 @@ backup_scripts() {
         fi
     fi
 
+    # Backup mirror script
+    if [ -f "$MIRROR_INSTALL_DIR/mirror.sh" ]; then
+        mkdir -p "$backup_dir/iran-sanction"
+        cp "$MIRROR_INSTALL_DIR/mirror.sh" "$backup_dir/iran-sanction/"
+    fi
+
     printf '%s\n' "$backup_dir"
 }
 
+# Restore main scripts and shared libraries from a previous backup directory.
 restore_scripts() {
     local backup_dir="$1"
     [ -z "$backup_dir" ] && return 1
@@ -51,8 +62,15 @@ restore_scripts() {
             install -m 644 "$backup_dir/lib/"* "$SHARED_LIB_INSTALL_DIR/"
         fi
     fi
+
+    # Restore mirror script
+    if [ -f "$backup_dir/iran-sanction/mirror.sh" ]; then
+        mkdir -p "$MIRROR_INSTALL_DIR"
+        install -m 755 "$backup_dir/iran-sanction/mirror.sh" "$MIRROR_INSTALL_DIR/mirror.sh"
+    fi
 }
 
+# Clean up temporary backup directory created by backup_scripts.
 cleanup_backup() {
     local backup_dir="$1"
     if [ -n "$backup_dir" ]; then
@@ -60,6 +78,7 @@ cleanup_backup() {
     fi
 }
 
+# Download and install an executable shell script from a repository into /usr/local/bin.
 github_install_script_from_repo() {
     local repo="$1"
     local script_name="$2"
@@ -91,6 +110,7 @@ github_install_script_from_repo() {
     rm -f "$tmp_file"
 }
 
+# Copy specified shared library files from a local source directory into SHARED_LIB_INSTALL_DIR.
 install_shared_libs_from_local() {
     local source_dir="$1"
     shift
@@ -104,6 +124,7 @@ install_shared_libs_from_local() {
     done
 }
 
+# Download and install specified shared library files from GitHub repository into SHARED_LIB_INSTALL_DIR.
 install_shared_libs_from_repo() {
     local fetch_repo="$1"
     shift
@@ -123,6 +144,41 @@ install_shared_libs_from_repo() {
             return 1
         fi
     done
+
+    rm -rf "$tmp_dir"
+}
+
+# Install the domestic mirror management script from a local source directory.
+install_mirror_from_local() {
+    local source_dir="$1"
+
+    if [ -f "$source_dir/iran-sanction/mirror.sh" ]; then
+        mkdir -p "$MIRROR_INSTALL_DIR"
+        install -m 755 "$source_dir/iran-sanction/mirror.sh" "$MIRROR_INSTALL_DIR/mirror.sh"
+    fi
+}
+
+# Download and install the domestic mirror management script from GitHub repository.
+install_mirror_from_repo() {
+    local fetch_repo="$1"
+    local tmp_dir=""
+
+    if [ -n "${SCRIPT_DIR:-}" ] && [ -f "$SCRIPT_DIR/iran-sanction/mirror.sh" ]; then
+        install_mirror_from_local "$SCRIPT_DIR"
+        return 0
+    fi
+
+    tmp_dir=$(create_temp_dir "mirror-install")
+    if ! github_download_file "$(github_raw_url "$fetch_repo" "iran-sanction/mirror.sh")" "$tmp_dir/mirror.sh"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    mkdir -p "$MIRROR_INSTALL_DIR"
+    if ! install -m 755 "$tmp_dir/mirror.sh" "$MIRROR_INSTALL_DIR/mirror.sh"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
 
     rm -rf "$tmp_dir"
 }

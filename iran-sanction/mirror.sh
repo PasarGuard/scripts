@@ -54,12 +54,18 @@ DOCKER_MIRRORS=(
 
 DOCKER_PROBE_PATH="/v2/"
 
+# Print informative messages in cyan.
 info() { colorized_echo cyan "[INFO]  $*"; }
+# Print success messages in green.
 success() { colorized_echo green "[OK]    $*"; }
+# Print warning messages in yellow.
 warn() { colorized_echo yellow "[WARN]  $*"; }
+# Print error messages to standard error in red.
 error() { colorized_echo red "[ERR]   $*" >&2; }
+# Print bold formatted text to standard output.
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 
+# Ensure required external binaries are available on PATH.
 require() {
     local cmd
     for cmd in "$@"; do
@@ -70,6 +76,7 @@ require() {
     done
 }
 
+# Detect Linux distribution ID, version codename, and ID_LIKE from /etc/os-release.
 detect_release_info() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
@@ -84,6 +91,7 @@ detect_release_info() {
     fi
 }
 
+# Resolve and output the Linux distribution codename (e.g. bookworm, jammy).
 get_os_codename() {
     detect_release_info
     if [[ -n "${OS_CODENAME:-}" ]]; then
@@ -93,10 +101,12 @@ get_os_codename() {
     fi
 }
 
+# Check if current OS belongs to the Ubuntu distribution family.
 is_ubuntu_family() {
     [[ "$OS_ID" == "ubuntu" ]] || [[ "${OS_LIKE:-}" == *"ubuntu"* ]]
 }
 
+# Measure latency and download speed for a given mirror URL against a probe endpoint.
 benchmark_mirror() {
     local base_url="$1"
     local probe="$2"
@@ -145,6 +155,7 @@ benchmark_mirror() {
     echo "$((total_speed / success_count)) $((total_latency / success_count))"
 }
 
+# Benchmark a list of mirrors and select the highest-scoring candidate into BEST_MIRROR.
 benchmark_list() {
     local label="$1"
     shift
@@ -224,6 +235,7 @@ benchmark_list() {
     success "Best ${label} mirror: $BEST_MIRROR"
 }
 
+# Back up APT repository configuration and rewrite sources to use the selected mirror.
 apply_apt_mirror() {
     local mirror="$1"
     local sources_file="/etc/apt/sources.list"
@@ -277,9 +289,15 @@ EOF
 
     success "Written new $sources_file"
     info "Running apt-get update to verify..."
-    apt-get update -qq && success "apt-get update succeeded" || warn "apt-get update returned errors; check $sources_file"
+    if apt-get update -qq; then
+        success "apt-get update succeeded"
+    else
+        warn "apt-get update returned errors; check $sources_file"
+        return 1
+    fi
 }
 
+# Update or write Docker daemon.json with the designated registry mirror.
 write_docker_daemon_json() {
     local daemon_file="$1"
     local mirror="$2"
@@ -315,6 +333,7 @@ PYEOF
 EOF
 }
 
+# Configure Docker registry-mirrors in daemon.json and reload docker daemon.
 apply_docker_mirror() {
     local mirror="$1"
     local daemon_file="/etc/docker/daemon.json"
@@ -345,6 +364,7 @@ apply_docker_mirror() {
     fi
 }
 
+# Identify the optimal domestic APT mirror for the running Linux distribution.
 select_best_apt_mirror() {
     ensure_benchmark_requirements
     detect_release_info
@@ -363,23 +383,27 @@ select_best_apt_mirror() {
     benchmark_list "APT" "/dists/${codename}/Release" "false" "${active_mirrors[@]}"
 }
 
+# Identify the optimal domestic Docker registry mirror.
 select_best_docker_mirror() {
     ensure_benchmark_requirements
     benchmark_list "Docker" "$DOCKER_PROBE_PATH" "true" "${DOCKER_MIRRORS[@]}"
 }
 
+# Benchmark and apply the fastest domestic APT mirror.
 select_and_apply_apt_mirror() {
     ensure_runtime_requirements
     select_best_apt_mirror || return 1
     apply_apt_mirror "$BEST_MIRROR"
 }
 
+# Benchmark and apply the fastest domestic Docker registry mirror.
 select_and_apply_docker_mirror() {
     ensure_runtime_requirements
     select_best_docker_mirror || return 1
     apply_docker_mirror "$BEST_MIRROR"
 }
 
+# Verify required CLI tools and root privileges before making system changes.
 ensure_runtime_requirements() {
     require curl awk sort
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -477,8 +501,30 @@ is_script_managed_apt_mirror() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    status=0
-    select_and_apply_apt_mirror || status=1
-    select_and_apply_docker_mirror || status=1
-    exit "$status"
+    case "${1:-apply}" in
+        status)
+            cur_docker=$(get_current_docker_mirror 2>/dev/null || echo "default (Docker Hub)")
+            cur_apt=$(get_current_apt_mirror 2>/dev/null || echo "default")
+            printf "\e[94m=== Domestic Mirror Status ===\e[0m\n"
+            printf "Active Docker Mirror: %s\n" "${cur_docker:-default (Docker Hub)}"
+            printf "Active APT Mirror   : %s\n" "${cur_apt:-default}"
+            ;;
+        test)
+            DRY_RUN=true
+            status=0
+            select_and_apply_apt_mirror || status=1
+            select_and_apply_docker_mirror || status=1
+            exit "$status"
+            ;;
+        apply)
+            status=0
+            select_and_apply_apt_mirror || status=1
+            select_and_apply_docker_mirror || status=1
+            exit "$status"
+            ;;
+        *)
+            echo "Usage: $0 [status|test|apply]"
+            exit 1
+            ;;
+    esac
 fi

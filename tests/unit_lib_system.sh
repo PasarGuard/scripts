@@ -118,6 +118,21 @@ export -f uname
 assert_exit 1 "identify_the_operating_system_and_architecture: fails on non-Linux" identify_the_operating_system_and_architecture
 unset -f uname
 
+# -----------------------------------------------------------------------
+# is_port_in_use
+# -----------------------------------------------------------------------
+ss() {
+    echo "Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
+    echo "tcp LISTEN 0 128 0.0.0.0:8000 0.0.0.0:*"
+    echo "tcp LISTEN 0 128 [::]:62051 [::]:*"
+}
+export -f ss
+assert_exit 0 "is_port_in_use: 8000 is listening" is_port_in_use 8000
+assert_exit 0 "is_port_in_use: 62051 is listening" is_port_in_use 62051
+assert_exit 1 "is_port_in_use: 9999 is free" is_port_in_use 9999
+assert_exit 1 "is_port_in_use: empty port returns 1" is_port_in_use ""
+unset -f ss
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
