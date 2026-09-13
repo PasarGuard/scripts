@@ -79,7 +79,7 @@ For production environments with heavy concurrent user connections, PostgreSQL o
 ```
 
 #### Native Async Connection Pooling
-PostgreSQL and TimescaleDB handle connections directly via the panel's built-in async connection pooling (`asyncpg` with SQLAlchemy `QueuePool`). This ensures full compatibility with prepared statements, asynchronous transactions, and low latency:
+PostgreSQL and TimescaleDB handle connections directly via the panel's built-in async connection pooling (`asyncpg` with SQLAlchemy `AsyncAdaptedQueuePool`). This ensures full compatibility with prepared statements, asynchronous transactions, and low latency:
 - Panel connects directly to PostgreSQL / TimescaleDB on port `5432`.
 - Native async pool manages persistent connections efficiently without requiring external proxy middleware.
 
