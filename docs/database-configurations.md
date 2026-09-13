@@ -11,8 +11,8 @@ A technical guide to selecting, configuring, and tuning database backends in Pas
 | **SQLite** | Small to medium deployments (< 500 active users) | All versions | Zero setup, embedded, WAL-mode checkpoints | File-based |
 | **MySQL 8.0** | Traditional multi-service setups | All versions | phpMyAdmin on port 8010, ACID transactions | `3306` |
 | **MariaDB (LTS)** | Open-source MySQL alternative | All versions | phpMyAdmin on port 8010, high concurrency | `3306` |
-| **PostgreSQL 17** | High-traffic production deployments (1,000+ users) | `v1.0.0+` | PgBouncer pooling, pgAdmin4, SCRAM-SHA-256 | `6432` (PgBouncer)<br>`5432` (Direct) |
-| **TimescaleDB** | High-throughput telemetry & analytics | `v1.0.0+` | Hypertables, PgBouncer, pgAdmin4, automatic time-series partitioning | `6432` (PgBouncer)<br>`5432` (Direct) |
+| **PostgreSQL 17** | High-traffic production deployments (1,000+ users) | `v1.0.0+` | Native async pooling, pgAdmin4, SCRAM-SHA-256 | `5432` |
+| **TimescaleDB** | High-throughput telemetry & analytics | `v1.0.0+` | Hypertables, pgAdmin4, automatic time-series partitioning | `5432` |
 
 ---
 
@@ -73,30 +73,24 @@ For production environments with heavy concurrent user connections, PostgreSQL o
 
 #### Architecture
 ```
-[ PasarGuard Panel ] ──(port 6432)──► [ PgBouncer ] ──(port 5432)──► [ TimescaleDB / PostgreSQL ]
-                                                                       ▲
-[ pgAdmin4 (Web GUI) ] ────────────────(port 8010)─────────────────────┘
+[ PasarGuard Panel ] ──(port 5432)──► [ TimescaleDB / PostgreSQL ]
+                                        ▲
+[ pgAdmin4 (Web GUI) ] ──(port 8010)────┘
 ```
 
-#### PgBouncer Connection Pooling
-PostgreSQL processes fork a backend worker per client connection. Under thousands of concurrent VPN sessions, this can exhaust server memory. PasarGuard includes **PgBouncer** in `transaction` pool mode:
-- Panel connects to PgBouncer on port `6432`.
-- PgBouncer multiplexes client queries across a small, persistent pool of server connections on port `5432`.
-- Reduces backend memory footprint by up to 80%.
+#### Native Async Connection Pooling
+PostgreSQL and TimescaleDB handle connections directly via the panel's built-in async connection pooling (`asyncpg` with SQLAlchemy `QueuePool`). This ensures full compatibility with prepared statements, asynchronous transactions, and low latency:
+- Panel connects directly to PostgreSQL / TimescaleDB on port `5432`.
+- Native async pool manages persistent connections efficiently without requiring external proxy middleware.
 
 #### Resource Tuning Parameters
-In `/opt/pasarguard/.env`, you can customize PostgreSQL and PgBouncer memory and concurrency limits:
+In `/opt/pasarguard/.env`, you can customize PostgreSQL memory and concurrency limits:
 
 ```env
 # PostgreSQL / TimescaleDB Core Tuning
 PG_MAX_CONNECTIONS=400       # Maximum physical backend connections
 PG_SHARED_BUFFERS=512MB      # Dedicated cache memory (recommended: 25% of RAM)
 PG_WORK_MEM=16MB             # Memory used for internal sort operations
-
-# PgBouncer Pooling Parameters
-PG_MAX_CLIENT_CONN=600       # Maximum client connections accepted by PgBouncer
-PG_DEFAULT_POOL_SIZE=50      # Default connection pool size per database
-PG_RESERVE_POOL_SIZE=25      # Reserve connections for traffic bursts
 ```
 
 #### pgAdmin 4 Management Interface
@@ -106,7 +100,7 @@ PG_RESERVE_POOL_SIZE=25      # Reserve connections for traffic bursts
   - Password: `PGADMIN_PASSWORD` (set during installation or in `.env`)
 - **Connecting to DB in pgAdmin**:
   - Host: `127.0.0.1`
-  - Port: `5432` (direct) or `6432` (pooled)
+  - Port: `5432`
   - Username: `pasarguard`
   - Password: `${DB_PASSWORD}`
 

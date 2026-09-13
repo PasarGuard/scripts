@@ -39,7 +39,7 @@
 ## 🌟 Overview
 
 **PasarGuard Scripts** provides battle-tested automation for deploying and maintaining production-grade PasarGuard infrastructure:
-- **PasarGuard Panel (`pasarguard.sh` / `pasarguard`)**: Orchestrates the web dashboard, database engines (SQLite, MySQL, MariaDB, PostgreSQL, TimescaleDB), PgBouncer connection pooling, admin web UIs (pgAdmin, phpMyAdmin), and disaster recovery.
+- **PasarGuard Panel (`pasarguard.sh` / `pasarguard`)**: Orchestrates the web dashboard, database engines (SQLite, MySQL, MariaDB, PostgreSQL, TimescaleDB), native async connection pooling, admin web UIs (pgAdmin, phpMyAdmin), and disaster recovery.
 - **PasarGuard Node (`pg-node.sh` / `pg-node`)**: Manages remote worker nodes, systemd background daemons (`pg-node-service`), Xray-core versions, routing geofiles, and TLS certificates.
 - **Disaster Recovery**: Automated recurring backups to Telegram with proxy support, multi-database cluster snapshots, and fail-closed TimescaleDB version compatibility gates.
 - **Domestic Mirror Optimization**: Benchmark and apply domestic Iranian mirrors for APT and Docker when deploying behind restricted network environments.
@@ -57,13 +57,9 @@
                    ┌──────────────────┴────────┐      ┌──────┴────────────────────┐
                    ▼                           ▼      ▼                           ▼
           ┌─────────────────┐         ┌────────────────────┐            ┌───────────────────┐
-          │  SQLite / MySQL │         │     PgBouncer      │            │ Automated Backup  │
-          │    / MariaDB    │         │  (Port 6432 Pool)  │            │  (Telegram + Cron)│
-          └─────────────────┘         └────────┬───────────┘            └───────────────────┘
-                                               │
-                                      ┌────────┴───────────┐
-                                      │ PostgreSQL 17 /    │
-                                      │   TimescaleDB      │
+          │  SQLite / MySQL │         │  PostgreSQL 17 /   │            │ Automated Backup  │
+          │    / MariaDB    │         │    TimescaleDB     │            │  (Telegram + Cron)│
+          └─────────────────┘         │ (Port 5432 Direct) │            └───────────────────┘
                                       └────────────────────┘
                                                ▲
                                                │ (Encrypted gRPC / REST)
@@ -110,7 +106,7 @@ curl -fsSL https://raw.githubusercontent.com/PasarGuard/scripts/main/pasarguard.
 # Default install (SQLite, interactive SSL)
 sudo bash pasarguard.sh install
 
-# High-concurrency production install (TimescaleDB + PgBouncer)
+# High-concurrency production install (TimescaleDB)
 sudo bash pasarguard.sh install --database timescaledb --pre-release
 ```
 
@@ -223,8 +219,8 @@ PasarGuard supports 5 database engines tailored for different workloads:
 | **SQLite** | Under 500 active users | Embedded | WAL mode (`PRAGMA wal_checkpoint`) |
 | **MySQL 8.0** | General multi-service | phpMyAdmin (port 8010) | InnoDB transactions |
 | **MariaDB** | High-performance open alternative | phpMyAdmin (port 8010) | Aria / InnoDB |
-| **PostgreSQL 17** | 1,000+ concurrent clients | pgAdmin 4 (port 8010) | PgBouncer transaction pooling (port 6432) |
-| **TimescaleDB** | High-throughput metrics & analytics | pgAdmin 4 (port 8010) | Hypertables + PgBouncer pooling |
+| **PostgreSQL 17** | 1,000+ concurrent clients | pgAdmin 4 (port 8010) | Native async connection pooling (port 5432) |
+| **TimescaleDB** | High-throughput metrics & analytics | pgAdmin 4 (port 8010) | Hypertables + native async pooling (port 5432) |
 
 👉 *Read the full database tuning guide in [docs/database-configurations.md](docs/database-configurations.md).*
 
@@ -273,7 +269,7 @@ For servers operating under Iranian network sanctions and international filterin
 | :--- | :--- |
 | **[CLI Reference](docs/cli-reference.md)** | Full command syntax, options, directory paths, and exit codes for Panel and Node. |
 | **[Backup & Disaster Recovery](docs/backup-and-restore.md)** | Backup architecture, Telegram automation, proxy routing, and TimescaleDB migrations. |
-| **[Database Configurations](docs/database-configurations.md)** | Engine comparisons, PgBouncer pooling, pgAdmin/phpMyAdmin, and memory tuning. |
+| **[Database Configurations](docs/database-configurations.md)** | Engine comparisons, connection pooling, pgAdmin/phpMyAdmin, and memory tuning. |
 | **[SSL & TLS Certificates](docs/ssl-and-certificates.md)** | Let's Encrypt ACME setup, custom certs, SAN entries, and node TLS verification. |
 | **[Offline & Sanctions Guide](docs/offline-and-sanctions.md)** | Domestic mirror benchmarking (`mirror.sh`) and air-gapped standalone deployment. |
 | **[Environment Variables](docs/environment-variables.md)** | Complete `.env` configuration dictionary for Panel and Worker Nodes. |

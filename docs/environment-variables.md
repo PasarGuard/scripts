@@ -7,7 +7,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 ## Table of Contents
 - [Panel Core Settings](#panel-core-settings)
 - [Database Configuration](#database-configuration)
-- [PostgreSQL & PgBouncer Tuning](#postgresql--pgbouncer-tuning)
+- [PostgreSQL Tuning](#postgresql-tuning)
 - [pgAdmin Management](#pgadmin-management)
 - [SSL & HTTPS Configuration](#ssl--https-configuration)
 - [Backup & Telegram Notifications](#backup--telegram-notifications)
@@ -29,7 +29,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `SQLALCHEMY_DATABASE_URL` | SQLAlchemy connection string used by the backend. | `postgresql://<DB_USER>:<URL_ENCODED_DB_PASSWORD>@127.0.0.1:6432/pasarguard` |
+| `SQLALCHEMY_DATABASE_URL` | SQLAlchemy connection string used by the backend. | `postgresql://<DB_USER>:<URL_ENCODED_DB_PASSWORD>@127.0.0.1:5432/pasarguard` |
 | `DB_NAME` | Primary database name. | `pasarguard` |
 | `DB_USER` | Primary database user. | `pasarguard` |
 | `DB_PASSWORD` | Primary database user password. | `Secr3tP@ssw0rd!` |
@@ -37,7 +37,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 
 ---
 
-## PostgreSQL & PgBouncer Tuning
+## PostgreSQL Tuning
 
 *Applicable when using `--database postgresql` or `--database timescaledb`.*
 
@@ -46,9 +46,6 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 | `PG_MAX_CONNECTIONS` | Max backend connections for PostgreSQL. | `400` | `400` |
 | `PG_SHARED_BUFFERS` | Dedicated database buffer cache. | `512MB` (or 25% of RAM) | `512MB` |
 | `PG_WORK_MEM` | Memory allocated per query sort operation. | `16MB` | `16MB` |
-| `PG_MAX_CLIENT_CONN` | Maximum incoming client connections handled by PgBouncer. | `600` | `600` |
-| `PG_DEFAULT_POOL_SIZE` | Persistent server connection pool size in PgBouncer. | `50` | `50` |
-| `PG_RESERVE_POOL_SIZE` | Emergency burst pool size for peak connection spikes. | `25` | `25` |
 
 ---
 
