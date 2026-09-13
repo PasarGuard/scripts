@@ -19,7 +19,7 @@ Comprehensive guide to PasarGuard's backup architecture, automated Telegram back
 - [Disaster Recovery & Restore](#disaster-recovery--restore)
   - [Interactive Restore Flow](#interactive-restore-flow)
   - [Pre-Restore Safety Preflights](#pre-restore-safety-preflights)
-  - [TimescaleDB Cross-Version Migration Engine](#timescaledb-cross-version-migration-engine)
+  - [TimescaleDB Version Compatibility & Safety Gate](#timescaledb-version-compatibility--safety-gate)
   - [Troubleshooting Restore Failures](#troubleshooting-restore-failures)
 
 ---
@@ -159,27 +159,22 @@ Before altering the active database or overwriting files:
 - **Archive Entry Inspection**: Guards against path traversal vulnerabilities (rejects archives with leading `/` or `../` entries).
 - **Dump Integrity Validation**: Verifies SQL dumps contain valid DDL/data and completed transaction markers.
 - **Compose Preservation**: Snapshots the destination's active `docker-compose.yml` so that port customizations or proxy bindings are not destroyed by the restored archive.
-- **Fail-Safe Rollback**: If validation fails at any stage, the existing database is left untouched, panel services are restarted, and detailed diagnostics are written to:
+- **Preflight Safety**: If archive validation fails during preflight inspection, existing databases and configuration files are left completely untouched, panel services are restarted, and detailed diagnostics are written to:
   ```
   /opt/pasarguard/backup/pasarguard_restore_error.log
   ```
 
-### TimescaleDB Cross-Version Migration Engine
+### TimescaleDB Version Compatibility & Safety Gate
 
-TimescaleDB stores hypertable metadata tightly coupled to its extension version. Attempting to restore a TimescaleDB 2.27 dump directly into a TimescaleDB 2.28 destination will fail because PostgreSQL prohibits updating extension schemas inside a dirty restore session.
+TimescaleDB hypertable metadata is tightly coupled to its extension version. Attempting to restore a TimescaleDB dump directly into an incompatible version will fail or risk corrupting hypertable catalogs.
 
-PasarGuard solves this automatically:
-1. **Metadata Inspection**: Reads the source extension version from `manifest.tsv` or the version sidecar file.
-2. **Compatibility Preflight**: Spins up a temporary compatibility container using `timescale/timescaledb-ha:pgNN-ts<version>-all` on an isolated volume.
-3. **Template0 Database Creation**: Creates a pristine staging database using `TEMPLATE template0` to avoid version lock.
-4. **Isolated Schema Upgrade**:
-   - Installs TimescaleDB at the source version.
-   - Calls `timescaledb_pre_restore()`.
-   - Restores table data.
-   - Calls `timescaledb_post_restore()`.
-   - Runs `ALTER EXTENSION timescaledb UPDATE TO '<target_version>'` in a clean backend session.
-5. **Target Import**: Dumps the upgraded database and imports it seamlessly into the live container.
-6. **Automatic Cleanup**: Tears down the temporary container and destroys its volume.
+PasarGuard enforces a strict fail-closed safety gate:
+1. **Metadata Inspection**: Reads the source extension version from `manifest.tsv` or the version sidecar file (`db_backup.timescaledb-version`).
+2. **Version Compatibility Verification**: Probes the destination PostgreSQL instance for the installed `timescaledb` extension version.
+3. **Fail-Closed Mismatch Handling**: When the archived TimescaleDB version differs from the destination server's installed version, PasarGuard skips restoring that database before executing destructive `DROP DATABASE` or recreate commands, and exits with a failure status.
+4. **Per-Database Rollback Boundary**: Databases listed in the backup manifest are restored sequentially. The no-change guarantee applies strictly to databases not yet reached or skipped; changes to earlier databases that have already been dropped and restored in the sequence are not rolled back if a subsequent database restore fails or is skipped.
+- Clear operator guidance is displayed with the source and target version strings.
+- Detailed diagnostics are written to `/opt/pasarguard/backup/pasarguard_restore_error.log`.
 
 ### Troubleshooting Restore Failures
 

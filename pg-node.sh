@@ -1965,6 +1965,8 @@ uninstall_completion() {
         colorized_echo yellow "Zsh completion removed from $zsh_completion_file"
     fi
 }
+
+# Display help and usage information for pg-node worker node commands and options.
 usage() {
     colorized_echo blue "================================"
     colorized_echo magenta "       $APP_NAME Node CLI Help"

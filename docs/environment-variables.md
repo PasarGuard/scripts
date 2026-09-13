@@ -29,7 +29,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `SQLALCHEMY_DATABASE_URL` | SQLAlchemy connection string used by the backend. | `postgresql://user:pass@127.0.0.1:6432/pasarguard` |
+| `SQLALCHEMY_DATABASE_URL` | SQLAlchemy connection string used by the backend. | `postgresql://<DB_USER>:<URL_ENCODED_DB_PASSWORD>@127.0.0.1:6432/pasarguard` |
 | `DB_NAME` | Primary database name. | `pasarguard` |
 | `DB_USER` | Primary database user. | `pasarguard` |
 | `DB_PASSWORD` | Primary database user password. | `Secr3tP@ssw0rd!` |

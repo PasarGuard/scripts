@@ -1928,6 +1928,7 @@ uninstall_completion() {
     fi
 }
 
+# Display help and usage information for pasarguard commands and options.
 usage() {
     local script_name="${0##*/}"
     colorized_echo blue "=============================="

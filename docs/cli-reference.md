@@ -31,7 +31,7 @@ The following flags can be supplied when running `pasarguard install`:
 
 | Flag | Argument | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `--database` | `sqlite` \| `mysql` \| `mariadb` \| `postgresql` \| `timescaledb` | Database backend engine. (PostgreSQL and TimescaleDB require v1.0.0+) | `sqlite` |
+| `--database` | `mysql` \| `mariadb` \| `postgresql` \| `timescaledb` | Database backend engine to use instead of SQLite. (PostgreSQL and TimescaleDB require v1.0.0+) | `sqlite` (omitted) |
 | `--version` | `<tag>` (e.g. `v0.5.2`, `v1.0.0-beta.1`) | Install an explicit release tag. | `latest` |
 | `--dev` | *(flag)* | Install the latest development build (only valid for v0.x releases). | Disabled |
 | `--pre-release`| *(flag)* | Install the latest pre-release build (for v1.0.0 and later). | Disabled |
@@ -117,7 +117,7 @@ sudo pasarguard backup-service
 ```
 
 #### `restore`
-Restores PasarGuard state from a previous backup archive (ZIP or tarball). Features pre-restore validation, atomic database replacements, and automated cross-version TimescaleDB upgrades.
+Restores PasarGuard state from a previous backup archive (ZIP or tarball). Features pre-restore validation, sequential per-database restoration, and TimescaleDB version compatibility verification.
 ```bash
 sudo pasarguard restore
 ```
@@ -240,7 +240,7 @@ sudo pg-node logs
 ```
 
 #### `core-update`
-Updates or switches the underlying `Xray-core` binary using [install_core.sh](install_core.sh).
+Updates or switches the underlying `Xray-core` binary using [install_core.sh](../install_core.sh).
 - `--version <TAG>`: Specify release tag (e.g. `v1.8.24` or `latest`).
 ```bash
 sudo pg-node core-update --version latest

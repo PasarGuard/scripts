@@ -62,6 +62,42 @@ assert_eq "$(byte_length "café")" "5" "byte_length: multibyte UTF-8 counts byte
 multibyte_body='{"detail":"versión inválida"}'
 assert_eq "$(byte_length "$multibyte_body")" "$(printf '%s' "$multibyte_body" | wc -c | tr -d '[:space:]')" "byte_length: matches wc -c"
 
+# Startup certificate validation behavior: fail-closed by default, allow override.
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+tmp_cert="$tmp_dir/invalid_cert.pem"
+tmp_key="$tmp_dir/key.pem"
+echo "not a valid pem" > "$tmp_cert"
+touch "$tmp_key"
+mock_bin="$tmp_dir/bin"
+mkdir -p "$mock_bin"
+cat << 'EOF' > "$mock_bin/socat"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$mock_bin/socat"
+
+# 1. Invalid certificate without ALLOW_INSECURE_TLS must fail closed.
+status_fail=0
+out_fail=$(PG_NODE_SERVICE_SOURCE_ONLY="false" ENV_FILE=/dev/null API_KEY="test" SSL_CERT_FILE="$tmp_cert" SSL_KEY_FILE="$tmp_key" PATH="$mock_bin:$PATH" bash "$ROOT_DIR/pg-node-service.sh" 2>&1) || status_fail=$?
+if [ "$status_fail" -ne 0 ] && echo "$out_fail" | grep -q "Refusing to start"; then
+    pass "startup: invalid certificate fails closed by default"
+else
+    fail "startup: invalid certificate fails closed by default (status=$status_fail, out=$out_fail)"
+fi
+
+# 2. Invalid certificate with ALLOW_INSECURE_TLS=true must proceed.
+status_override=0
+out_override=$(PG_NODE_SERVICE_SOURCE_ONLY="false" ENV_FILE=/dev/null API_KEY="test" SSL_CERT_FILE="$tmp_cert" SSL_KEY_FILE="$tmp_key" ALLOW_INSECURE_TLS=true PATH="$mock_bin:$PATH" bash "$ROOT_DIR/pg-node-service.sh" 2>&1) || status_override=$?
+if [ "$status_override" -eq 0 ] && echo "$out_override" | grep -q "ALLOW_INSECURE_TLS=true is set"; then
+    pass "startup: ALLOW_INSECURE_TLS=true allows startup with invalid certificate"
+else
+    fail "startup: ALLOW_INSECURE_TLS=true allows startup with invalid certificate (status=$status_override, out=$out_override)"
+fi
+
+rm -rf "$tmp_dir"
+trap - EXIT
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

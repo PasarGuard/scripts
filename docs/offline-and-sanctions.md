@@ -40,7 +40,7 @@ When configuring a server in Iran:
 3. **Composite Scoring**: Calculates a weighted score:
    $$\text{Score} = (0.70 \times \text{Speed}) + (0.30 \times \text{Latency})$$
 4. **Automated Application**:
-   - Replaces APT repository mirrors in `/etc/apt/sources.list`.
+   - Replaces APT repository mirrors with the fastest responsive HTTPS mirror in `/etc/apt/sources.list` (ensuring encrypted transport).
    - Adds registry mirrors to `/etc/docker/daemon.json` (`registry-mirrors`).
    - Reloads the Docker daemon (`systemctl daemon-reload && systemctl restart docker`).
 
@@ -83,15 +83,30 @@ sudo pasarguard install --database timescaledb
 
 ### Scenario 2: Completely Air-Gapped Host (No Internet)
 
-1. Download the release bundle onto an external computer:
+Because air-gapped hosts have no internet connectivity and standalone bundles contain configuration templates and scripts rather than container images, required Docker images must be pre-provisioned:
+
+1. Download the release bundle onto an external computer with internet access:
    - [pasarguard-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pasarguard-standalone.tar.gz)
    - [pg-node-standalone.tar.gz](https://github.com/PasarGuard/scripts/releases/latest/download/pg-node-standalone.tar.gz)
-2. Transfer the archive to the destination server using `scp`, SFTP, or USB drive:
+
+2. Pull and save the required Docker images on the connected machine (or push to an accessible local registry):
    ```bash
-   scp pasarguard-standalone.tar.gz root@server-ip:/tmp/
+   # Panel stack image (example for default SQLite install):
+   docker pull ghcr.io/pasarguard/panel:latest
+   docker save ghcr.io/pasarguard/panel:latest -o pasarguard-images.tar
    ```
-3. Extract and install on the server:
+
+3. Transfer both the release bundle and image archive to the air-gapped host via `scp`, SFTP, or USB drive:
    ```bash
+   scp pasarguard-standalone.tar.gz pasarguard-images.tar root@server-ip:/tmp/
+   ```
+
+4. Load Docker images and install on the server:
+   ```bash
+   # Import the container images into Docker
+   docker load -i /tmp/pasarguard-images.tar
+
+   # Extract and install standalone scripts
    cd /tmp
    tar -xzf pasarguard-standalone.tar.gz
    cd pasarguard-standalone

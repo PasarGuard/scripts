@@ -36,7 +36,7 @@ APT_MIRRORS=(
 )
 
 APT_MIRRORS_UBUNTU=(
-    "http://ir.archive.ubuntu.com/ubuntu"
+    "https://ir.archive.ubuntu.com/ubuntu"
     "https://mirror.arvancloud.ir/ubuntu"
     "https://repo.hmirror.ir/ubuntu"
     "https://mirror.iranserver.com/ubuntu"
@@ -227,7 +227,8 @@ benchmark_list() {
 apply_apt_mirror() {
     local mirror="$1"
     local sources_file="/etc/apt/sources.list"
-    local backup="${sources_file}.bak.$(date +%Y%m%d%H%M%S)"
+    local backup
+    backup="${sources_file}.bak.$(date +%Y%m%d%H%M%S)"
     local codename
 
     detect_release_info
@@ -317,7 +318,8 @@ EOF
 apply_docker_mirror() {
     local mirror="$1"
     local daemon_file="/etc/docker/daemon.json"
-    local backup="${daemon_file}.bak.$(date +%Y%m%d%H%M%S)"
+    local backup
+    backup="${daemon_file}.bak.$(date +%Y%m%d%H%M%S)"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         info "[DRY-RUN] Would set Docker registry-mirror to: $mirror in $daemon_file"
@@ -387,10 +389,12 @@ ensure_runtime_requirements() {
     check_running_as_root
 }
 
+# Verify CLI utilities required for benchmarking are installed.
 ensure_benchmark_requirements() {
     require curl awk sort
 }
 
+# Inspect Docker daemon configuration and return the first configured registry mirror.
 get_current_docker_mirror() {
     local daemon_file="/etc/docker/daemon.json"
 
@@ -417,6 +421,7 @@ PYEOF
     sed -n 's/.*"registry-mirrors"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$daemon_file" | head -n 1
 }
 
+# Check if the active Docker mirror URL matches any script-managed domestic mirror.
 is_script_managed_docker_mirror() {
     local current_mirror="$1"
     local mirror=""
@@ -432,6 +437,7 @@ is_script_managed_docker_mirror() {
     return 1
 }
 
+# Inspect sources.list and deb822 sources to retrieve the current primary APT mirror URL.
 get_current_apt_mirror() {
     local source_file=""
     local mirror=""
@@ -454,6 +460,7 @@ get_current_apt_mirror() {
     return 1
 }
 
+# Check if the active APT mirror URL matches any script-managed domestic mirror.
 is_script_managed_apt_mirror() {
     local current_mirror="$1"
     local mirror=""
@@ -468,3 +475,10 @@ is_script_managed_apt_mirror() {
 
     return 1
 }
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    status=0
+    select_and_apply_apt_mirror || status=1
+    select_and_apply_docker_mirror || status=1
+    exit "$status"
+fi

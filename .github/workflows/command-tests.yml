@@ -10,30 +10,18 @@ on:
       - "pasarguard.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
+      - "iran-sanction/**"
       - "lib/**"
-      - "tests/unit_lib_common.sh"
-      - "tests/unit_lib_env.sh"
-      - "tests/unit_lib_github.sh"
-      - "tests/unit_pasarguard.sh"
-      - "tests/unit_pgnode.sh"
-      - "tests/unit_pgnode_service.sh"
-      - "tests/unit_restore_archive_safety.sh"
-      - "tests/unit_lib_system.sh"
+      - "tests/**"
   pull_request:
     paths:
       - ".github/workflows/command-tests.yml"
       - "pasarguard.sh"
       - "pg-node.sh"
       - "pg-node-service.sh"
+      - "iran-sanction/**"
       - "lib/**"
-      - "tests/unit_lib_common.sh"
-      - "tests/unit_lib_env.sh"
-      - "tests/unit_lib_github.sh"
-      - "tests/unit_lib_system.sh"
-      - "tests/unit_pasarguard.sh"
-      - "tests/unit_pgnode.sh"
-      - "tests/unit_pgnode_service.sh"
-      - "tests/unit_restore_archive_safety.sh"
+      - "tests/**"
   workflow_dispatch:
 
 jobs:
@@ -45,19 +33,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install archive tooling for restore-safety tests
         run: sudo apt-get update && sudo apt-get install -y zip unzip
-      - name: Run lib/common.sh unit tests
-        run: bash tests/unit_lib_common.sh
-      - name: Run lib/env.sh unit tests
-        run: bash tests/unit_lib_env.sh
-      - name: Run lib/github.sh unit tests
-        run: bash tests/unit_lib_github.sh
-      - name: Run lib/system.sh unit tests
-        run: bash tests/unit_lib_system.sh
-      - name: Run pasarguard.sh unit tests
-        run: bash tests/unit_pasarguard.sh
-      - name: Run pg-node.sh unit tests
-        run: bash tests/unit_pgnode.sh
-      - name: Run pg-node-service.sh unit tests
-        run: bash tests/unit_pgnode_service.sh
-      - name: Run restore archive-safety unit tests
-        run: bash tests/unit_restore_archive_safety.sh
+      - name: Run all unit tests
+        run: bash tests/run_all.sh

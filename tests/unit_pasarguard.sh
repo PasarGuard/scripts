@@ -724,6 +724,24 @@ comp_out=$(generate_completion)
 assert_true "completion: contains version-script" contains "$comp_out" "version-script"
 assert_true "completion: contains script-version" contains "$comp_out" "script-version"
 
+# -----------------------------------------------------------------------
+# mirror.sh HTTPS transport and entrypoint guard
+# -----------------------------------------------------------------------
+http_mirrors=$(grep -E '^[[:space:]]*"http://' "$ROOT_DIR/iran-sanction/mirror.sh" || true)
+assert_eq "$http_mirrors" "" "mirror.sh: no plaintext HTTP APT mirrors"
+assert_true "mirror.sh: has direct-execution guard" \
+    grep -Fq 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then' \
+    "$ROOT_DIR/iran-sanction/mirror.sh"
+
+# -----------------------------------------------------------------------
+# run_all.sh missing suite detection
+# -----------------------------------------------------------------------
+missing_branch=$(grep -A 3 -F 'Suite not found:' "$ROOT_DIR/tests/run_all.sh" || true)
+assert_true "run_all.sh: increments FAILED for missing suites" \
+    contains "$missing_branch" 'FAILED=$((FAILED + 1))'
+assert_true "run_all.sh: records missing suites in FAILED_LIST" \
+    contains "$missing_branch" 'FAILED_LIST+=("$suite (missing)")'
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

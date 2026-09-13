@@ -112,10 +112,10 @@ sudo pg-node install --self-signed --san-entries "198.51.100.2,node1.example.com
 PasarGuard automatically normalizes entries to OpenSSL format (`IP:198.51.100.2, DNS:node1.example.com`).
 
 ### Certificate Verification Levels
-The `pg-node-service` daemon inspects certificates upon startup:
-- **CA-Signed (`0`)**: Fully trusted certificate signed by a known Certificate Authority. Enforces strict TLS verification (`verify=1`).
+The `pg-node-service` daemon inspects certificates upon startup using OpenSSL syntax and subject-versus-issuer comparison:
+- **CA-Signed / Differing Subject and Issuer (`0`)**: Issuer does not match Subject. Configures strict TLS client verification (`verify=1`).
 - **Self-Signed (`2`)**: Issuer matches Subject. Allows local communication with verification relaxed (`verify=0`).
-- **Invalid / Unreadable (`1`)**: Corrupted file or invalid format. Service logs an error and halts execution.
+- **Invalid / Unreadable (`1`)**: Missing file or invalid certificate syntax. The service logs an error and halts startup (fails closed) by default. Insecure operation requires an explicit opt-in (`ALLOW_INSECURE_TLS=true`) before relaxed verification (`verify=0`) is permitted.
 
 ### Certificate Renewal (`renew-cert`)
 To regenerate an expired or outdated node certificate:
@@ -125,6 +125,7 @@ sudo pg-node renew-cert
 This updates the certificate in `/var/lib/pg-node/certs/` and restarts the node container and companion service.
 
 ### Expiration Monitoring
-The companion service daemon continuously monitors the expiration date of `/var/lib/pg-node/certs/ssl_cert.pem`:
-- Emits warnings in `journalctl -u pg-node-service` when certificates are within 30 days of expiry.
-- Prevents silent outage from expired node certificates.
+During startup, `pg-node-service` inspects the certificate validity window for CA-signed certificates (where Subject and Issuer differ):
+- Calculates and logs the remaining days until expiration (or logs a warning if the certificate has already expired) to `journalctl -u pg-node-service`.
+- Self-signed and invalid certificates return before this expiration check.
+- Note: This check executes only during daemon startup rather than in a continuous background monitoring loop.

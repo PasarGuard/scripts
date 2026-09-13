@@ -5,7 +5,6 @@
 set -u
 
 TESTS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd -- "${TESTS_DIR}/.." && pwd)"
 
 SUITES=(
     "unit_lib_common.sh"
@@ -31,7 +30,9 @@ printf "==============================================\n\n"
 for suite in "${SUITES[@]}"; do
     suite_path="$TESTS_DIR/$suite"
     if [ ! -f "$suite_path" ]; then
-        printf "[WARN] Suite not found: %s\n" "$suite"
+        printf "✖ Suite not found: %s\n\n" "$suite"
+        FAILED=$((FAILED + 1))
+        FAILED_LIST+=("$suite (missing)")
         continue
     fi
 
