@@ -742,6 +742,30 @@ assert_true "run_all.sh: increments FAILED for missing suites" \
 assert_true "run_all.sh: records missing suites in FAILED_LIST" \
     contains "$missing_branch" 'FAILED_LIST+=("$suite (missing)")'
 
+# -----------------------------------------------------------------------
+# PgBouncer and database configuration validation
+# -----------------------------------------------------------------------
+assert_true "compose: postgresql stack defines pgbouncer service" \
+    grep -Fq "pgbouncer:" "$ROOT_DIR/docker-compose/pasarguard-postgresql.yml"
+assert_true "compose: postgresql stack exposes pgbouncer on port 6432" \
+    grep -Fq '127.0.0.1:6432:6432' "$ROOT_DIR/docker-compose/pasarguard-postgresql.yml"
+assert_true "compose: postgresql stack configures MAX_PREPARED_STATEMENTS" \
+    grep -Fq "MAX_PREPARED_STATEMENTS:" "$ROOT_DIR/docker-compose/pasarguard-postgresql.yml"
+assert_true "compose: timescaledb stack defines pgbouncer service" \
+    grep -Fq "pgbouncer:" "$ROOT_DIR/docker-compose/pasarguard-timescaledb.yml"
+assert_true "compose: timescaledb stack exposes pgbouncer on port 6432" \
+    grep -Fq '127.0.0.1:6432:6432' "$ROOT_DIR/docker-compose/pasarguard-timescaledb.yml"
+assert_true "compose: timescaledb stack configures MAX_PREPARED_STATEMENTS" \
+    grep -Fq "MAX_PREPARED_STATEMENTS:" "$ROOT_DIR/docker-compose/pasarguard-timescaledb.yml"
+assert_true "pasarguard.sh: sets DB_PORT 6432 for postgresql/timescaledb" \
+    grep -Fq 'DB_PORT="6432"' "$ROOT_DIR/pasarguard.sh"
+assert_true "pasarguard.sh: disables prepared statement cache in asyncpg URL" \
+    grep -Fq 'prepared_statement_cache_size=0' "$ROOT_DIR/pasarguard.sh"
+assert_true "standalone: sets DB_PORT 6432 for postgresql/timescaledb" \
+    grep -Fq 'DB_PORT="6432"' "$ROOT_DIR/iran-sanction/pasarguard-standalone.sh"
+assert_true "standalone: disables prepared statement cache in asyncpg URL" \
+    grep -Fq 'prepared_statement_cache_size=0' "$ROOT_DIR/iran-sanction/pasarguard-standalone.sh"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

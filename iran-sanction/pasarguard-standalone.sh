@@ -301,6 +301,8 @@ uninstall_pasarguard_script() {
     fi
 }
 
+# Installs and initializes the standalone air-gapped PasarGuard panel stack, configuring the
+# selected database backend, environment variables, and bundled Docker Compose definition.
 install_pasarguard() {
     local pasarguard_version="$1"
     local major_version="$2"
@@ -346,7 +348,7 @@ install_pasarguard() {
         echo "DB_PASSWORD=\"${DB_PASSWORD}\"" >>"$ENV_FILE"
 
         if [[ "$database_type" == "postgresql" || "$database_type" == "timescaledb" ]]; then
-            DB_PORT="5432"
+            DB_PORT="6432"
             prompt_for_pgadmin_password
             echo "" >>"$ENV_FILE"
             echo "# PGAdmin configuration" >>"$ENV_FILE"
@@ -366,11 +368,12 @@ install_pasarguard() {
                 exit 1
             fi
             db_driver_scheme="postgresql+asyncpg"
+            SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}?prepared_statement_cache_size=0"
         else
             db_driver_scheme="mysql+asyncmy"
+            SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}"
         fi
 
-        SQLALCHEMY_DATABASE_URL="${db_driver_scheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}"
         echo "" >>"$ENV_FILE"
         echo "# SQLAlchemy Database URL" >>"$ENV_FILE"
         echo "SQLALCHEMY_DATABASE_URL=\"$SQLALCHEMY_DATABASE_URL\"" >>"$ENV_FILE"
