@@ -35,6 +35,13 @@ source "$STANDALONE_ROOT_DIR/pasarguard.sh"
 
 eval "$(declare -f detect_compose | sed '1s/detect_compose/original_detect_compose/')"
 
+# Install a file to a destination path with specific permissions if different.
+# Arguments:
+#   $1 - File mode permissions (e.g. 755, 644).
+#   $2 - Source file path.
+#   $3 - Destination file path.
+# Returns:
+#   0 on success.
 install_if_different() {
     local mode="$1"
     local source_path="$2"
@@ -48,18 +55,32 @@ install_if_different() {
     install -m "$mode" "$source_path" "$dest_path"
 }
 
+# Check if the provided argument is a non-negative integer.
+# Arguments:
+#   $1 - String to validate.
+# Returns:
+#   0 if integer, 1 otherwise.
 is_integer() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+# Verify that bundled standalone asset templates exist.
+# Returns:
+#   0 if assets exist; terminates via die otherwise.
 ensure_standalone_assets() {
     [ -f "$PASARGUARD_ENV_TEMPLATE" ] || die "Missing bundled env template: $PASARGUARD_ENV_TEMPLATE"
 }
 
+# Check whether apt-get is available on the system.
+# Returns:
+#   0 if apt-get exists, 1 otherwise.
 has_apt() {
     command -v apt-get >/dev/null 2>&1
 }
 
+# Validate presence of required standard CLI utility binaries.
+# Returns:
+#   0 if all utilities exist; terminates via die otherwise.
 ensure_package_prerequisites() {
     local cmd=""
     for cmd in curl awk sort sed grep cp install tar; do
@@ -67,6 +88,9 @@ ensure_package_prerequisites() {
     done
 }
 
+# Detect system package manager (apt-get, dnf, or yum) for standalone mode.
+# Returns:
+#   0 if a supported package manager is found; terminates via die otherwise.
 detect_standalone_package_manager() {
     if [ -n "$STANDALONE_PKG_MANAGER" ]; then
         return
@@ -83,6 +107,9 @@ detect_standalone_package_manager() {
     fi
 }
 
+# Select and configure the best APT mirror for systems running in Iran.
+# Returns:
+#   0 on completion.
 prepare_apt_mirror() {
     local current_mirror=""
     local recalibrate_choice=""
@@ -119,6 +146,11 @@ prepare_apt_mirror() {
     APT_MIRROR_PREPARED=true
 }
 
+# Install system packages using apt-get with mirror optimization.
+# Arguments:
+#   $@ - Package names to install.
+# Returns:
+#   0 on success.
 apt_install_packages() {
     local packages=("$@")
     prepare_apt_mirror
@@ -126,6 +158,9 @@ apt_install_packages() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
 }
 
+# Initialize package manager caches and repository sources.
+# Returns:
+#   0 on success.
 prepare_standalone_package_manager() {
     detect_standalone_package_manager
 
@@ -144,6 +179,11 @@ prepare_standalone_package_manager() {
     STANDALONE_PKG_MANAGER_UPDATED=true
 }
 
+# Install system packages using the detected standalone package manager.
+# Arguments:
+#   $@ - Package names to install.
+# Returns:
+#   0 on success.
 standalone_install_packages() {
     local packages=("$@")
 
@@ -161,6 +201,11 @@ standalone_install_packages() {
     esac
 }
 
+# Install a single package using the standalone package manager.
+# Arguments:
+#   $1 - Package name to install.
+# Returns:
+#   0 on success.
 install_package() {
     local package="$1"
     detect_standalone_package_manager
@@ -168,6 +213,9 @@ install_package() {
     standalone_install_packages "$package"
 }
 
+# Ensure the Docker service daemon is active and running.
+# Returns:
+#   0 on success; terminates via die if Docker cannot run.
 ensure_docker_running() {
     if docker info >/dev/null 2>&1; then
         return
@@ -181,6 +229,9 @@ ensure_docker_running() {
     docker info >/dev/null 2>&1 || die "Docker is installed but the daemon is not running. Start Docker manually and retry."
 }
 
+# Install Docker Engine and dependencies if not already installed.
+# Returns:
+#   0 on success; terminates via die on failure.
 install_docker() {
     if command -v docker >/dev/null 2>&1; then
         ensure_docker_running
@@ -201,6 +252,9 @@ install_docker() {
     prepare_docker_mirror
 }
 
+# Configure optimal Docker registry mirror for Iranian infrastructure.
+# Returns:
+#   0 on success.
 prepare_docker_mirror() {
     local current_mirror=""
     local recalibrate_choice=""
@@ -230,16 +284,27 @@ prepare_docker_mirror() {
     DOCKER_MIRROR_PREPARED=true
 }
 
+# No-op override for yq dependency since compose files are bundled locally.
+# Returns:
+#   0 on success.
 install_yq() {
     return
 }
 
+# Update the PasarGuard panel container image tag in docker-compose.yml.
+# Arguments:
+#   $1 - Full Docker image reference (e.g. pasarguard/panel:v1.2.3).
+# Returns:
+#   0 on success; terminates via die if compose file is missing.
 set_pasarguard_panel_image() {
     local target_image="$1"
     [ -f "$COMPOSE_FILE" ] || die "Compose file not found: $COMPOSE_FILE"
     sed -i "0,/^[[:space:]]*image:[[:space:]]*pasarguard\/panel:.*/s#^[[:space:]]*image:[[:space:]]*pasarguard/panel:.*#    image: ${target_image}#" "$COMPOSE_FILE"
 }
 
+# Prepare Docker daemon and mirror if needed, then invoke original compose detection.
+# Returns:
+#   0 on successful detection.
 detect_compose() {
     if [[ "${COMMAND:-}" =~ ^(install|update)$ ]] && command -v docker >/dev/null 2>&1 && [ "$DOCKER_MIRROR_PREPARED" != "true" ] && [ "$(id -u)" = "0" ]; then
         prepare_docker_mirror
@@ -248,6 +313,9 @@ detect_compose() {
     original_detect_compose
 }
 
+# Install the standalone PasarGuard CLI script and all supporting bundled files.
+# Returns:
+#   0 on success; terminates via die on missing files.
 install_pasarguard_script() {
     print_script_execution_header "pasarguard-standalone" "$SCRIPT_COMMIT_SHA" "install"
     local target_path="/usr/local/bin/pasarguard"
@@ -290,6 +358,9 @@ install_pasarguard_script() {
     colorized_echo green "Standalone pasarguard script installed successfully at $target_path"
 }
 
+# Remove installed standalone PasarGuard script binary and support directory.
+# Returns:
+#   0 on completion.
 uninstall_pasarguard_script() {
     if [ -f "/usr/local/bin/pasarguard" ]; then
         colorized_echo yellow "Removing pasarguard script"
@@ -301,6 +372,13 @@ uninstall_pasarguard_script() {
     fi
 }
 
+# Install PasarGuard panel using bundled Docker Compose templates and configure database.
+# Arguments:
+#   $1 - PasarGuard release version string.
+#   $2 - Major version number.
+#   $3 - Database engine type (sqlite, mysql, mariadb, postgresql, timescaledb).
+# Returns:
+#   0 on success; exits with code 1 or terminates on configuration errors.
 install_pasarguard() {
     local pasarguard_version="$1"
     local major_version="$2"
@@ -403,10 +481,16 @@ install_pasarguard() {
     colorized_echo green "pasarguard installed successfully"
 }
 
+# Warn user that automatic script updates are disabled in standalone distribution.
+# Returns:
+#   0 on completion.
 update_pasarguard_script() {
     colorized_echo yellow "Automatic script updates are disabled in pasarguard-standalone."
 }
 
+# Update PasarGuard Docker services to latest version and restart containers.
+# Returns:
+#   0 on success; exits with code 1 if PasarGuard is not installed.
 update_command() {
     check_running_as_root
     if ! is_pasarguard_installed; then
@@ -424,6 +508,9 @@ update_command() {
     colorized_echo blue "pasarguard updated successfully"
 }
 
+# Install the bundled standalone pg-node script and run its installer.
+# Returns:
+#   0 on success; terminates via die if bundled script is missing.
 install_node_command() {
     local standalone_node="$STANDALONE_ROOT_DIR/iran-sanction/pg-node-standalone.sh"
     if [ "$STANDALONE_ROOT_DIR" = "$STANDALONE_INSTALL_ROOT" ]; then

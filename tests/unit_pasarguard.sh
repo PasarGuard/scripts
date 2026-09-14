@@ -31,19 +31,24 @@ source "$ROOT_DIR/pasarguard.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert that the given command evaluates to true (zero exit status).
 assert_true() {
     local label="$1"; shift
     if "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert that the given command evaluates to false (nonzero exit status).
 assert_false() {
     local label="$1"; shift
     if ! "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
@@ -302,12 +307,14 @@ assert_true "backup validation: legacy 4-field manifest accepted" \
 SQLITE_VALIDATION_DIR="$WORK_DIR/sqlite-validation"
 mkdir -p "$SQLITE_VALIDATION_DIR"
 printf 'sqlite fixture\n' >"$SQLITE_VALIDATION_DIR/app.sqlite3"
+# Mock sqlite3 to simulate successful PRAGMA quick_check integrity test.
 sqlite3() {
     [ "$2" = "PRAGMA quick_check;" ] || return 1
     printf 'ok\n'
 }
 assert_true "backup validation: SQLite quick_check success accepted" \
     database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
+# Mock sqlite3 to simulate a corrupted database disk image.
 sqlite3() { printf 'database disk image is malformed\n'; }
 assert_false "backup validation: corrupt SQLite snapshot rejected" \
     database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
@@ -316,6 +323,7 @@ unset -f sqlite3
 # A multi-database PostgreSQL/TimescaleDB backup must be atomic. Previously the
 # helper returned success as long as any one database dumped successfully.
 MOCK_PG_FAIL_DB=""
+# Mock docker CLI commands for PostgreSQL cluster dump testing.
 docker() {
     local joined="$*"
     case "$joined" in
@@ -474,6 +482,7 @@ ss() {
     fi
     return 1
 }
+# Mock netstat to simulate listening network ports.
 netstat() {
     if [[ "${1:-}" == "-lnt" ]]; then
         echo "tcp 0 0 0.0.0.0:55555 0.0.0.0:* LISTEN"
@@ -664,6 +673,7 @@ printf '%s\n' '-- PostgreSQL database cluster dump complete' >"$TS_PREP_DIR/glob
 printf '%s\n' 'CREATE TABLE metrics (id int);' '-- PostgreSQL database dump complete' >"$TS_PREP_DIR/db-001.sql"
 printf 'appdb\tappuser\t1\tdb-001.sql\t2.28.3\n' >"$TS_PREP_DIR/manifest.tsv"
 MOCK_COMPAT_PULL=false
+# Mock docker CLI commands for TimescaleDB extension version compatibility tests.
 docker() {
     case "$*" in
         *"default_version FROM pg_available_extensions"*) printf '2.28.3\n' ;;

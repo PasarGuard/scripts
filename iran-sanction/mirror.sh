@@ -54,12 +54,36 @@ DOCKER_MIRRORS=(
 
 DOCKER_PROBE_PATH="/v2/"
 
+# Print an informational message in cyan.
+# Arguments:
+#   $* - Message text to display.
 info() { colorized_echo cyan "[INFO]  $*"; }
+
+# Print a success message in green.
+# Arguments:
+#   $* - Message text to display.
 success() { colorized_echo green "[OK]    $*"; }
+
+# Print a warning message in yellow.
+# Arguments:
+#   $* - Message text to display.
 warn() { colorized_echo yellow "[WARN]  $*"; }
+
+# Print an error message in red to stderr.
+# Arguments:
+#   $* - Message text to display.
 error() { colorized_echo red "[ERR]   $*" >&2; }
+
+# Print bold text to stdout.
+# Arguments:
+#   $* - Message text to display.
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 
+# Verify required commands exist on PATH or terminate execution.
+# Arguments:
+#   $@ - Command names to verify.
+# Returns:
+#   0 on success; exits with code 1 if any command is missing.
 require() {
     local cmd
     for cmd in "$@"; do
@@ -70,6 +94,9 @@ require() {
     done
 }
 
+# Detect operating system ID, codename, and family from /etc/os-release.
+# Returns:
+#   0 on success.
 detect_release_info() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
@@ -84,6 +111,11 @@ detect_release_info() {
     fi
 }
 
+# Retrieve operating system codename (e.g. jammy, bookworm).
+# Outputs:
+#   Writes the OS codename string to stdout.
+# Returns:
+#   0 on success.
 get_os_codename() {
     detect_release_info
     if [[ -n "${OS_CODENAME:-}" ]]; then
@@ -93,10 +125,22 @@ get_os_codename() {
     fi
 }
 
+# Check if the operating system belongs to the Ubuntu family.
+# Returns:
+#   0 if Ubuntu or Ubuntu-like, 1 otherwise.
 is_ubuntu_family() {
     [[ "$OS_ID" == "ubuntu" ]] || [[ "${OS_LIKE:-}" == *"ubuntu"* ]]
 }
 
+# Measure average download speed and latency for a mirror endpoint.
+# Arguments:
+#   $1 - Base URL of the mirror.
+#   $2 - Relative probe path.
+#   $3 - Optional flag ("true" or "false") to accept HTTP 401 as valid (default: false).
+# Outputs:
+#   Writes "<speed_bps> <latency_ms>" or "FAIL" to stdout.
+# Returns:
+#   0 on completion.
 benchmark_mirror() {
     local base_url="$1"
     local probe="$2"
@@ -145,6 +189,14 @@ benchmark_mirror() {
     echo "$((total_speed / success_count)) $((total_latency / success_count))"
 }
 
+# Benchmark a collection of mirror URLs and determine the best candidate.
+# Arguments:
+#   $1 - Label describing mirror category (e.g. "APT", "Docker").
+#   $2 - Relative HTTP probe endpoint.
+#   $3 - Flag ("true"/"false") whether to accept HTTP 401 response code.
+#   $4... - List of mirror URLs to test.
+# Returns:
+#   0 on success, 1 if all tested mirrors fail.
 benchmark_list() {
     local label="$1"
     shift
@@ -224,6 +276,11 @@ benchmark_list() {
     success "Best ${label} mirror: $BEST_MIRROR"
 }
 
+# Configure system APT sources to use the specified mirror URL.
+# Arguments:
+#   $1 - Mirror URL to set in APT sources configuration.
+# Returns:
+#   0 on success.
 apply_apt_mirror() {
     local mirror="$1"
     local sources_file="/etc/apt/sources.list"
@@ -277,9 +334,19 @@ EOF
 
     success "Written new $sources_file"
     info "Running apt-get update to verify..."
-    apt-get update -qq && success "apt-get update succeeded" || warn "apt-get update returned errors; check $sources_file"
+    if apt-get update -qq; then
+        success "apt-get update succeeded"
+    else
+        warn "apt-get update returned errors; check $sources_file"
+    fi
 }
 
+# Write or update Docker daemon configuration with registry mirror URL.
+# Arguments:
+#   $1 - Path to daemon.json configuration file.
+#   $2 - Docker registry mirror URL.
+# Returns:
+#   0 on success.
 write_docker_daemon_json() {
     local daemon_file="$1"
     local mirror="$2"
@@ -315,6 +382,11 @@ PYEOF
 EOF
 }
 
+# Configure Docker daemon to use the specified registry mirror and reload daemon.
+# Arguments:
+#   $1 - Docker registry mirror URL.
+# Returns:
+#   0 on success.
 apply_docker_mirror() {
     local mirror="$1"
     local daemon_file="/etc/docker/daemon.json"
@@ -345,6 +417,9 @@ apply_docker_mirror() {
     fi
 }
 
+# Benchmark candidate APT mirrors and store the best performing mirror URL in BEST_MIRROR.
+# Returns:
+#   0 on success, non-zero if benchmarking fails.
 select_best_apt_mirror() {
     ensure_benchmark_requirements
     detect_release_info
@@ -363,23 +438,35 @@ select_best_apt_mirror() {
     benchmark_list "APT" "/dists/${codename}/Release" "false" "${active_mirrors[@]}"
 }
 
+# Benchmark candidate Docker mirrors and store the best performing mirror URL in BEST_MIRROR.
+# Returns:
+#   0 on success, non-zero if benchmarking fails.
 select_best_docker_mirror() {
     ensure_benchmark_requirements
     benchmark_list "Docker" "$DOCKER_PROBE_PATH" "true" "${DOCKER_MIRRORS[@]}"
 }
 
+# Benchmark, select, and apply the fastest APT mirror to system sources.
+# Returns:
+#   0 on success, 1 on benchmarking failure.
 select_and_apply_apt_mirror() {
     ensure_runtime_requirements
     select_best_apt_mirror || return 1
     apply_apt_mirror "$BEST_MIRROR"
 }
 
+# Benchmark, select, and apply the fastest Docker registry mirror to system configuration.
+# Returns:
+#   0 on success, 1 on benchmarking failure.
 select_and_apply_docker_mirror() {
     ensure_runtime_requirements
     select_best_docker_mirror || return 1
     apply_docker_mirror "$BEST_MIRROR"
 }
 
+# Validate required CLI utilities and verify root privileges before making system modifications.
+# Returns:
+#   0 if runtime prerequisites are satisfied.
 ensure_runtime_requirements() {
     require curl awk sort
     if [[ "$DRY_RUN" == "true" ]]; then

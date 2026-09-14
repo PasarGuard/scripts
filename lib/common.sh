@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Print colored text to standard output with optional ANSI styling.
 colorized_echo() {
     local color="$1"
     local text="$2"
@@ -30,6 +31,7 @@ colorized_echo() {
     esac
 }
 
+# Print an error message in red and terminate execution with exit status 1.
 die() {
     colorized_echo red "$*"
     exit 1
@@ -105,6 +107,7 @@ harden_secret_file() {
     chmod 600 "$path"
 }
 
+# Resolve and create the base directory used for temporary files and directories.
 temp_root_dir() {
     local root=""
 
@@ -122,6 +125,7 @@ temp_root_dir() {
     printf '%s\n' "$root"
 }
 
+# Create a secure uniquely-named temporary directory inside the temp root directory.
 create_temp_dir() {
     local prefix="${1:-tmpdir}"
     local root=""
@@ -141,6 +145,7 @@ create_temp_dir() {
     die "Failed to create temporary directory in $root"
 }
 
+# Create a secure uniquely-named temporary file inside the temp root directory.
 create_temp_file() {
     local prefix="${1:-tmpfile}"
     local suffix="${2:-}"
@@ -150,6 +155,7 @@ create_temp_file() {
     create_temp_file_in_dir "$root" "$prefix" "$suffix"
 }
 
+# Create a secure uniquely-named temporary file with atomic creation in a given directory.
 create_temp_file_in_dir() {
     local dir="$1"
     local prefix="${2:-tmpfile}"
@@ -170,6 +176,7 @@ create_temp_file_in_dir() {
     die "Failed to create temporary file in $dir"
 }
 
+# Fetch the latest commit SHA for a remote branch via the GitHub REST API.
 resolve_remote_commit_sha() {
     local repo="${1:-PasarGuard/scripts}"
     local branch="${2:-main}"
@@ -187,6 +194,7 @@ resolve_remote_commit_sha() {
     printf '%s\n' "$sha"
 }
 
+# Resolve the active commit SHA from baked tokens, environment, git repo, or remote lookup.
 get_script_commit_sha() {
     local script_dir="${1:-}"
     local baked_sha="${2:-}"
@@ -227,6 +235,7 @@ get_script_commit_sha() {
     printf '%s\n' "main"
 }
 
+# Print a standardized execution banner with script name, action, and resolved commit SHA.
 print_script_execution_header() {
     local script_name="$1"
     local baked_sha="${2:-}"

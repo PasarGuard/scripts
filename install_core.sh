@@ -4,6 +4,15 @@ set -e
 SCRIPT_COMMIT_SHA="${SCRIPT_COMMIT_SHA:-__SCRIPT_COMMIT_SHA__}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+# Query the remote GitHub repository commit SHA for a branch.
+# Arguments:
+#   $1 - Repository name (default: PasarGuard/scripts)
+#   $2 - Target branch (default: main)
+# Outputs:
+#   Writes the remote commit SHA to stdout.
+# Returns:
+#   0 on success, 1 on lookup failure or if remote lookup is disabled.
+# shellcheck disable=SC2120
 resolve_remote_commit_sha() {
     local repo="${1:-PasarGuard/scripts}"
     local branch="${2:-main}"
@@ -21,6 +30,11 @@ resolve_remote_commit_sha() {
     printf '%s\n' "$sha"
 }
 
+# Determine the commit SHA representing the current script version.
+# Outputs:
+#   Writes the resolved commit SHA or fallback branch name to stdout.
+# Returns:
+#   0 on success.
 get_script_commit_sha() {
     local baked_sha="${SCRIPT_COMMIT_SHA:-}"
     local commit_sha=""
@@ -61,6 +75,11 @@ RELEASE_TAG="latest"
 TARGET_OS=""
 TARGET_ARCH=""
 
+# Display CLI usage and available command-line options.
+# Outputs:
+#   Writes help text to stdout.
+# Returns:
+#   0 on success.
 usage() {
     cat <<'EOF'
 Usage: install_core.sh [--tag <release-tag>] [--os <linux>] [--arch <arch>]
@@ -77,6 +96,11 @@ Examples:
 EOF
 }
 
+# Parse command-line arguments and set configuration flags.
+# Arguments:
+#   $@ - Command-line arguments passed to the script.
+# Returns:
+#   0 on successful argument parsing; exits with code 1 on error.
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -100,6 +124,9 @@ parse_args() {
 parse_args "$@"
 printf '# Executing install_core script, commit: %s\n' "$(get_script_commit_sha)"
 
+# Verify that the script is running with root privileges.
+# Returns:
+#   0 if running as root; exits with code 1 otherwise.
 check_if_running_as_root() {
     # If you want to run as another user, please modify $EUID to be owned by this user
     if [[ "$EUID" -ne '0' ]]; then
@@ -108,6 +135,9 @@ check_if_running_as_root() {
     fi
 }
 
+# Detect available system package manager (apt-get, dnf, or yum).
+# Returns:
+#   0 if a supported package manager is found; exits with code 1 otherwise.
 detect_package_manager() {
     if command -v apt-get >/dev/null 2>&1; then
         PACKAGE_MANAGER="apt-get"
@@ -121,6 +151,11 @@ detect_package_manager() {
     fi
 }
 
+# Install a system package using the detected package manager.
+# Arguments:
+#   $1 - Package name to install.
+# Returns:
+#   0 on success; exits with code 1 on unsupported package manager.
 install_package() {
     local package="$1"
 
@@ -144,6 +179,12 @@ install_package() {
     esac
 }
 
+# Ensure a command is available on PATH, installing its package if missing.
+# Arguments:
+#   $1 - Command binary name.
+#   $2 - Package name providing the command.
+# Returns:
+#   0 if available or installed; exits with code 1 if command remains missing.
 ensure_command() {
     local command_name="$1"
     local package_name="$2"
@@ -159,11 +200,17 @@ ensure_command() {
     }
 }
 
+# Verify and install required utility dependencies (curl, unzip).
+# Returns:
+#   0 if dependencies are satisfied; exits with code 1 on failure.
 ensure_dependencies() {
     ensure_command curl curl
     ensure_command unzip unzip
 }
 
+# Identify target operating system and map system architecture to Xray arch string.
+# Returns:
+#   0 on successful detection; exits with code 1 on unsupported OS or architecture.
 identify_the_operating_system_and_architecture() {
     if [[ -n "$TARGET_OS" && "$TARGET_OS" != "linux" ]]; then
         echo "error: This operating system is not supported (supported: linux)."
@@ -234,6 +281,9 @@ identify_the_operating_system_and_architecture() {
     fi
 }
 
+# Download the Xray release zip archive from GitHub into temporary storage.
+# Returns:
+#   0 on success; exits with code 1 on download failure.
 download_xray() {
     TARGET_OS_VALUE="${TARGET_OS:-linux}"
 
@@ -251,6 +301,9 @@ download_xray() {
     fi
 }
 
+# Extract the downloaded Xray zip archive and validate expected binary files.
+# Returns:
+#   0 on success; exits with code 1 on extraction failure or missing files.
 extract_xray() {
     if ! unzip -q "$ZIP_FILE" -d "$TMP_DIRECTORY"; then
         echo 'error: Xray decompression failed.'
@@ -278,6 +331,9 @@ extract_xray() {
     fi
 }
 
+# Install the extracted Xray binary and data files into system directories.
+# Returns:
+#   0 on success; exits with code 1 on installation failure.
 place_xray() {
     if ! install -m 755 "${TMP_DIRECTORY}/xray" "/usr/local/bin/xray"; then
         echo 'error: Failed to install xray binary.'

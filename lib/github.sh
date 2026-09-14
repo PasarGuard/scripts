@@ -2,6 +2,7 @@
 
 SHARED_LIB_INSTALL_DIR="${SHARED_LIB_INSTALL_DIR:-/usr/local/lib/pasarguard-scripts/lib}"
 
+# Build the raw GitHub content URL for a path in a given repository.
 github_raw_url() {
     local repo="$1"
     local path="$2"
@@ -9,6 +10,7 @@ github_raw_url() {
     printf 'https://github.com/%s/raw/main/%s\n' "$repo" "$path"
 }
 
+# Download a file from a URL to a local destination path using curl.
 github_download_file() {
     local url="$1"
     local target_path="$2"
@@ -16,6 +18,7 @@ github_download_file() {
     curl -fsSL "$url" -o "$target_path"
 }
 
+# Back up installed executables and shared libraries into a temporary directory.
 backup_scripts() {
     local backup_dir=""
     backup_dir=$(create_temp_dir "scripts-backup")
@@ -36,6 +39,7 @@ backup_scripts() {
     printf '%s\n' "$backup_dir"
 }
 
+# Restore backed-up executables and shared libraries to their system installation locations.
 restore_scripts() {
     local backup_dir="$1"
     [ -z "$backup_dir" ] && return 1
@@ -53,6 +57,7 @@ restore_scripts() {
     fi
 }
 
+# Delete a temporary backup directory created during script update processes.
 cleanup_backup() {
     local backup_dir="$1"
     if [ -n "$backup_dir" ]; then
@@ -60,6 +65,7 @@ cleanup_backup() {
     fi
 }
 
+# Download and install an executable shell script from GitHub into /usr/local/bin.
 github_install_script_from_repo() {
     local repo="$1"
     local script_name="$2"
@@ -91,6 +97,7 @@ github_install_script_from_repo() {
     rm -f "$tmp_file"
 }
 
+# Copy shared library files from a local source directory into SHARED_LIB_INSTALL_DIR.
 install_shared_libs_from_local() {
     local source_dir="$1"
     shift
@@ -104,6 +111,7 @@ install_shared_libs_from_local() {
     done
 }
 
+# Download and install shared library files from GitHub into SHARED_LIB_INSTALL_DIR.
 install_shared_libs_from_repo() {
     local fetch_repo="$1"
     shift

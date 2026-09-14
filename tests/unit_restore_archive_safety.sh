@@ -13,9 +13,13 @@ source "$ROOT_DIR/lib/pasarguard-restore.sh"
 
 PASS=0
 FAIL=0
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
+# Assert that the given command evaluates to true (zero exit status).
 assert_true()  { local l="$1"; shift; if "$@"; then pass "$l"; else fail "$l"; fi; }
+# Assert that the given command evaluates to false (nonzero exit status).
 assert_false() { local l="$1"; shift; if ! "$@"; then pass "$l"; else fail "$l"; fi; }
 
 echo "=== unit_restore_archive_safety.sh ==="

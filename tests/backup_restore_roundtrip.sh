@@ -63,6 +63,7 @@ SQLITE_HOLDER_PID=""
 SQLITE_HOLDER_READY="$WORK_DIR/sqlite-holder.ready"
 SQLITE_HOLDER_STOP="$WORK_DIR/sqlite-holder.stop"
 
+# Terminate the background sqlite connection holder process.
 stop_sqlite_holder() {
     if [ -n "$SQLITE_HOLDER_PID" ] && kill -0 "$SQLITE_HOLDER_PID" 2>/dev/null; then
         touch "$SQLITE_HOLDER_STOP"
@@ -71,6 +72,7 @@ stop_sqlite_holder() {
     SQLITE_HOLDER_PID=""
 }
 
+# Clean up background jobs, docker containers, and test working directory on exit.
 cleanup() {
     local exit_code=$?
     stop_sqlite_holder
@@ -89,19 +91,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Mock detect_os no-op.
 detect_os() { :; }
+# Mock detect_compose to use docker compose.
 detect_compose() { COMPOSE="docker compose"; }
+# Mock install_package to reject unexpected installations during tests.
 install_package() {
     printf 'Unexpected package install request during test: %s\n' "$*" >&2
     return 1
 }
+# Mock is_pasarguard_installed to return success.
 is_pasarguard_installed() { return 0; }
+# Mock is_pasarguard_up to return success.
 is_pasarguard_up() { return 0; }
+# Mock down_pasarguard no-op.
 down_pasarguard() { :; }
+# Mock up_pasarguard no-op.
 up_pasarguard() { :; }
+# Mock stop_pasarguard_app_services no-op.
 stop_pasarguard_app_services() { :; }
+# Mock start_pasarguard_app_services no-op.
 start_pasarguard_app_services() { :; }
 
+# Mock find_container to return test container name for recognized database types.
 find_container() {
     case "$1" in
     mysql | mariadb | postgresql | timescaledb)
@@ -113,18 +125,21 @@ find_container() {
     esac
 }
 
+# Verify container existence via docker inspect and print container name.
 check_container() {
     local container="$1"
     docker inspect "$container" >/dev/null 2>&1 || return 1
     printf '%s\n' "$container"
 }
 
+# Ensure container is started and print container name.
 verify_and_start_container() {
     local container="$1"
     docker start "$container" >/dev/null 2>&1 || true
     printf '%s\n' "$container"
 }
 
+# Assert that file contains expected substring.
 assert_file_contains() {
     local path="$1"
     local expected="$2"
@@ -134,6 +149,7 @@ assert_file_contains() {
     fi
 }
 
+# Assert that actual value matches expected value with custom error message.
 assert_equals() {
     local actual="$1"
     local expected="$2"
@@ -144,11 +160,13 @@ assert_equals() {
     fi
 }
 
+# Compute SHA256 digest of an SQLite database logical dump.
 sqlite_dump_sha() {
     local db_path="$1"
     sqlite3 "$db_path" ".dump" | sha256sum | awk '{print $1}'
 }
 
+# Assert that an SQLite database file passes PRAGMA integrity_check.
 assert_sqlite_integrity() {
     local db_path="$1"
     local integrity_result=""
@@ -157,6 +175,7 @@ assert_sqlite_integrity() {
     assert_equals "$integrity_result" "ok" "SQLite integrity check failed for $db_path."
 }
 
+# Repeatedly poll a command until success or attempt limit reached.
 wait_for_command() {
     local attempts="$1"
     shift
@@ -171,6 +190,7 @@ wait_for_command() {
     return 1
 }
 
+# Wait until a MySQL or MariaDB container responds to root ping queries.
 wait_for_mysql_root_query() {
     local client_bin="$1"
     local container="$2"
@@ -179,6 +199,7 @@ wait_for_mysql_root_query() {
         "$client_bin" -N -s -uroot -e "SELECT 1;"
 }
 
+# Write test sentinel and binary payload files into test data directories.
 write_common_files() {
     mkdir -p "$APP_DIR" "$DATA_DIR" "$BACKUP_DIR"
     printf '%s\n' "$EXPECTED_SENTINEL_VALUE" >"$DATA_DIR/sentinel.txt"
@@ -190,6 +211,7 @@ write_common_files() {
     fi
 }
 
+# Write leftover database dump artifacts to verify pre-restore cleanup.
 write_stale_database_artifacts() {
     case "$DB_TYPE" in
     mysql)
@@ -222,6 +244,7 @@ write_stale_database_artifacts() {
     esac
 }
 
+# Generate test .env file for SQLite configuration.
 write_sqlite_env() {
     cat >"$ENV_FILE" <<EOF
 BACKUP_SERVICE_ENABLED=false
@@ -231,6 +254,7 @@ SQLALCHEMY_DATABASE_URL="sqlite:////$DATA_DIR/db.sqlite3"
 EOF
 }
 
+# Generate test .env file for MySQL configuration.
 write_mysql_env() {
     cat >"$ENV_FILE" <<EOF
 BACKUP_SERVICE_ENABLED=false
@@ -243,6 +267,7 @@ SQLALCHEMY_DATABASE_URL="mysql://$DB_USER:$DB_PASSWORD@127.0.0.1:3306/$DB_NAME"
 EOF
 }
 
+# Generate test .env file for MariaDB configuration.
 write_mariadb_env() {
     cat >"$ENV_FILE" <<EOF
 BACKUP_SERVICE_ENABLED=false
@@ -255,6 +280,7 @@ SQLALCHEMY_DATABASE_URL="mariadb://$DB_USER:$DB_PASSWORD@127.0.0.1:3306/$DB_NAME
 EOF
 }
 
+# Generate test .env file for PostgreSQL/TimescaleDB configuration.
 write_postgres_env() {
     cat >"$ENV_FILE" <<EOF
 BACKUP_SERVICE_ENABLED=false
@@ -266,6 +292,7 @@ SQLALCHEMY_DATABASE_URL="postgresql://$DB_USER:$DB_PASSWORD@127.0.0.1:5432/$DB_N
 EOF
 }
 
+# Generate test docker-compose.yml for SQLite configuration.
 write_sqlite_compose() {
     cat >"$COMPOSE_FILE" <<EOF
 $EXPECTED_COMPOSE_MARKER
@@ -275,6 +302,7 @@ services:
 EOF
 }
 
+# Generate test docker-compose.yml for MySQL configuration.
 write_mysql_compose() {
     cat >"$COMPOSE_FILE" <<EOF
 $EXPECTED_COMPOSE_MARKER
@@ -284,6 +312,7 @@ services:
 EOF
 }
 
+# Generate test docker-compose.yml for MariaDB configuration.
 write_mariadb_compose() {
     cat >"$COMPOSE_FILE" <<EOF
 $EXPECTED_COMPOSE_MARKER
@@ -293,6 +322,7 @@ services:
 EOF
 }
 
+# Generate test docker-compose.yml for PostgreSQL configuration.
 write_postgresql_compose() {
     cat >"$COMPOSE_FILE" <<EOF
 $EXPECTED_COMPOSE_MARKER
@@ -302,6 +332,7 @@ services:
 EOF
 }
 
+# Generate test docker-compose.yml for TimescaleDB configuration.
 write_timescaledb_compose() {
     cat >"$COMPOSE_FILE" <<EOF
 $EXPECTED_COMPOSE_MARKER
@@ -311,6 +342,7 @@ services:
 EOF
 }
 
+# Record SHA256 hashes of test files prior to executing backup.
 record_original_file_hashes() {
     ORIGINAL_ENV_SHA="$(sha256sum "$ENV_FILE" | awk '{print $1}')"
     ORIGINAL_COMPOSE_SHA="$(sha256sum "$COMPOSE_FILE" | awk '{print $1}')"
@@ -321,6 +353,7 @@ record_original_file_hashes() {
     fi
 }
 
+# Initialize SQLite database with active WAL holder process and test table.
 setup_sqlite_db() {
     python3 - "$DATA_DIR/db.sqlite3" "$SQLITE_HOLDER_READY" "$SQLITE_HOLDER_STOP" "$EXPECTED_DB_VALUE" <<'PY' &
 import sqlite3
@@ -354,15 +387,18 @@ PY
         "CREATE TABLE ci_roundtrip (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO ci_roundtrip VALUES (1, 'stale-app-dir-copy');"
 }
 
+# Query test row value from SQLite database.
 sqlite_query() {
     sqlite3 "$DATA_DIR/db.sqlite3" "SELECT value FROM ci_roundtrip WHERE id = 1;"
 }
 
+# Mutate test row value and create stale journal file in SQLite database.
 mutate_sqlite_db() {
     sqlite3 "$DATA_DIR/db.sqlite3" "UPDATE ci_roundtrip SET value = 'mutated' WHERE id = 1;"
     printf 'stale rollback journal\n' >"$DATA_DIR/db.sqlite3-journal"
 }
 
+# Launch and initialize MySQL test container.
 setup_mysql_container() {
     docker run -d --name "$CONTAINER_NAME" \
         -e MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
@@ -377,6 +413,7 @@ setup_mysql_container() {
         -e "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value VARCHAR(255) NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$EXPECTED_DB_VALUE');"
 }
 
+# Launch and initialize MariaDB test container.
 setup_mariadb_container() {
     docker run -d --name "$CONTAINER_NAME" \
         -e MARIADB_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD" \
@@ -391,26 +428,31 @@ setup_mariadb_container() {
         -e "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value VARCHAR(255) NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$EXPECTED_DB_VALUE');"
 }
 
+# Query test row value from MySQL database container.
 mysql_query() {
     docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mysql -N -s -uroot -D "$DB_NAME" \
         -e "SELECT value FROM ci_roundtrip WHERE id = 1;"
 }
 
+# Query test row value from MariaDB database container.
 mariadb_query() {
     docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mariadb -N -s -uroot "$DB_NAME" \
         -e "SELECT value FROM ci_roundtrip WHERE id = 1;"
 }
 
+# Mutate test row value in MySQL database container.
 mutate_mysql_db() {
     docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mysql -uroot -D "$DB_NAME" \
         -e "UPDATE ci_roundtrip SET value = 'mutated' WHERE id = 1;"
 }
 
+# Mutate test row value in MariaDB database container.
 mutate_mariadb_db() {
     docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$CONTAINER_NAME" mariadb -uroot "$DB_NAME" \
         -e "UPDATE ci_roundtrip SET value = 'mutated' WHERE id = 1;"
 }
 
+# Launch and initialize PostgreSQL or TimescaleDB test container.
 setup_postgresql_container() {
     local image="$1"
     local password="${2:-$DB_PASSWORD}"
@@ -437,18 +479,21 @@ setup_postgresql_container() {
         -c "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$initial_value');"
 }
 
+# Query test row value from PostgreSQL or TimescaleDB container.
 postgres_query() {
     docker exec -e PGPASSWORD="$CURRENT_DB_PASSWORD" "$CONTAINER_NAME" \
         psql -h 127.0.0.1 -At -U "$DB_USER" -d "$DB_NAME" \
         -c "SELECT value FROM ci_roundtrip WHERE id = 1;"
 }
 
+# Mutate test row value in PostgreSQL or TimescaleDB container.
 mutate_postgres_db() {
     docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER_NAME" \
         psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" \
         -c "UPDATE ci_roundtrip SET value = 'mutated' WHERE id = 1;"
 }
 
+# Mutate test environment, compose, and data files to simulate changes post-backup.
 mutate_files_after_backup() {
     if [ "$DB_TYPE" = "sqlite" ]; then
         cat >"$ENV_FILE" <<EOF
@@ -478,6 +523,7 @@ EOF
     printf 'mutated-payload-%s\n' "$DB_TYPE" >"$DATA_DIR/payload.bin"
 }
 
+# Rotate database user password on the destination database container.
 rotate_destination_credentials() {
     case "$DB_TYPE" in
     sqlite)
@@ -507,10 +553,12 @@ rotate_destination_credentials() {
     esac
 }
 
+# Execute restore_command with interactive prompts confirmed.
 run_restore() {
     printf '1\nyes\n' | restore_command
 }
 
+# Assert that an archive contains exactly the expected list of files.
 assert_zip_contains_exact_files() {
     local archive="$1"
     local expected_list="$2"
@@ -520,6 +568,7 @@ assert_zip_contains_exact_files() {
     assert_equals "$actual_list" "$expected_list" "Backup archive file list did not match the expected manifest."
 }
 
+# Assert that an archive contains all entries in the required list.
 assert_zip_contains_required_files() {
     local archive="$1"
     local required_list="$2"
@@ -534,6 +583,7 @@ assert_zip_contains_required_files() {
     done <<<"$required_list"
 }
 
+# Concatenate split multipart backup parts into a single combined zip archive.
 combine_split_backup_parts() {
     local combined_archive="$1"
     local part_file=""
@@ -545,6 +595,7 @@ combine_split_backup_parts() {
     done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup_*.part[0-9][0-9].zip' | sort)
 }
 
+# Extract and verify the contents and file integrity of a backup archive.
 verify_backup_archive_contents() {
     local archive_to_verify="$1"
     local expected_files=""
@@ -595,6 +646,7 @@ verify_backup_archive_contents() {
     fi
 }
 
+# Verify that restored configuration, database, and payload files match original hashes.
 verify_restored_files() {
     local restored_env_sha
     local restored_compose_sha
@@ -634,6 +686,7 @@ verify_restored_files() {
     fi
 }
 
+# Verify backup creation, archive existence, and valid part count and sizes.
 verify_backup_created() {
     local backup_count
     backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'backup_*.zip' -o -name 'backup_*.z[0-9][0-9]' -o -name 'backup_*.part[0-9][0-9].zip' \) | wc -l | awk '{print $1}')
@@ -691,6 +744,7 @@ verify_backup_created() {
     fi
 }
 
+# Prepare directory fixtures, configuration, and database container for round-trip test.
 prepare_case() {
     write_common_files
 
@@ -730,6 +784,7 @@ prepare_case() {
     record_original_file_hashes
 }
 
+# Verify that restored database records and credentials authenticate correctly.
 verify_restored_database() {
     local restored_value=""
 
@@ -777,6 +832,7 @@ verify_restored_database() {
     esac
 }
 
+# Mutate database contents after backup to verify restore overwrites changes.
 mutate_database_after_backup() {
     case "$DB_TYPE" in
     sqlite)
@@ -794,6 +850,7 @@ mutate_database_after_backup() {
     esac
 }
 
+# Main execution routine running complete backup and restore round-trip tests.
 main() {
     if [ "$ARCHIVE_MODE" = "multipart" ]; then
         export BACKUP_SPLIT_SIZE_BYTES="$MULTIPART_SPLIT_SIZE_BYTES"
