@@ -330,6 +330,96 @@ build_pasarguard_ssl_reload_command() {
     fi
 }
 
+# Register a Certbot deploy hook for an existing certificate lineage. Certbot
+# runs deploy hooks only after a successful renewal, so the panel is restarted
+# only when its certificate has actually changed.
+certbot_deploy_command() {
+    check_running_as_root
+
+    local cert_name="${1:-}"
+    local lineage=""
+    local cert_dir=""
+    local backend_service=""
+    local hook_dir="/etc/letsencrypt/renewal-hooks/deploy"
+    local hook_file="${hook_dir}/pasarguard-${APP_NAME}.sh"
+    local hook_tmp=""
+
+    if [ "$#" -ne 1 ] || [[ ! "$cert_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$cert_name" == *..* ]]; then
+        colorized_echo red "Usage: pasarguard certbot-deploy <certbot-certificate-name>"
+        return 1
+    fi
+
+    if ! command -v certbot >/dev/null 2>&1 || [ ! -f "/etc/letsencrypt/renewal/${cert_name}.conf" ]; then
+        colorized_echo red "Certbot renewal is not configured for ${cert_name}."
+        return 1
+    fi
+    lineage="/etc/letsencrypt/live/${cert_name}"
+    if [ ! -s "${lineage}/fullchain.pem" ] || [ ! -s "${lineage}/privkey.pem" ]; then
+        colorized_echo red "Certbot certificate or private key is missing from ${lineage}."
+        return 1
+    fi
+    if [ ! -f "$COMPOSE_FILE" ] || [ ! -f "$ENV_FILE" ]; then
+        colorized_echo red "PasarGuard installation is missing from ${APP_DIR}."
+        return 1
+    fi
+
+    detect_compose
+    backend_service=$(detect_pasarguard_backend_service) || {
+        colorized_echo red "Could not find the panel service in ${COMPOSE_FILE}."
+        return 1
+    }
+    cert_dir="${DATA_DIR}/certs/${cert_name}"
+    mkdir -p "$hook_dir" "$cert_dir"
+    hook_tmp=$(mktemp "${hook_dir}/.pasarguard-hook.XXXXXX") || return 1
+
+    {
+        printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+        printf 'LINEAGE=%q\nCERT_DIR=%q\nCOMPOSE_FILE=%q\nAPP_NAME=%q\nBACKEND_SERVICE=%q\n' \
+            "$lineage" "$cert_dir" "$COMPOSE_FILE" "$APP_NAME" "$backend_service"
+        cat <<'CERTBOT_HOOK'
+
+# Ignore renewals for other Certbot certificates on this host.
+[ "${RENEWED_LINEAGE:-$LINEAGE}" = "$LINEAGE" ] || exit 0
+[ -s "$LINEAGE/fullchain.pem" ] && [ -s "$LINEAGE/privkey.pem" ]
+mkdir -p "$CERT_DIR"
+umask 077
+cert_tmp=$(mktemp "$CERT_DIR/.fullchain.XXXXXX")
+key_tmp=$(mktemp "$CERT_DIR/.privkey.XXXXXX")
+trap 'rm -f "$cert_tmp" "$key_tmp"' EXIT
+cp -- "$LINEAGE/fullchain.pem" "$cert_tmp"
+cp -- "$LINEAGE/privkey.pem" "$key_tmp"
+
+# Never restart Uvicorn with an incomplete or mismatched certificate pair.
+cert_public_key=$(openssl x509 -in "$cert_tmp" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum)
+key_public_key=$(openssl pkey -in "$key_tmp" -pubout -outform DER | sha256sum)
+[ "$cert_public_key" = "$key_public_key" ]
+chmod 644 "$cert_tmp"
+chmod 600 "$key_tmp"
+mv -f -- "$cert_tmp" "$CERT_DIR/fullchain.pem"
+mv -f -- "$key_tmp" "$CERT_DIR/privkey.pem"
+
+if [ "${PASARGUARD_CERTBOT_SETUP:-}" != 1 ]; then
+    docker compose -f "$COMPOSE_FILE" -p "$APP_NAME" restart "$BACKEND_SERVICE"
+fi
+CERTBOT_HOOK
+    } >"$hook_tmp"
+
+    chmod 700 "$hook_tmp"
+    if ! PASARGUARD_CERTBOT_SETUP=1 bash "$hook_tmp"; then
+        rm -f "$hook_tmp"
+        colorized_echo red "Could not deploy the Certbot certificate."
+        return 1
+    fi
+
+    enable_pasarguard_ssl_env "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" "public"
+    mv -f "$hook_tmp" "$hook_file"
+    if ! docker compose -f "$COMPOSE_FILE" -p "$APP_NAME" restart "$backend_service"; then
+        colorized_echo red "Certificate deployed, but the panel restart failed."
+        return 1
+    fi
+    colorized_echo green "Certbot deploy hook installed at ${hook_file}."
+}
+
 # Check if both certificate and private key files exist and have non-zero file sizes.
 # Arguments:
 #   $1 - Path to SSL certificate file.
@@ -1734,6 +1824,7 @@ uninstall_command() {
         down_pasarguard
     fi
     uninstall_completion
+    rm -f "/etc/letsencrypt/renewal-hooks/deploy/pasarguard-${APP_NAME}.sh"
     uninstall_pasarguard_script
     uninstall_pasarguard
     uninstall_pasarguard_docker_images
@@ -2143,7 +2234,7 @@ _pasarguard_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs cli tui install update uninstall install-script install-node backup backup-service restore core-update edit edit-env version-script script-version help completion"
+    cmds="up down restart status logs cli tui install update uninstall install-script install-node certbot-deploy backup backup-service restore core-update edit edit-env version-script script-version help completion"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -2196,6 +2287,7 @@ usage() {
     colorized_echo yellow "  uninstall       $(tput sgr0)– Uninstall pasarguard"
     colorized_echo yellow "  install-script  $(tput sgr0)– Install pasarguard script"
     colorized_echo yellow "  install-node    $(tput sgr0)– Install PasarGuard node"
+    colorized_echo yellow "  certbot-deploy  $(tput sgr0)– Deploy and auto-renew a Certbot certificate"
     colorized_echo yellow "  backup          $(tput sgr0)– Manual backup launch"
     colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backup service to backup to TG, and a new job in crontab"
     colorized_echo yellow "  restore         $(tput sgr0)– Restore database from backup file"
@@ -2277,6 +2369,10 @@ pasarguard_main() {
     install-node)
         shift
         install_node_command "$@"
+        ;;
+    certbot-deploy)
+        shift
+        certbot_deploy_command "$@"
         ;;
     edit)
         shift
