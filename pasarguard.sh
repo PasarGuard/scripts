@@ -404,16 +404,27 @@ fi
 CERTBOT_HOOK
     } >"$hook_tmp"
 
-    chmod 700 "$hook_tmp"
     if ! PASARGUARD_CERTBOT_SETUP=1 bash "$hook_tmp"; then
         rm -f "$hook_tmp"
         colorized_echo red "Could not deploy the Certbot certificate."
         return 1
     fi
 
-    enable_pasarguard_ssl_env "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" "public"
-    mv -f "$hook_tmp" "$hook_file"
-    if ! docker compose -f "$COMPOSE_FILE" -p "$APP_NAME" restart "$backend_service"; then
+    if ! enable_pasarguard_ssl_env "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" "public"; then
+        rm -f "$hook_tmp"
+        colorized_echo red "Could not update the panel SSL settings."
+        return 1
+    fi
+    if ! mv -f "$hook_tmp" "$hook_file"; then
+        rm -f "$hook_tmp"
+        colorized_echo red "Could not install the Certbot deploy hook."
+        return 1
+    fi
+    if ! chmod 700 "$hook_file"; then
+        colorized_echo red "Could not enable the Certbot deploy hook."
+        return 1
+    fi
+    if ! docker compose -f "$COMPOSE_FILE" -p "$APP_NAME" up -d --no-deps --force-recreate "$backend_service"; then
         colorized_echo red "Certificate deployed, but the panel restart failed."
         return 1
     fi
@@ -706,9 +717,9 @@ enable_pasarguard_ssl_env() {
     local key_file="$2"
     local ca_type="${3:-public}"
 
-    set_or_uncomment_env_var "UVICORN_SSL_CERTFILE" "$cert_file" true "$ENV_FILE"
-    set_or_uncomment_env_var "UVICORN_SSL_KEYFILE" "$key_file" true "$ENV_FILE"
-    set_or_uncomment_env_var "UVICORN_SSL_CA_TYPE" "$ca_type" true "$ENV_FILE"
+    set_or_uncomment_env_var "UVICORN_SSL_CERTFILE" "$cert_file" true "$ENV_FILE" || return 1
+    set_or_uncomment_env_var "UVICORN_SSL_KEYFILE" "$key_file" true "$ENV_FILE" || return 1
+    set_or_uncomment_env_var "UVICORN_SSL_CA_TYPE" "$ca_type" true "$ENV_FILE" || return 1
 }
 
 # Comment out UVICORN_SSL variables in PasarGuard .env to disable SSL termination.
