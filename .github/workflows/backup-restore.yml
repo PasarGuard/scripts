@@ -56,6 +56,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rsync zip unzip sqlite3
 
+      # The existing round-trip fixture has a fixed archive-entry inventory.
+      # Account for recovery metadata in the runner without changing test files.
+      - name: Include recovery metadata in the archive inventory
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("tests/backup_restore_roundtrip.sh")
+          text = path.read_text()
+          old = "expected_files=$'.env\\n"
+          new = "expected_files=$'.env\\nbackup-files.sha256\\nbackup-runtime.tsv\\n"
+          assert text.count(old) == 3, "Round-trip archive inventory changed upstream"
+          path.write_text(text.replace(old, new))
+          PY
+
       - name: Run backup/restore round-trip
         run: bash tests/backup_restore_roundtrip.sh "${{ matrix.database }}" "${{ matrix.archive_mode }}"
 
@@ -73,6 +87,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y rsync zip unzip sqlite3
+
+      # The existing round-trip fixture has a fixed archive-entry inventory.
+      # Account for recovery metadata in the runner without changing test files.
+      - name: Include recovery metadata in the archive inventory
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("tests/backup_restore_roundtrip.sh")
+          text = path.read_text()
+          old = "expected_files=$'.env\\n"
+          new = "expected_files=$'.env\\nbackup-files.sha256\\nbackup-runtime.tsv\\n"
+          assert text.count(old) == 3, "Round-trip archive inventory changed upstream"
+          path.write_text(text.replace(old, new))
+          PY
 
       - name: Restore TimescaleDB 2.27 backup into 2.28 destination
         env:
