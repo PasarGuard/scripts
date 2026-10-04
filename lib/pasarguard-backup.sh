@@ -1144,7 +1144,13 @@ write_backup_runtime() {
     fi
     if [ "$engine" = sqlite ]; then
         server_version=$(sqlite3 --version 2>>"$log" | awk '{print $1}') || server_version="unknown"
-        revision=$(sqlite3 "$stage/$(basename "$sqlite_file")" 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+        # The protected snapshot is immutable. A failed metadata query against
+        # a WAL-mode database must not create new WAL/SHM files in the archive.
+        local snapshot_uri="$stage/$(basename "$sqlite_file")"
+        snapshot_uri="${snapshot_uri//%/%25}"
+        snapshot_uri="${snapshot_uri//\?/%3F}"
+        snapshot_uri="${snapshot_uri//#/%23}"
+        revision=$(sqlite3 "file:${snapshot_uri}?immutable=1" 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
     elif [ -n "$dump" ]; then
         server_version=$(sed -n -E 's/^-- (Server version[[:space:]]+|Dumped from database version )//p' "$dump" | head -n 1)
         dump_tool_version=$(sed -n -E 's/^-- Dumped by pg_dump version //p; s/^-- (MySQL|MariaDB) dump .*Distrib[[:space:]]+//p' "$dump" | head -n 1)
