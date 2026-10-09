@@ -1123,6 +1123,100 @@ write_timescaledb_single_dump_version() {
     printf '%s\n' "$source_version" >"$temp_dir/db_backup.timescaledb-version"
 }
 
+# Record the images actually used by the source containers, including stopped
+# containers. A tag such as latest/lts is not a reproducible recovery image.
+# This is data, never a shell file to source. Missing pins keep ordinary backups
+# usable, but fresh-server recovery must refuse to guess an image version.
+write_backup_runtime() {
+    local stage="$1" engine="$2" database_container="$3" log="$4"
+    local runtime="$stage/backup-runtime.tsv"
+    local server_version="unknown" dump_tool_version="unknown" revision="unknown" dump=""
+    local services="" service="" cid="" image_id="" digest="" pins=0
+    local compose="${COMPOSE:-docker compose}"
+
+    case "${APP_NAME}${APP_DIR}${DATA_DIR}" in
+        *$'\t'* | *$'\n'*) return 1 ;;
+    esac
+    if [ -f "$stage/db_backup.sql" ]; then
+        dump="$stage/db_backup.sql"
+    elif [ -f "$stage/pg_dump/db-001.sql" ]; then
+        dump="$stage/pg_dump/db-001.sql"
+    fi
+    if [ "$engine" = sqlite ]; then
+        server_version=$(sqlite3 --version 2>>"$log" | awk '{print $1}') || server_version="unknown"
+        # The protected snapshot is immutable. A failed metadata query against
+        # a WAL-mode database must not create new WAL/SHM files in the archive.
+        local snapshot_uri="$stage/$(basename "$sqlite_file")"
+        snapshot_uri="${snapshot_uri//%/%25}"
+        snapshot_uri="${snapshot_uri//\?/%3F}"
+        snapshot_uri="${snapshot_uri//#/%23}"
+        revision=$(sqlite3 "file:${snapshot_uri}?immutable=1" 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+    elif [ -n "$dump" ]; then
+        server_version=$(sed -n -E 's/^-- (Server version[[:space:]]+|Dumped from database version )//p' "$dump" | head -n 1)
+        dump_tool_version=$(sed -n -E 's/^-- Dumped by pg_dump version //p; s/^-- (MySQL|MariaDB) dump .*Distrib[[:space:]]+//p' "$dump" | head -n 1)
+        if [[ "$server_version" == *MariaDB* ]]; then engine="mariadb"; fi
+        if [ -n "$database_container" ] && [ -n "$db_user" ] && [ -n "$db_name" ]; then
+            case "$engine" in
+                mysql|mariadb)
+                    local client="mysql"
+                    [ "$engine" != mariadb ] || client="mariadb"
+                    revision=$(docker exec -e MYSQL_PWD="$db_password" "$database_container" "$client" \
+                        -u "$db_user" "$db_name" -N -s -e 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+                    ;;
+                postgresql|timescaledb)
+                    revision=$(docker exec -e PGPASSWORD="$db_password" "$database_container" \
+                        psql -X -U "$db_user" -d "$db_name" -At -c 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+                    ;;
+            esac
+        fi
+    fi
+    server_version="${server_version//$'\t'/ }"
+    server_version="${server_version//$'\n'/ }"
+    revision="${revision//$'\n'/,}"
+    revision="${revision//$'\t'/ }"
+    dump_tool_version="${dump_tool_version//$'\n'/ }"
+    dump_tool_version="${dump_tool_version//$'\t'/ }"
+    {
+        printf 'format\t1\ncreated_utc\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'database\t%s\nserver_version\t%s\nschema_revision\t%s\n' "$engine" "${server_version:-unknown}" "${revision:-unknown}"
+        printf 'dump_tool_version\t%s\n' "${dump_tool_version:-unknown}"
+        printf 'project\t%s\napp_dir\t%s\ndata_dir\t%s\n' "$APP_NAME" "$APP_DIR" "$DATA_DIR"
+    } >"$runtime" || return 1
+    services=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>>"$log") || services=""
+    while IFS= read -r service; do
+        [ -n "$service" ] || continue
+        [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+        cid=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" ps -a -q "$service" 2>>"$log" | head -n 1) || cid=""
+        image_id=""
+        digest=""
+        if [ -n "$cid" ]; then
+            image_id=$(docker inspect --format '{{.Image}}' "$cid" 2>>"$log") || image_id=""
+            if [ -n "$image_id" ]; then
+                digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image_id" 2>>"$log" | head -n 1) || digest=""
+            fi
+        fi
+        [[ "$digest" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]] || digest="unavailable"
+        [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || image_id="unavailable"
+        [ "$digest" = unavailable ] || pins=$((pins + 1))
+        printf 'image\t%s\t%s\t%s\n' "$service" "$digest" "$image_id" >>"$runtime" || return 1
+    done <<<"$services"
+    if [ "$pins" -eq 0 ]; then
+        colorized_echo yellow "Recovery image digests could not be recorded. This backup can be restored to an existing installation; --fresh needs the original images."
+    fi
+}
+
+# Cover the entire archive payload, including settings and version metadata.
+# Checksums detect corruption; they do not authenticate an untrusted archive.
+write_backup_checksums() (
+    cd "$1" || exit 1
+    local payload="" checksum=""
+    while IFS= read -r -d '' payload; do
+        case "$payload" in *$'\n'* | *$'\r'* | *\\*) exit 1 ;; esac
+        checksum=$(sha256sum -- "$payload") || exit 1
+        printf '%s\n' "$checksum"
+    done < <(find . -type f ! -path './backup-files.sha256' -print0 | sort -z)
+) >"$1/backup-files.sha256"
+
 # Execute a complete PasarGuard system backup including database dumps, configuration, and data.
 backup_command() {
     colorized_echo blue "Starting backup process..."
@@ -1742,7 +1836,8 @@ backup_command() {
             ;;
         esac
     else
-        colorized_echo yellow "Warning: No database type detected. Skipping database backup."
+        colorized_echo red "No database type detected. Check SQLALCHEMY_DATABASE_URL in .env; no backup will be published."
+        error_messages+=("No database type detected; a configuration-only archive cannot recover this installation.")
         echo "Warning: No database type detected." >>"$log_file"
         echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
     fi
@@ -1760,6 +1855,9 @@ backup_command() {
             --exclude 'db_backup.sqlite'
             --exclude 'db_backup.timescaledb-version'
             --exclude 'pg_dump'
+            --exclude 'backup-runtime.tsv'
+            --exclude 'backup-files.sha256'
+            --exclude '.pasarguard-recovery-compose.json'
             --exclude '.pasarguard-destination-compose.yml'
             --exclude 'pasarguard_ts_compat.*'
             --exclude '*_combined.zip'
@@ -1856,6 +1954,13 @@ backup_command() {
         fi
     fi
 
+    if [ ${#error_messages[@]} -eq 0 ]; then
+        if ! write_backup_runtime "$temp_dir" "$db_type" "$container_name" "$log_file" || \
+            ! write_backup_checksums "$temp_dir"; then
+            error_messages+=("Failed to record recovery versions or payload checksums.")
+        fi
+    fi
+
     colorized_echo blue "Creating backup archive..."
     # Verify temp_dir exists and has content before creating archive
     if [ ${#error_messages[@]} -gt 0 ]; then
@@ -1863,7 +1968,7 @@ backup_command() {
     elif [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
-    elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
+    elif ! (umask 077; cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
@@ -1872,8 +1977,8 @@ backup_command() {
 
         if [ "$archive_size_bytes" -gt "$split_threshold_bytes" ]; then
             colorized_echo blue "Splitting backup archive into Telegram-sized parts..."
-            if ! split -d -a 2 --numeric-suffixes=1 -b "$split_size_bytes" --additional-suffix=".zip" \
-                "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
+            if ! (umask 077; split -d -a 2 --numeric-suffixes=1 -b "$split_size_bytes" --additional-suffix=".zip" \
+                "$backup_file" "$backup_dir/backup_${timestamp}.part") 2>>"$log_file"; then
                 error_messages+=("Failed to split backup archive.")
                 echo "Failed to split backup archive." >>"$log_file"
             else

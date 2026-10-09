@@ -13,7 +13,9 @@ on:
       - "lib/docker.sh"
       - "lib/env.sh"
       - "lib/system.sh"
+      - "pasarguard.sh"
       - "tests/backup_restore_roundtrip.sh"
+      - "tests/fresh_recovery_roundtrip.sh"
       - "tests/unit_pasarguard.sh"
   pull_request:
     paths:
@@ -24,7 +26,9 @@ on:
       - "lib/docker.sh"
       - "lib/env.sh"
       - "lib/system.sh"
+      - "pasarguard.sh"
       - "tests/backup_restore_roundtrip.sh"
+      - "tests/fresh_recovery_roundtrip.sh"
       - "tests/unit_pasarguard.sh"
   workflow_dispatch:
 
@@ -80,3 +84,43 @@ jobs:
           TIMESCALE_TARGET_IMAGE: timescale/timescaledb:2.28.3-pg17
           TIMESCALEDB_COMPAT_IMAGE: timescale/timescaledb-ha:pg17-ts2.28-all
         run: bash tests/backup_restore_roundtrip.sh timescaledb single
+
+  fresh-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        database:
+          - sqlite
+          - mysql
+          - mariadb
+          - postgresql
+          - timescaledb
+        healthcheck:
+          - healthcheck
+        include:
+          - database: mysql
+            healthcheck: no-healthcheck
+          - database: mariadb
+            healthcheck: no-healthcheck
+          - database: postgresql
+            healthcheck: no-healthcheck
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync zip unzip sqlite3 jq
+
+      # Removes the source installation and its images, so --fresh has to pull
+      # the recorded digests and recreate the Compose image names.
+      - name: Recover a removed installation with restore --fresh
+        env:
+          FRESH_PULL_IMAGES: "true"
+        run: sudo -E bash tests/fresh_recovery_roundtrip.sh "${{ matrix.database }}" "${{ matrix.healthcheck }}"

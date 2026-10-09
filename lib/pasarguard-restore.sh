@@ -701,21 +701,398 @@ pg_restore_all_user_databases() {
     [ "$total" -gt 0 ] && [ "$ok" -eq "$total" ]
 }
 
+# Read recovery metadata as data, without evaluating archived shell input.
+backup_runtime_value() {
+    local stage="$1" key="$2"
+    [ -f "$stage/backup-runtime.tsv" ] || return 1
+    awk -F '\t' -v key="$key" '$1 == key {print $2; exit}' "$stage/backup-runtime.tsv"
+}
+
+# Validate every recorded payload before parsing credentials or touching Docker.
+# Legacy archives have no checksum inventory and retain structural validation.
+# Every archive with recovery metadata was written with an inventory, so a
+# missing one means the archive was altered.
+verify_backup_checksums() {
+    local stage="$1" inventory="$1/backup-files.sha256"
+    local line="" path="" digest="" count=0
+    if [ ! -e "$inventory" ]; then
+        if [ -e "$stage/backup-runtime.tsv" ]; then
+            colorized_echo red "This backup has recovery metadata but no backup-files.sha256 inventory, so its payload cannot be verified."
+            return 1
+        fi
+        colorized_echo yellow "Legacy backup: no checksum inventory; only archive structure and database dump checks apply."
+        return 0
+    fi
+    [ ! -L "$inventory" ] && [ -s "$inventory" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        digest="${line:0:64}"
+        [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || return 1
+        case "${line:64:2}" in '  '|' *') ;; *) return 1 ;; esac
+        path="${line:66}"
+        case "$path" in
+            ./*) ;;
+            *) return 1 ;;
+        esac
+        case "$path" in *$'\r'* | *\\* | */../* | */.. | */./* | ./backup-files.sha256) return 1 ;; esac
+        [ -f "$stage/$path" ] && [ ! -L "$stage/$path" ] || return 1
+        count=$((count + 1))
+    done <"$inventory"
+    [ "$count" -gt 0 ] || return 1
+    (cd "$stage" && sha256sum --check --status backup-files.sha256)
+}
+
+print_backup_runtime() {
+    local stage="$1"
+    if [ ! -f "$stage/backup-runtime.tsv" ]; then
+        colorized_echo yellow "Legacy backup: exact source image digests were not recorded. Use an installation with the original panel/database versions."
+        return 0
+    fi
+    [ "$(backup_runtime_value "$stage" format)" = 1 ] || {
+        colorized_echo red "Unsupported recovery metadata format. Update the PasarGuard script."
+        return 1
+    }
+    local key="" value="" digest="" image_id=""
+    while IFS=$'\t' read -r key value digest image_id; do
+        case "$key" in
+            created_utc|database|server_version|dump_tool_version|schema_revision|project|app_dir|data_dir)
+                printf '%s: %s\n' "$key" "$value" ;;
+            image) printf 'Recovery image (%s): %s\n' "$value" "$digest" ;;
+        esac
+    done <"$stage/backup-runtime.tsv"
+}
+
+# Reject cross-engine imports and version downgrades before the first SQL
+# statement. Upgrades within one engine still use its normal logical restore
+# path (and the existing TimescaleDB compatibility conversion).
+check_restore_database_version() {
+    local stage="$1" engine="$2" container="$3" log="$4"
+    local source_version="" target_version="" client="mysql" user="" password=""
+    source_version=$(backup_runtime_value "$stage" server_version) || source_version=""
+    if [[ ! "$source_version" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        # Old SQL dumps commonly retain a useful server-version header.
+        source_version=$(sed -n -E 's/^-- (Server version[[:space:]]+|Dumped from database version )//p' "$stage/db_backup.sql" 2>/dev/null | head -n 1)
+    fi
+    [[ "$source_version" =~ ^([0-9]+)\.([0-9]+) ]] || return 0
+    local source_major="${BASH_REMATCH[1]}" source_minor="${BASH_REMATCH[2]}"
+    case "$engine" in
+        mysql|mariadb)
+            if docker exec "$container" mariadb --version >/dev/null 2>&1; then client=mariadb; fi
+            if [ -n "$current_mysql_root_password" ]; then
+                user=root; password="$current_mysql_root_password"
+            else
+                user="${current_db_user:-$db_user}"; password="${current_db_password:-$db_password}"
+            fi
+            target_version=$(docker exec -e MYSQL_PWD="$password" "$container" "$client" \
+                -u "$user" -N -s -e 'SELECT VERSION();' 2>>"$log") || return 1
+            if { [[ "$source_version" == *MariaDB* ]] && [[ "$target_version" != *MariaDB* ]]; } || \
+                { [[ "$source_version" != *MariaDB* ]] && [[ "$target_version" == *MariaDB* ]]; }; then
+                colorized_echo red "Backup engine ($source_version) differs from destination ($target_version). Restore with the original engine, or use --fresh on an empty server."
+                return 1
+            fi
+            ;;
+        postgresql|timescaledb)
+            user="${current_db_user:-${db_user:-postgres}}"; password="${current_db_password:-$db_password}"
+            target_version=$(docker exec -e PGPASSWORD="$password" "$container" psql -X -U "$user" -d postgres -At \
+                -c 'SHOW server_version;' 2>>"$log") || return 1
+            ;;
+        *) return 0 ;;
+    esac
+    [[ "$target_version" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    local target_major="${BASH_REMATCH[1]}" target_minor="${BASH_REMATCH[2]}"
+    if [ "$source_major" -gt "$target_major" ] || \
+        { [[ "$engine" =~ ^(mysql|mariadb)$ ]] && [ "$source_major" -eq "$target_major" ] && [ "$source_minor" -gt "$target_minor" ]; }; then
+        colorized_echo red "Database downgrade is unsupported (backup: $source_version, destination: $target_version). Use the source version or --fresh on an empty server."
+        return 1
+    fi
+}
+
+# Ask the database server inside its container whether it accepts connections.
+# Probe over TCP: on an empty data directory the image entrypoint first runs a
+# temporary socket-only server for initialisation, which must not be mistaken
+# for the final server. A refused login still proves the server is up.
+recovery_database_responds() {
+    local container="$1" engine="$2" port="$3"
+    case "$engine" in
+        postgresql|timescaledb)
+            docker exec "$container" pg_isready -q -h 127.0.0.1 -p "$port"
+            ;;
+        mysql|mariadb)
+            # shellcheck disable=SC2016 # $1 expands inside the container shell.
+            docker exec "$container" sh -c 'if command -v mariadb-admin >/dev/null 2>&1; then exec mariadb-admin ping --silent -h 127.0.0.1 -P "$1"; fi; exec mysqladmin ping --silent -h 127.0.0.1 -P "$1"' sh "$port"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Wait until the fresh database can take the import. A Compose healthcheck is
+# authoritative when present; a service without one stays "running" while it
+# initialises, so probe the server itself on the connection URL port, then on
+# the engine's default port (the URL may name a published host port).
+wait_for_recovery_database() {
+    local container="$1" engine="$2" port="$3" log="$4"
+    local state="" waited=0 default_port=5432
+    case "$engine" in mysql|mariadb) default_port=3306 ;; esac
+    [ -n "$port" ] || port="$default_port"
+    while [ "$waited" -lt 180 ]; do
+        state=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>>"$log") || return 1
+        case "$state" in
+            healthy) return 0 ;;
+            running)
+                if recovery_database_responds "$container" "$engine" "$port" >>"$log" 2>&1; then return 0; fi
+                if [ "$port" != "$default_port" ] && recovery_database_responds "$container" "$engine" "$default_port" >>"$log" 2>&1; then
+                    return 0
+                fi
+                ;;
+            exited|dead|unhealthy) break ;;
+        esac
+        sleep 2
+        waited=$((waited + 2))
+    done
+    docker logs --tail 80 "$container" >>"$log" 2>&1 || true
+    colorized_echo red "Recovery database did not become ready. The panel has not been started. See the restore log."
+    return 1
+}
+
+# Prepare a fresh deployment using the source images. Refuse existing app/data,
+# containers and database storage; this mode is never an in-place downgrade.
+# The archived Compose file is installed unchanged. Each recorded source image
+# gets the name that file already uses (for example pasarguard/panel:latest),
+# so Compose runs the source versions now and `pasarguard update` can still
+# pull newer images later.
+# Arguments: stage, engine, log, database port from the connection URL, and the
+# name of the caller's variable that receives the database container ID.
+prepare_fresh_restore() {
+    local stage="$1" engine="$2" log="$3" db_port="$4" container_var="$5"
+    local recovery_compose="$stage/docker-compose.yml"
+    [ "$(backup_runtime_value "$stage" format)" = 1 ] || {
+        colorized_echo red "--fresh needs a backup with recovery metadata. For a legacy backup, install the original versions and run restore with its file path."
+        return 1
+    }
+    local key="" expected=""
+    for key in project app_dir data_dir; do
+        expected=$(backup_runtime_value "$stage" "$key")
+        case "$key" in
+            project) [ "$expected" = "$APP_NAME" ] && continue ;;
+            app_dir) [ "$expected" = "$APP_DIR" ] && continue ;;
+            data_dir) [ "$expected" = "$DATA_DIR" ] && continue ;;
+        esac
+        colorized_echo red "Recovery $key must match the backup ($expected). Set APP_NAME, APP_DIR and DATA_DIR to the recorded values, then retry."
+        return 1
+    done
+    local directory=""
+    for directory in "$APP_DIR" "$DATA_DIR"; do
+        [[ "$directory" == /* ]] && [ "$directory" != / ] && [ ! -L "$directory" ] || return 1
+        local existing_entry=""
+        if [ -d "$directory" ]; then
+            if [ "$directory" = "$APP_DIR" ]; then
+                existing_entry=$(find "$directory" -mindepth 1 -maxdepth 1 ! -name backup -print -quit) || return 1
+            else
+                existing_entry=$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit) || return 1
+            fi
+        fi
+        if [ -e "$directory" ] && { [ ! -d "$directory" ] || [ -n "$existing_entry" ]; }; then
+            colorized_echo red "--fresh requires empty application and data directories: $directory. Use ordinary restore for an existing installation."
+            return 1
+        fi
+    done
+    [ -f "$recovery_compose" ] && [ ! -L "$recovery_compose" ] || return 1
+    if ! command -v jq >/dev/null 2>&1; then detect_os; install_package jq; fi
+
+    local config="$stage/.pasarguard-recovery-compose.json"
+    # Resolve env_file references and image interpolation in staging, then
+    # translate relative bind paths for the storage checks against the
+    # eventual installation.
+    $COMPOSE --project-directory "$stage" --env-file "$stage/.env" -f "$recovery_compose" -p "$APP_NAME" \
+        config --format json >"$config" 2>>"$log" || return 1
+    jq --arg stage "$stage/" --arg app "$APP_DIR/" \
+        '(.services[].volumes[]? | select(.type == "bind") | .source) |=
+         (if startswith($stage) then $app + ltrimstr($stage) else . end)' \
+        "$config" >"$config.tmp" && mv "$config.tmp" "$config" || return 1
+
+    # Pair each service's Compose image name with its recorded source image.
+    local services="" service="" image="" digest="" image_id="" reference="" record=""
+    local other="" other_image="" other_service="" other_id=""
+    local recovery_images=()
+    services=$(jq -r '.services | keys[]' "$config") || return 1
+    [ -n "$services" ] || return 1
+    while IFS= read -r service; do
+        [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+        image=$(jq -r --arg service "$service" '.services[$service].image // empty' "$config") || return 1
+        if [[ ! "$image" =~ ^[a-zA-Z0-9._:/@-]+$ ]]; then
+            colorized_echo red "Service '$service' has no usable image name in docker-compose.yml. --fresh supports image-based services only."
+            return 1
+        fi
+        record=$(awk -F '\t' -v service="$service" '$1 == "image" && $2 == service {print $3 "\t" $4; exit}' "$stage/backup-runtime.tsv")
+        IFS=$'\t' read -r digest image_id <<<"$record"
+        reference=""
+        [[ ! "$digest" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]] || reference="$digest"
+        # docker save/load by image ID can retain the original image without
+        # RepoDigests. Prefer that local image over a registry download.
+        if [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] && docker image inspect "$image_id" >/dev/null 2>&1 && \
+            { [ -z "$reference" ] || ! docker image inspect "$reference" >/dev/null 2>&1; }; then
+            reference="$image_id"
+        fi
+        if [ -z "$reference" ]; then
+            colorized_echo red "No reproducible image for service '$service'. Load its original Docker image or use ordinary restore with explicitly pinned source versions."
+            return 1
+        fi
+        # A name that is already a digest (repo@sha256:... or repo:tag@sha256:...)
+        # cannot be retagged; it must carry the recorded digest.
+        if [[ "$image" == *@sha256:* ]]; then
+            if [ "${image##*@}" != "${digest##*@}" ]; then
+                colorized_echo red "docker-compose.yml pins service '$service' to $image, but the backup recorded ${digest}. Restore the original Compose file or use ordinary restore."
+                return 1
+            fi
+            reference="$digest"
+        fi
+        # One local tag can only point at one image.
+        for other in "${recovery_images[@]}"; do
+            IFS=$'\t' read -r _ other_image other_service other_id <<<"$other"
+            if [ "$other_image" = "$image" ] && [ "$other_id" != "$image_id" ]; then
+                colorized_echo red "Services $other_service and $service both use $image but ran different images at backup time. Give them distinct image names in docker-compose.yml or use ordinary restore."
+                return 1
+            fi
+        done
+        recovery_images+=("$reference"$'\t'"$image"$'\t'"$service"$'\t'"$image_id")
+    done <<<"$services"
+    local existing=""
+    existing=$($COMPOSE --project-directory "$stage" --env-file "$stage/.env" -f "$recovery_compose" -p "$APP_NAME" ps -a -q 2>>"$log") || return 1
+    [ -z "$existing" ] || { colorized_echo red "This Compose project already has containers. Use ordinary restore."; return 1; }
+    local source=""
+    while IFS= read -r source; do
+        [ -n "$source" ] || continue
+        if [ -L "$source" ]; then
+            colorized_echo red "Bind-mounted storage at $source is a symbolic link. Use ordinary restore after checking its target."
+            return 1
+        fi
+        case "$source" in "$APP_DIR"|"$APP_DIR/"*|"$DATA_DIR"|"$DATA_DIR/"*) continue ;; esac
+        if [ -e "$source" ] && { [ ! -d "$source" ] || [ -n "$(find "$source" -mindepth 1 -print -quit)" ]; }; then
+            colorized_echo red "Existing bind-mounted storage at $source. --fresh will not overwrite it."
+            return 1
+        fi
+    done < <(jq -r '.services[].volumes[]? | select(.type == "bind") | .source' "$config")
+    while IFS= read -r source; do
+        [ -n "$source" ] || continue
+        if docker volume inspect "$source" >/dev/null 2>&1; then
+            colorized_echo red "Existing Docker volume '$source'. --fresh will not reuse it."
+            return 1
+        fi
+    done < <(jq -r '.volumes // {} | .[].name' "$config")
+    while IFS= read -r source; do
+        [ -n "$source" ] || continue
+        if docker inspect "$source" >/dev/null 2>&1; then
+            colorized_echo red "Container name '$source' is already in use. --fresh will not replace it."
+            return 1
+        fi
+    done < <(jq -r '.services[].container_name // empty' "$config")
+    if jq -e '.volumes // {} | .[] | select(.external == true)' "$config" >/dev/null; then
+        colorized_echo red "External volumes need manual provisioning; use ordinary restore for this custom deployment."
+        return 1
+    fi
+    local db_service=""
+    if [ "$engine" != sqlite ]; then
+        case "$engine" in
+            mysql|mariadb) db_service=$(jq -r '.services | keys[] | select(. == "mysql" or . == "mariadb")' "$config" | head -n 1) ;;
+            postgresql|timescaledb) db_service=$(jq -r '.services | keys[] | select(. == "postgresql" or . == "timescaledb")' "$config" | head -n 1) ;;
+        esac
+        [ -n "$db_service" ] || { colorized_echo red "--fresh supports local database services in the official Compose layouts."; return 1; }
+    fi
+    colorized_echo blue "Fetching the recorded recovery images before provisioning the installation..."
+    local entry=""
+    for entry in "${recovery_images[@]}"; do
+        IFS=$'\t' read -r reference _ <<<"$entry"
+        if ! docker image inspect "$reference" >/dev/null 2>&1; then
+            docker pull "$reference" >>"$log" 2>&1 || {
+                colorized_echo red "Cannot fetch recovery image $reference. Check registry access, or docker load the original image and retry."
+                return 1
+            }
+        fi
+    done
+    local recorded_id="" previous_id=""
+    for entry in "${recovery_images[@]}"; do
+        IFS=$'\t' read -r reference image _ <<<"$entry"
+        [[ "$image" != *@sha256:* ]] || continue
+        # Image tags are host-wide: say so when this moves a tag another
+        # project on the host may still use.
+        recorded_id=$(docker image inspect --format '{{.Id}}' "$reference" 2>>"$log") || recorded_id=""
+        previous_id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null) || previous_id=""
+        if [ -n "$previous_id" ] && [ "$previous_id" != "$recorded_id" ]; then
+            colorized_echo yellow "Replacing the local image tag $image (was $previous_id). Other Compose projects on this host that use $image get the recorded image when their containers are recreated."
+        fi
+        docker tag "$reference" "$image" >>"$log" 2>&1 || {
+            colorized_echo red "Cannot tag recovery image $reference as $image."
+            return 1
+        }
+        colorized_echo blue "Using recorded image $reference as $image"
+    done
+    mkdir -p "$APP_DIR" "$DATA_DIR" || return 1
+    install -m 600 "$stage/.env" "$ENV_FILE" || return 1
+    install -m 600 "$recovery_compose" "$COMPOSE_FILE" || return 1
+    if [ -n "$db_service" ]; then
+        colorized_echo blue "Starting only the database; panel migrations stay stopped until the import finishes."
+        $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" up -d --no-deps "$db_service" >>"$log" 2>&1 || return 1
+        local container=""
+        container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q "$db_service") || return 1
+        [ -n "$container" ] || return 1
+        wait_for_recovery_database "$container" "$engine" "$db_port" "$log" || return 1
+        # Hand the exact container to the import; name-based lookups can match
+        # an unrelated container on the host.
+        [ -z "$container_var" ] || printf -v "$container_var" '%s' "$container"
+    fi
+}
+
 # Execute interactive restore of PasarGuard databases, configurations, and data.
 restore_command() {
+    local restore_file="" fresh_restore=false check_only=false assume_yes=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --fresh) fresh_restore=true ;;
+            --check) check_only=true ;;
+            --yes) assume_yes=true ;;
+            --file)
+                [ "$#" -ge 2 ] || { colorized_echo red "--file requires an archive path."; return 1; }
+                shift
+                restore_file="$1"
+                ;;
+            --help|-h)
+                echo "Usage: pasarguard restore [ARCHIVE | --file ARCHIVE] [--check] [--fresh] [--yes]"
+                echo "  --check  Validate the archive and show source versions without starting/stopping services."
+                echo "  --fresh  Recover onto an empty server using recorded images; no previous panel install needed."
+                echo "  --yes    Skip the confirmation prompt (archive checks still apply)."
+                return 0
+                ;;
+            -*) colorized_echo red "Unknown restore option: $1"; return 1 ;;
+            *)
+                [ -z "$restore_file" ] || { colorized_echo red "Specify only one backup archive."; return 1; }
+                restore_file="$1"
+                ;;
+        esac
+        shift
+    done
+    if [ -n "$restore_file" ]; then
+        [ -f "$restore_file" ] && [ -r "$restore_file" ] || { colorized_echo red "Backup archive is missing or unreadable: $restore_file"; return 1; }
+        restore_file="$(cd -- "$(dirname -- "$restore_file")" && pwd)/$(basename -- "$restore_file")"
+        local requested_name="${restore_file##*/}" requested_dir="${restore_file%/*}"
+        if [[ "$requested_name" =~ \.part[0-9]{2}\.zip$ ]]; then
+            local part_base="${requested_name%%.part*}"
+            if [ -f "$requested_dir/$part_base.part00.zip" ]; then
+                restore_file="$requested_dir/$part_base.part00.zip"
+            elif [ -f "$requested_dir/$part_base.part01.zip" ]; then
+                restore_file="$requested_dir/$part_base.part01.zip"
+            fi
+        elif [[ "$requested_name" =~ \.z[0-9]{2}$ ]]; then
+            restore_file="$requested_dir/${requested_name%.z??}.zip"
+            [ -f "$restore_file" ] || { colorized_echo red "Missing final .zip file for the split archive."; return 1; }
+        fi
+    fi
     colorized_echo blue "Starting restore process..."
 
-    # Check if pasarguard is installed
-    if ! is_pasarguard_installed; then
-        colorized_echo red "pasarguard's not installed!"
-        exit 1
-    fi
-
-    detect_compose
-
-    if ! is_pasarguard_up; then
-        colorized_echo red "pasarguard is not up. Please start pasarguard first."
-        exit 1
+    if [ "$fresh_restore" = false ] && [ "$check_only" = false ]; then
+        if ! is_pasarguard_installed || [ ! -f "$COMPOSE_FILE" ]; then
+            colorized_echo red "No installation found. To recover onto an empty server, use: pasarguard restore --fresh /path/to/backup.zip"
+            return 1
+        fi
+        detect_compose
     fi
 
     local current_db_user=""
@@ -744,7 +1121,7 @@ restore_command() {
         printf '%s\n' "$url" | sed -E 's#^([^:]+://)([^@/]+)@#\1REDACTED@#'
     }
 
-    if [ -f "$ENV_FILE" ]; then
+    if [ "$fresh_restore" = false ] && [ "$check_only" = false ] && [ -f "$ENV_FILE" ]; then
         set +e
         while IFS='=' read -r key value || [ -n "$key" ]; do
             if [[ -z "$key" || "$key" =~ ^# ]]; then
@@ -775,19 +1152,23 @@ restore_command() {
     fi
 
     local backup_dir="$APP_DIR/backup"
+    local archive_dir="$backup_dir"
     local restore_staging_root=""
     local temp_restore_dir=""
     local current_compose_snapshot=""
 
     # Check if backup directory exists
-    if [ ! -d "$backup_dir" ]; then
+    if [ -n "$restore_file" ]; then
+        archive_dir=$(dirname -- "$restore_file")
+    fi
+    if [ ! -d "$archive_dir" ]; then
         colorized_echo red "Backup directory not found: $backup_dir"
         exit 1
     fi
 
     # Restores can be large, so avoid /tmp by default and stage beside the
     # backup unless RESTORE_TMPDIR is explicitly set.
-    restore_staging_root="${RESTORE_TMPDIR:-$backup_dir}"
+    restore_staging_root="${RESTORE_TMPDIR:-$archive_dir}"
     if ! mkdir -p "$restore_staging_root"; then
         colorized_echo red "Failed to prepare restore staging directory: $restore_staging_root"
         exit 1
@@ -808,7 +1189,7 @@ restore_command() {
     # application services if they were shut down, and terminate with the error code.
     cleanup_and_exit_restore_error() {
         local code="${1:-1}"
-        if [ "$services_stopped" = true ]; then
+        if [ "$services_stopped" = true ] && [ "$fresh_restore" = false ]; then
             if [[ "$db_type" == "sqlite" ]]; then
                 up_pasarguard || echo "Failed to restart pasarguard after SQLite restore failure" >>"$log_file"
             else
@@ -820,7 +1201,7 @@ restore_command() {
                 colorized_echo yellow "=== Restore Error Log ===" >&2
                 cat "$log_file" >&2
             fi
-            if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
+            if [ "$check_only" = false ] && mkdir -p "$backup_dir"; then
                 cp -f "$log_file" "$backup_dir/pasarguard_restore_error.log" 2>/dev/null || true
             fi
         fi
@@ -832,15 +1213,19 @@ restore_command() {
 
     # List available backup files (find all backup-related files in backup directory)
     local backup_candidates=()
-    while IFS= read -r -d '' file; do
-        backup_candidates+=("$file")
-    done < <(find "$backup_dir" -maxdepth 1 \( -name "*backup*.gz" -o -name "*backup*.tar.gz" -o -name "*.tar.gz" -o -name "*backup*.zip" -o -name "*.zip" \) -type f -print0 2>/dev/null)
+    if [ -n "$restore_file" ]; then
+        backup_candidates=("$restore_file")
+    else
+        while IFS= read -r -d '' file; do
+            backup_candidates+=("$file")
+        done < <(find "$archive_dir" -maxdepth 1 \( -name "*backup*.gz" -o -name "*backup*.tar.gz" -o -name "*.tar.gz" -o -name "*backup*.zip" -o -name "*.zip" \) -type f -print0 2>/dev/null)
+    fi
 
     if [ ${#backup_candidates[@]} -eq 0 ]; then
         # Fallback: try to find any archive files
         while IFS= read -r -d '' file; do
             backup_candidates+=("$file")
-        done < <(find "$backup_dir" -maxdepth 1 \( -name "*.gz" -o -name "*.zip" \) -type f -print0 2>/dev/null)
+        done < <(find "$archive_dir" -maxdepth 1 \( -name "*.gz" -o -name "*.zip" \) -type f -print0 2>/dev/null)
     fi
 
     local backup_files=()
@@ -848,7 +1233,7 @@ restore_command() {
         local filename=$(basename "$file")
         if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]]; then
             local base_name="${filename%%.part*}"
-            if [ -f "$backup_dir/${base_name}.part00.zip" ]; then
+            if [ -f "$archive_dir/${base_name}.part00.zip" ]; then
                 [[ "$filename" =~ \.part00\.zip$ ]] || continue
             else
                 [[ "$filename" =~ \.part01\.zip$ ]] || continue
@@ -873,7 +1258,7 @@ restore_command() {
             local filename=$(basename "$file")
             if [[ "$filename" =~ \.part[0-9]{2}\.zip$ ]]; then
                 local base_name="${filename%%.part*}"
-                local part_count=$(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | wc -l | awk '{print $1}')
+                local part_count=$(find "$archive_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | wc -l | awk '{print $1}')
                 [ -z "$part_count" ] && part_count=0
                 local total_size_bytes=0
                 while IFS= read -r part_file; do
@@ -882,7 +1267,7 @@ restore_command() {
                         part_size=$(wc -c <"$part_file")
                     fi
                     total_size_bytes=$((total_size_bytes + part_size))
-                done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip")
+                done < <(find "$archive_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip")
                 local human_size=""
                 if command -v numfmt >/dev/null 2>&1; then
                     human_size=$(numfmt --to=iec --suffix=B "$total_size_bytes" 2>/dev/null || awk -v size="$total_size_bytes" 'BEGIN { printf "%.2f MB", size/1048576 }')
@@ -896,7 +1281,7 @@ restore_command() {
                 local zip_part_files=()
                 while IFS= read -r part_file; do
                     zip_part_files+=("$part_file")
-                done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.z[0-9][0-9]" | sort)
+                done < <(find "$archive_dir" -maxdepth 1 -type f -name "${base_name}.z[0-9][0-9]" | sort)
                 if [ ${#zip_part_files[@]} -gt 0 ]; then
                     local total_size_bytes=0
                     for part_file in "${zip_part_files[@]}"; do
@@ -940,16 +1325,20 @@ restore_command() {
         exit 1
     fi
 
-    # Select backup file
+    # An explicit path selects its archive without an extra numbered prompt.
+    local selection=1
+    if [ -z "$restore_file" ]; then
     while true; do
         printf "Select backup file to restore from (1-%d): " "$file_count"
-        read -r selection
+        read -r selection || { rm -rf "$temp_restore_dir"; return 1; }
         if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "$file_count" ]; then
             break
         else
             colorized_echo red "Invalid selection. Please enter a number between 1 and $file_count."
         fi
     done
+
+    fi
 
     local selected_file="${backup_files[$((selection-1))]}"
     local selected_filename=$(basename "$selected_file")
@@ -967,9 +1356,9 @@ restore_command() {
         local base_name="${selected_filename%%.part*}"
         colorized_echo yellow "Detected split zip backup. Checking available parts..."
         local first_part_number=""
-        if [ -f "$backup_dir/${base_name}.part00.zip" ]; then
+        if [ -f "$archive_dir/${base_name}.part00.zip" ]; then
             first_part_number=0
-        elif [ -f "$backup_dir/${base_name}.part01.zip" ]; then
+        elif [ -f "$archive_dir/${base_name}.part01.zip" ]; then
             first_part_number=1
         else
             colorized_echo red "Missing initial split part for ${base_name}. Cannot restore split backup."
@@ -996,7 +1385,7 @@ restore_command() {
             cat "$part_file" >>"$concatenated_file"
             part_count=$((part_count + 1))
             expected_part_number=$((expected_part_number + 1))
-        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | sort)
+        done < <(find "$archive_dir" -maxdepth 1 -type f -name "${base_name}.part*.zip" | sort)
         if [ "$part_count" -eq 0 ]; then
             colorized_echo red "No parts found for $base_name"
             rm -rf "$temp_restore_dir"
@@ -1010,7 +1399,7 @@ restore_command() {
         local zip_split_parts=()
         while IFS= read -r part_file; do
             [ -n "$part_file" ] && zip_split_parts+=("$part_file")
-        done < <(find "$backup_dir" -maxdepth 1 -type f -name "${split_zip_base_name}.z[0-9][0-9]" | sort)
+        done < <(find "$archive_dir" -maxdepth 1 -type f -name "${split_zip_base_name}.z[0-9][0-9]" | sort)
 
         if [ ${#zip_split_parts[@]} -gt 0 ]; then
             zip_split_archive=true
@@ -1096,6 +1485,17 @@ restore_command() {
     fi
     colorized_echo green "✓ Archive extracted successfully"
 
+    if [ -n "$(find "$temp_restore_dir" -type l -print -quit)" ]; then
+        colorized_echo red "Archive contains symbolic links. Repackage it with regular files before restoring."
+        cleanup_and_exit_restore_error 1
+    fi
+    if ! verify_backup_checksums "$temp_restore_dir"; then
+        colorized_echo red "Backup payload checksum validation failed. Download the complete original backup again."
+        echo "Backup payload checksum validation failed" >>"$log_file"
+        cleanup_and_exit_restore_error 1
+    fi
+    if ! print_backup_runtime "$temp_restore_dir"; then cleanup_and_exit_restore_error 1; fi
+
     # Load environment variables from extracted .env
     colorized_echo blue "Loading configuration from backup..."
     local extracted_env="$temp_restore_dir/.env"
@@ -1123,6 +1523,7 @@ restore_command() {
     fi
 
     local env_vars_loaded=0
+    local SQLALCHEMY_DATABASE_URL="" MYSQL_ROOT_PASSWORD="" DB_USER="" DB_PASSWORD="" DB_NAME=""
 
     local env_file_to_use="$extracted_env"
     local cleaned_env="$temp_restore_dir/pasarguard_env_cleaned"
@@ -1156,12 +1557,14 @@ restore_command() {
             value=$(echo "$value" | xargs 2>/dev/null || echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             # Remove surrounding quotes from value if present
             value=$(echo "$value" | sed -E 's/^["'\''](.*)["'\'']$/\1/' 2>/dev/null || echo "$value")
-            if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-                export "$key"="$value" 2>/dev/null || true
-                env_vars_loaded=$((env_vars_loaded + 1))
-            else
-                echo "Skipping invalid line in .env: $key=$value" >&2
-            fi
+            # Application settings remain in .env for Compose. Only import
+            # connection fields into this shell, never PATH/APP_DIR/COMPOSE etc.
+            case "$key" in
+                SQLALCHEMY_DATABASE_URL|MYSQL_ROOT_PASSWORD|DB_USER|DB_PASSWORD|DB_NAME)
+                    printf -v "$key" '%s' "$value"
+                    env_vars_loaded=$((env_vars_loaded + 1))
+                    ;;
+            esac
         done <"$env_file_to_use"
         set -e  # Re-enable exit on error
     else
@@ -1238,7 +1641,7 @@ restore_command() {
             fi
         fi
 
-        if [[ "$url_part" =~ ^([^:/]+)(:([0-9]+))?/(.+)$ ]]; then
+        if [[ "$url_part" =~ ^\[([^]]+)\](:([0-9]+))?/(.+)$ ]] || [[ "$url_part" =~ ^([^:/]+)(:([0-9]+))?/(.+)$ ]]; then
             db_host="${BASH_REMATCH[1]}"
             db_port="${BASH_REMATCH[3]:-}"
             db_name="${BASH_REMATCH[4]}"
@@ -1261,7 +1664,7 @@ restore_command() {
         fi
 
         # Find container name for local databases
-        if [[ "$db_host" == "127.0.0.1" || "$db_host" == "localhost" || "$db_host" == "::1" ]]; then
+        if [ "$check_only" = false ] && [ "$fresh_restore" = false ] && is_local_db_host "$db_host"; then
             set +e
             container_name=$(find_container "$db_type")
             set -e
@@ -1270,16 +1673,64 @@ restore_command() {
 
     if [ -z "$db_type" ]; then
         colorized_echo red "Could not determine database type from backup."
-        colorized_echo yellow "SQLALCHEMY_DATABASE_URL: ${SQLALCHEMY_DATABASE_URL:-not set}"
+        colorized_echo yellow "SQLALCHEMY_DATABASE_URL: $(redact_database_url "${SQLALCHEMY_DATABASE_URL:-}")"
         rm -rf "$temp_restore_dir"
         exit 1
     fi
 
     colorized_echo green "✓ Database configuration detected: $db_type"
 
+    if [ -f "$temp_restore_dir/backup-runtime.tsv" ]; then
+        local recorded_engine=""
+        recorded_engine=$(backup_runtime_value "$temp_restore_dir" database)
+        # mysql+asyncmy is also used for MariaDB. Prefer the recorded server
+        # identity over the SQLAlchemy driver name when selecting the client.
+        if [ "$db_type" = mysql ] && [ "$recorded_engine" = mariadb ]; then db_type=mariadb; fi
+    fi
+    local payload_valid=false
+    case "$db_type" in
+        mysql|mariadb)
+            if mysql_dump_looks_restorable "$temp_restore_dir/db_backup.sql"; then payload_valid=true; fi
+            ;;
+        postgresql|timescaledb)
+            if postgres_backup_looks_restorable "$temp_restore_dir" "$db_name"; then payload_valid=true; fi
+            ;;
+        sqlite)
+            local check_sqlite="$temp_restore_dir/$(basename "$sqlite_file")"
+            [ -f "$check_sqlite" ] || check_sqlite="$temp_restore_dir/db_backup.sqlite"
+            if [ "$check_only" = false ] && ! command -v sqlite3 >/dev/null 2>&1; then
+                detect_os
+                try_install_package sqlite3 || true
+            fi
+            if ! command -v sqlite3 >/dev/null 2>&1; then
+                colorized_echo red "Install sqlite3 to validate this SQLite snapshot before restoring."
+            elif sqlite_snapshot_looks_restorable "$check_sqlite"; then
+                payload_valid=true
+            fi
+            ;;
+    esac
+    if [ "$payload_valid" = false ]; then
+        colorized_echo red "Database artifact is missing, corrupt, or incomplete; restore stopped before changing services or data."
+        echo "Database payload validation failed for $db_type" >>"$log_file"
+        cleanup_and_exit_restore_error 1
+    fi
+    if [ "$check_only" = true ]; then
+        rm -rf "$temp_restore_dir"
+        colorized_echo green "Backup validation passed. No services or destination data were changed. This check does not perform a database import."
+        return 0
+    fi
+    if [ "$fresh_restore" = true ]; then
+        if [ "$db_type" != sqlite ] && ! is_local_db_host "$db_host"; then
+            colorized_echo red "--fresh requires a local database from the official Compose templates."
+            cleanup_and_exit_restore_error 1
+        fi
+        colorized_echo blue "Fresh recovery will recreate the recorded panel/database versions in $APP_DIR."
+    fi
+
     # Confirm restore
-    colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
-    colorized_echo yellow "WARNING: This will overwrite your current $db_type database!"
+    if [ "$fresh_restore" = false ]; then
+        colorized_echo red "⚠️  DANGER: This will PERMANENTLY overwrite your current $db_type database!"
+    fi
     colorized_echo blue "Database type: $db_type"
     if [ -n "$db_name" ]; then
         colorized_echo blue "Database name: $db_name"
@@ -1288,9 +1739,9 @@ restore_command() {
         colorized_echo blue "Container: $container_name"
     fi
 
-    while true; do
+    while [ "$assume_yes" = false ]; do
         printf "Do you want to proceed with the restore? (yes/no): "
-        read -r confirm
+        read -r confirm || { rm -rf "$temp_restore_dir"; return 1; }
         if [[ "$confirm" =~ ^[Yy](es)?$ ]]; then
             break
         elif [[ "$confirm" =~ ^[Nn](o)?$ ]]; then
@@ -1301,6 +1752,44 @@ restore_command() {
             colorized_echo red "Please answer yes or no."
         fi
     done
+
+    if [ "$fresh_restore" = true ]; then
+        check_running_as_root
+        if ! command -v docker >/dev/null 2>&1; then install_docker; fi
+        ensure_docker_compose
+        detect_compose
+        local fresh_db_container=""
+        if ! prepare_fresh_restore "$temp_restore_dir" "$db_type" "$log_file" "$db_port" fresh_db_container; then
+            cleanup_and_exit_restore_error 1
+        fi
+        current_mysql_root_password="$MYSQL_ROOT_PASSWORD"
+        current_db_user="${DB_USER:-$db_user}"
+        current_db_password="${DB_PASSWORD:-$db_password}"
+        current_db_name="${DB_NAME:-$db_name}"
+        current_sqlalchemy_url="$SQLALCHEMY_DATABASE_URL"
+        if [ "$db_type" != sqlite ]; then
+            if ! is_local_db_host "$db_host"; then
+                colorized_echo red "--fresh requires a local database from the official Compose templates."
+                cleanup_and_exit_restore_error 1
+            fi
+            container_name="$fresh_db_container"
+            if [ -z "$container_name" ]; then
+                colorized_echo red "The recovery database container was not identified. The panel has not been started."
+                cleanup_and_exit_restore_error 1
+            fi
+        fi
+    fi
+
+    if [ "$db_type" != sqlite ] && is_local_db_host "$db_host" && [ -n "$container_name" ]; then
+        if ! container_name=$(verify_and_start_container "$container_name" "$db_type") || [ -z "$container_name" ]; then
+            colorized_echo red "Destination database could not be started for compatibility checks."
+            cleanup_and_exit_restore_error 1
+        fi
+        if ! check_restore_database_version "$temp_restore_dir" "$db_type" "$container_name" "$log_file"; then
+            colorized_echo red "Could not validate database version compatibility. Check destination credentials and the restore log."
+            cleanup_and_exit_restore_error 1
+        fi
+    fi
 
     # Stop pasarguard services before restore for clean state
     colorized_echo blue "Stopping pasarguard services for clean restore..."
@@ -1320,7 +1809,9 @@ restore_command() {
     fi
 
     # Perform restore
-    colorized_echo red "⚠️  DANGER: Starting database restore - this will overwrite existing data!"
+    if [ "$fresh_restore" = false ]; then
+        colorized_echo red "⚠️  DANGER: Starting database restore - this will overwrite existing data!"
+    fi
     colorized_echo blue "Starting database restore..."
 
     case $db_type in
@@ -1687,11 +2178,11 @@ restore_command() {
             install_package rsync
         fi
         mkdir -p "$DATA_DIR"
-        if [ "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
+        if [ "$fresh_restore" = false ] && [ "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
             colorized_echo blue "Backing up current data directory before restore..."
             cp -r "$DATA_DIR" "$DATA_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
         fi
-        if ! rsync -a --delete "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
+        if ! rsync -a --delete --exclude mysql --exclude mariadb --exclude postgresql --exclude timescaledb "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
             colorized_echo red "Failed to restore data directory."
             echo "Failed to restore data directory from $extracted_data_dir to $DATA_DIR" >>"$log_file"
             cleanup_and_exit_restore_error 1
@@ -1738,18 +2229,23 @@ restore_command() {
             install_package rsync
         fi
         mkdir -p "$APP_DIR"
-        if [ "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+        if [ "$fresh_restore" = false ] && [ "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
             colorized_echo blue "Backing up current app directory before restore..."
-            cp -r "$APP_DIR" "$APP_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
+            if ! rsync -a --exclude backup "$APP_DIR/" "$APP_DIR.backup.$(date +%Y%m%d%H%M%S)/" 2>>"$log_file"; then
+                colorized_echo red "Failed to save the current application files before replacement."
+                cleanup_and_exit_restore_error 1
+            fi
         fi
         if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
             --exclude 'db_backup.timescaledb-version' --exclude 'pg_dump' \
+            --exclude 'backup-runtime.tsv' --exclude 'backup-files.sha256' --exclude '.pasarguard-recovery-compose.json' \
             --exclude '.pasarguard-destination-compose.yml' --exclude 'pasarguard_ts_compat.*' \
             --exclude '*_combined.zip' --exclude 'pasarguard_env_cleaned' \
             --exclude 'pasarguard_restore_error.log' --exclude "$sqlite_basename" \
             "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
             colorized_echo red "Failed to restore app directory files."
             echo "Failed to restore app directory files from $temp_restore_dir to $APP_DIR" >>"$log_file"
+            cleanup_and_exit_restore_error 1
         else
             colorized_echo green "App directory files restored."
         fi
@@ -1787,19 +2283,16 @@ restore_command() {
         colorized_echo blue "Preserved destination docker-compose.yml."
     fi
 
-    # Clean up
-    rm -rf "$temp_restore_dir"
-
-    # Restart pasarguard services
-    colorized_echo blue "Restarting pasarguard services..."
-    if [[ "$db_type" == "sqlite" ]]; then
-        # For SQLite, restart all services
-        up_pasarguard
-    else
-        # For containerized databases, restart only application services
-        start_pasarguard_app_services
+    # Keep staging/logs until starting services has succeeded. Fresh recovery
+    # has no application containers to `start`, so provision them only now.
+    colorized_echo blue "Starting pasarguard services..."
+    if ! up_pasarguard; then
+        colorized_echo red "Data was restored, but services could not start. See the restore log."
+        cleanup_and_exit_restore_error 1
     fi
-
+    harden_secret_file "$ENV_FILE"
+    harden_secret_file "$COMPOSE_FILE"
+    rm -rf "$temp_restore_dir"
     colorized_echo green "Restore completed successfully!"
-    colorized_echo green "PasarGuard services have been restarted."
+    colorized_echo green "PasarGuard services have been started. Check panel login, subscriptions and node connections before upgrading."
 }
