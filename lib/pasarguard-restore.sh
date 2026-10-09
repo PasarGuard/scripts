@@ -911,6 +911,7 @@ prepare_fresh_restore() {
 
     # Pair each service's Compose image name with its recorded source image.
     local services="" service="" image="" digest="" image_id="" reference="" record=""
+    local other="" other_image="" other_service="" other_id=""
     local recovery_images=()
     services=$(jq -r '.services | keys[]' "$config") || return 1
     [ -n "$services" ] || return 1
@@ -935,15 +936,24 @@ prepare_fresh_restore() {
             colorized_echo red "No reproducible image for service '$service'. Load its original Docker image or use ordinary restore with explicitly pinned source versions."
             return 1
         fi
-        # A name that is already a digest cannot be retagged; it must be the recorded one.
+        # A name that is already a digest (repo@sha256:... or repo:tag@sha256:...)
+        # cannot be retagged; it must carry the recorded digest.
         if [[ "$image" == *@sha256:* ]]; then
-            if [ "$image" != "$digest" ]; then
+            if [ "${image##*@}" != "${digest##*@}" ]; then
                 colorized_echo red "docker-compose.yml pins service '$service' to $image, but the backup recorded ${digest}. Restore the original Compose file or use ordinary restore."
                 return 1
             fi
             reference="$digest"
         fi
-        recovery_images+=("$reference"$'\t'"$image")
+        # One local tag can only point at one image.
+        for other in "${recovery_images[@]}"; do
+            IFS=$'\t' read -r _ other_image other_service other_id <<<"$other"
+            if [ "$other_image" = "$image" ] && [ "$other_id" != "$image_id" ]; then
+                colorized_echo red "Services $other_service and $service both use $image but ran different images at backup time. Give them distinct image names in docker-compose.yml or use ordinary restore."
+                return 1
+            fi
+        done
+        recovery_images+=("$reference"$'\t'"$image"$'\t'"$service"$'\t'"$image_id")
     done <<<"$services"
     local existing=""
     existing=$($COMPOSE --project-directory "$stage" --env-file "$stage/.env" -f "$recovery_compose" -p "$APP_NAME" ps -a -q 2>>"$log") || return 1
@@ -990,7 +1000,7 @@ prepare_fresh_restore() {
     colorized_echo blue "Fetching the recorded recovery images before provisioning the installation..."
     local entry=""
     for entry in "${recovery_images[@]}"; do
-        reference="${entry%%$'\t'*}"
+        IFS=$'\t' read -r reference _ <<<"$entry"
         if ! docker image inspect "$reference" >/dev/null 2>&1; then
             docker pull "$reference" >>"$log" 2>&1 || {
                 colorized_echo red "Cannot fetch recovery image $reference. Check registry access, or docker load the original image and retry."
@@ -998,10 +1008,17 @@ prepare_fresh_restore() {
             }
         fi
     done
+    local recorded_id="" previous_id=""
     for entry in "${recovery_images[@]}"; do
-        reference="${entry%%$'\t'*}"
-        image="${entry#*$'\t'}"
+        IFS=$'\t' read -r reference image _ <<<"$entry"
         [[ "$image" != *@sha256:* ]] || continue
+        # Image tags are host-wide: say so when this moves a tag another
+        # project on the host may still use.
+        recorded_id=$(docker image inspect --format '{{.Id}}' "$reference" 2>>"$log") || recorded_id=""
+        previous_id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null) || previous_id=""
+        if [ -n "$previous_id" ] && [ "$previous_id" != "$recorded_id" ]; then
+            colorized_echo yellow "Replacing the local image tag $image (was $previous_id). Other Compose projects on this host that use $image get the recorded image when their containers are recreated."
+        fi
         docker tag "$reference" "$image" >>"$log" 2>&1 || {
             colorized_echo red "Cannot tag recovery image $reference as $image."
             return 1

@@ -35,12 +35,15 @@ case "$1" in
             *" ps -q "*) printf 'cid-%s\n' "${@: -1}" ;;
         esac
         ;;
-    image) [ "$2" = inspect ] && [ -e "$d/images/$(image_key "${@: -1}")" ] ;;
+    image)
+        [ "$2" = inspect ] && [ -e "$d/images/$(image_key "${@: -1}")" ] || exit 1
+        [ "$3" != --format ] || cat "$d/images/$(image_key "${@: -1}")"
+        ;;
     pull)
         grep -qxF "$2" "$d/pullable" 2>/dev/null || exit 1
-        : >"$d/images/$(image_key "$2")"
+        printf 'sha256:pulled-%s\n' "$(image_key "$2")" >"$d/images/$(image_key "$2")"
         ;;
-    tag) : >"$d/images/$(image_key "$3")" ;;
+    tag) cp "$d/images/$(image_key "$2")" "$d/images/$(image_key "$3")" ;;
     inspect) [ "$2" = --format ] && cat "$d/state" ;;
     logs) ;;
     exec)
@@ -128,8 +131,13 @@ reset_fake_docker() {
     echo 1 >"$FAKE_DOCKER_DIR/has_mariadb"
     : >"$FAKE_DOCKER_DIR/target_version"
 }
-# Mark an image reference as present in the fake local image store.
-fake_image_present() { : >"$FAKE_DOCKER_DIR/images/$(printf '%s' "$1" | tr '/:@' '___')"; }
+# Mark an image reference as present in the fake local image store; $2 is its
+# image ID (default: one derived from the reference).
+fake_image_present() {
+    local key
+    key=$(printf '%s' "$1" | tr '/:@' '___')
+    printf '%s\n' "${2:-sha256:local-$key}" >"$FAKE_DOCKER_DIR/images/$key"
+}
 
 echo "=== unit_restore_recovery.sh ==="
 
@@ -316,8 +324,8 @@ reset_fake_docker
 echo running >"$FAKE_DOCKER_DIR/state"
 printf '1\n0\n' >"$FAKE_DOCKER_DIR/probe"
 assert_true "database wait: probe falls back to the default port" wait_for_recovery_database cid-db postgresql 6543 "$log"
-assert_file_has "$FAKE_DOCKER_DIR/calls.log" "pg_isready -q -h 127.0.0.1 -p 6543" "database wait: connection URL port tried first"
-assert_file_has "$FAKE_DOCKER_DIR/calls.log" "pg_isready -q -h 127.0.0.1 -p 5432" "database wait: default port tried next"
+probes=$(grep -o 'pg_isready -q -h 127.0.0.1 -p [0-9]*' "$FAKE_DOCKER_DIR/calls.log" | awk '{print $NF}' | paste -sd ' ')
+assert_eq "$probes" "6543 5432" "database wait: connection URL port tried first, default port next"
 
 reset_fake_docker
 echo running >"$FAKE_DOCKER_DIR/state"
@@ -337,7 +345,8 @@ assert_false "database wait: unhealthy healthcheck rejected" quiet wait_for_reco
 # prepare_fresh_restore (docker mocked): images keep their Compose names
 # -----------------------------------------------------------------------
 # Build a fresh-recovery stage. $1 panel digest record, $2 panel image id,
-# $3 compose image for the panel.
+# $3 compose image for the panel, optional $4 image id recorded for a "worker"
+# service that uses the same Compose image as the panel.
 make_fresh_stage() {
     rm -rf "$APP_DIR" "$DATA_DIR" "$WORK_DIR/fresh"
     stage="$WORK_DIR/fresh"
@@ -345,10 +354,15 @@ make_fresh_stage() {
     printf 'DB_USER=app\nDB_PASSWORD=app-pass\nDB_NAME=appdb\nSQLALCHEMY_DATABASE_URL="postgresql+asyncpg://app:app-pass@127.0.0.1:5432/appdb"\n' >"$stage/.env"
     printf 'services:\n  pasarguard:\n    image: %s\n  postgresql:\n    image: postgres:16\n' "$3" >"$stage/docker-compose.yml"
     cp "$stage/docker-compose.yml" "$WORK_DIR/archived-compose.yml"
-    write_runtime "$stage" postgresql pasarguard "$1" "$2" postgresql "postgres@$DIGEST_B" "$ID_B"
-    jq -n --arg panel "$3" --arg data "$DATA_DIR" \
-        '{services: {pasarguard: {image: $panel, volumes: [{type: "bind", source: $data, target: "/var/lib/pasarguard"}]},
-                     postgresql: {image: "postgres:16"}}, volumes: {}}' >"$FAKE_DOCKER_DIR/config.json"
+    if [ -n "${4:-}" ]; then
+        write_runtime "$stage" postgresql pasarguard "$1" "$2" worker "$1" "$4" postgresql "postgres@$DIGEST_B" "$ID_B"
+    else
+        write_runtime "$stage" postgresql pasarguard "$1" "$2" postgresql "postgres@$DIGEST_B" "$ID_B"
+    fi
+    jq -n --arg panel "$3" --arg data "$DATA_DIR" --arg worker "${4:-}" \
+        '{services: ({pasarguard: {image: $panel, volumes: [{type: "bind", source: $data, target: "/var/lib/pasarguard"}]},
+                      postgresql: {image: "postgres:16"}} + (if $worker == "" then {} else {worker: {image: $panel}} end)),
+          volumes: {}}' >"$FAKE_DOCKER_DIR/config.json"
 }
 
 reset_fake_docker
@@ -366,7 +380,7 @@ assert_file_has "$FAKE_DOCKER_DIR/calls.log" "tag pasarguard/panel@$DIGEST_A pas
 assert_file_has "$FAKE_DOCKER_DIR/calls.log" "pull postgres@$DIGEST_B" "fresh: missing recorded database image pulled by digest"
 assert_file_has "$FAKE_DOCKER_DIR/calls.log" "tag postgres@$DIGEST_B postgres:16" "fresh: pulled database image tagged with its Compose name"
 assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "pull pasarguard/panel" "fresh: present recorded image not pulled again"
-assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "yq" "fresh: yq not used"
+assert_false "fresh: yq not used" grep -q '^yq ' "$FAKE_DOCKER_DIR/calls.log"
 assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "install_yq" "fresh: yq not installed"
 assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps postgresql" "fresh: only the database started"
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: database container from Compose returned to the caller"
@@ -421,6 +435,45 @@ fake_image_present "postgres@$DIGEST_B"
 prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
 assert_eq "$?" 1 "fresh: Compose digest pin different from the recorded digest refused"
 assert_false "fresh: digest mismatch installs no .env" test -e "$ENV_FILE"
+
+# A Compose image name that already points at another local image is moved, with a warning.
+reset_fake_docker
+make_fresh_stage "pasarguard/panel@$DIGEST_A" "$ID_A" "pasarguard/panel:latest"
+fake_image_present "pasarguard/panel@$DIGEST_A" "$ID_A"
+fake_image_present "pasarguard/panel:latest" "sha256:newer-panel"
+fake_image_present "postgres@$DIGEST_B" "$ID_B"
+fake_image_present "postgres:16" "$ID_B"
+prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 0 "fresh: existing local tag replaced"
+assert_file_has "$WORK_DIR/fresh.out" "Replacing the local image tag pasarguard/panel:latest (was sha256:newer-panel)" "fresh: replaced tag is reported with its previous image"
+assert_file_lacks "$WORK_DIR/fresh.out" "Replacing the local image tag postgres:16" "fresh: tag already on the recorded image is not reported"
+
+# Compose may pin repo:tag@digest; the digest decides.
+reset_fake_docker
+make_fresh_stage "pasarguard/panel@$DIGEST_A" "$ID_A" "pasarguard/panel:v1@$DIGEST_A"
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "postgres@$DIGEST_B"
+prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 0 "fresh: Compose repo:tag@digest pin equal to the recorded digest accepted"
+assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "tag pasarguard/panel@$DIGEST_A" "fresh: repo:tag@digest Compose image not retagged"
+
+# Two services share one Compose image name but ran different images: one tag cannot serve both.
+reset_fake_docker
+make_fresh_stage "pasarguard/panel@$DIGEST_A" "$ID_A" "pasarguard/panel:latest" "$ID_B"
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "postgres@$DIGEST_B"
+prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 1 "fresh: one image name recorded with two versions refused"
+assert_file_has "$WORK_DIR/fresh.out" "pasarguard and worker" "fresh: conflicting services are named"
+assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "tag " "fresh: version conflict tags nothing"
+
+# The same image name recorded with the same version for two services is fine.
+reset_fake_docker
+make_fresh_stage "pasarguard/panel@$DIGEST_A" "$ID_A" "pasarguard/panel:latest" "$ID_A"
+fake_image_present "pasarguard/panel@$DIGEST_A"
+fake_image_present "postgres@$DIGEST_B"
+prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
+assert_eq "$?" 0 "fresh: one image name shared by two services with the same version accepted"
 
 # A database without a healthcheck is accepted once it answers.
 reset_fake_docker

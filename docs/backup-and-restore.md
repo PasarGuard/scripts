@@ -40,7 +40,9 @@ sudo pasarguard restore /root/backup_20261004120000.zip --fresh
 After confirming, the script installs Docker/Compose if necessary, resolves the
 source image digests, checks destination storage and fetches missing images. It
 gives each recorded image the name the archived Compose file uses (for example
-`pasarguard/panel:latest`) and installs that Compose file unchanged. It then
+`pasarguard/panel:latest`) and installs that Compose file unchanged. Image names
+are shared by the whole host: if one already points at a different image, the
+script moves it to the recorded image and says so. It then
 starts **only the database** and waits until it is ready: healthy when the
 service has a Compose healthcheck, otherwise accepting TCP connections inside
 its container. It imports the backup, restores application files and settings,
