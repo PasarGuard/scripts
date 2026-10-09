@@ -38,10 +38,13 @@ sudo pasarguard restore /root/backup_20261004120000.zip --fresh
 ```
 
 After confirming, the script installs Docker/Compose if necessary, resolves the
-source image digests, checks destination storage, fetches missing images, and
-starts **only the database**. It waits for database health before importing. It
-restores application files and settings, then starts the original panel and its
-dependencies. For SQLite, it validates and restores the consistent snapshot
+source image digests, checks destination storage and fetches missing images. It
+gives each recorded image the name the archived Compose file uses (for example
+`pasarguard/panel:latest`) and installs that Compose file unchanged. It then
+starts **only the database** and waits until it is ready: healthy when the
+service has a Compose healthcheck, otherwise accepting TCP connections inside
+its container. It imports the backup, restores application files and settings,
+then starts the original panel and its dependencies. For SQLite, it validates and restores the consistent snapshot
 before starting any panel services.
 
 `--fresh` requires empty application/data directories, no existing containers in
@@ -159,7 +162,9 @@ ordinary restore against that installation.
 ## Old backups without recovery metadata
 
 `--check` accepts structurally valid legacy ZIP/tar.gz backups and reports that
-source image digests are unavailable. `--fresh` cannot infer the exact panel
+source image digests and the checksum inventory are unavailable. An archive that
+has `backup-runtime.tsv` but no `backup-files.sha256` is refused, because every
+backup that records recovery metadata also writes the inventory. `--fresh` cannot infer the exact panel
 version from a schema revision or a mutable image tag, so it refuses an archive
 without recovery metadata.
 
@@ -265,8 +270,10 @@ those dependencies, a fully offline recovery is not guaranteed.
   new IP. Re-establish automatic certificate renewal on the new host.
 - Confirm the off-server backup schedule is active. Cron/acme services and DNS
   records outside the application directories are not restored by the archive.
-- Make a new backup before upgrading. Fresh recovery keeps the source images
-  pinned; select a supported upgrade version deliberately afterwards.
+- Make a new backup before upgrading. Fresh recovery runs the source images
+  under the tags in your Compose file (for example `latest`), so the next
+  `pasarguard update` pulls the current images for those tags. Choose the
+  upgrade version deliberately.
 
 ## Troubleshooting
 
@@ -288,5 +295,5 @@ Redact passwords, tokens and full connection strings before sharing logs.
 | TimescaleDB conversion failed | Verify extension metadata, compatibility image and registry access; preserve the original dump |
 | Unknown collation / SQL syntax | Compare source engine/version and dump-client version; reproduce the source before attempting a supported migration |
 | Access denied / authentication failed | For ordinary restore, verify destination `.env` credentials against the live DB; changing `.env` does not change passwords in an existing DB volume |
-| Database never healthy / no disk space | Inspect DB container logs and available storage/staging capacity |
+| Database never ready / no disk space | Inspect DB container logs and available storage/staging capacity |
 | Panel migration failed after import | Check the panel image version and Alembic revision; recover the original panel version before upgrading |

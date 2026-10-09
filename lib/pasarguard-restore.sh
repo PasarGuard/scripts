@@ -710,10 +710,19 @@ backup_runtime_value() {
 
 # Validate every recorded payload before parsing credentials or touching Docker.
 # Legacy archives have no checksum inventory and retain structural validation.
+# Every archive with recovery metadata was written with an inventory, so a
+# missing one means the archive was altered.
 verify_backup_checksums() {
     local stage="$1" inventory="$1/backup-files.sha256"
     local line="" path="" digest="" count=0
-    [ -f "$inventory" ] || return 0
+    if [ ! -e "$inventory" ]; then
+        if [ -e "$stage/backup-runtime.tsv" ]; then
+            colorized_echo red "This backup has recovery metadata but no backup-files.sha256 inventory, so its payload cannot be verified."
+            return 1
+        fi
+        colorized_echo yellow "Legacy backup: no checksum inventory; only archive structure and database dump checks apply."
+        return 0
+    fi
     [ ! -L "$inventory" ] && [ -s "$inventory" ] || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         digest="${line:0:64}"
@@ -797,12 +806,63 @@ check_restore_database_version() {
     fi
 }
 
+# Ask the database server inside its container whether it accepts connections.
+# Probe over TCP: on an empty data directory the image entrypoint first runs a
+# temporary socket-only server for initialisation, which must not be mistaken
+# for the final server. A refused login still proves the server is up.
+recovery_database_responds() {
+    local container="$1" engine="$2" port="$3"
+    case "$engine" in
+        postgresql|timescaledb)
+            docker exec "$container" pg_isready -q -h 127.0.0.1 -p "$port"
+            ;;
+        mysql|mariadb)
+            # shellcheck disable=SC2016 # $1 expands inside the container shell.
+            docker exec "$container" sh -c 'if command -v mariadb-admin >/dev/null 2>&1; then exec mariadb-admin ping --silent -h 127.0.0.1 -P "$1"; fi; exec mysqladmin ping --silent -h 127.0.0.1 -P "$1"' sh "$port"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Wait until the fresh database can take the import. A Compose healthcheck is
+# authoritative when present; a service without one stays "running" while it
+# initialises, so probe the server itself on the connection URL port, then on
+# the engine's default port (the URL may name a published host port).
+wait_for_recovery_database() {
+    local container="$1" engine="$2" port="$3" log="$4"
+    local state="" waited=0 default_port=5432
+    case "$engine" in mysql|mariadb) default_port=3306 ;; esac
+    [ -n "$port" ] || port="$default_port"
+    while [ "$waited" -lt 180 ]; do
+        state=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>>"$log") || return 1
+        case "$state" in
+            healthy) return 0 ;;
+            running)
+                if recovery_database_responds "$container" "$engine" "$port" >>"$log" 2>&1; then return 0; fi
+                if [ "$port" != "$default_port" ] && recovery_database_responds "$container" "$engine" "$default_port" >>"$log" 2>&1; then
+                    return 0
+                fi
+                ;;
+            exited|dead|unhealthy) break ;;
+        esac
+        sleep 2
+        waited=$((waited + 2))
+    done
+    docker logs --tail 80 "$container" >>"$log" 2>&1 || true
+    colorized_echo red "Recovery database did not become ready. The panel has not been started. See the restore log."
+    return 1
+}
+
 # Prepare a fresh deployment using the source images. Refuse existing app/data,
 # containers and database storage; this mode is never an in-place downgrade.
-# The archived Compose file remains a template: yq changes only image fields,
-# preserving env_file references and interpolation for later .env edits.
+# The archived Compose file is installed unchanged. Each recorded source image
+# gets the name that file already uses (for example pasarguard/panel:latest),
+# so Compose runs the source versions now and `pasarguard update` can still
+# pull newer images later.
+# Arguments: stage, engine, log, database port from the connection URL, and the
+# name of the caller's variable that receives the database container ID.
 prepare_fresh_restore() {
-    local stage="$1" engine="$2" log="$3"
+    local stage="$1" engine="$2" log="$3" db_port="$4" container_var="$5"
     local recovery_compose="$stage/docker-compose.yml"
     [ "$(backup_runtime_value "$stage" format)" = 1 ] || {
         colorized_echo red "--fresh needs a backup with recovery metadata. For a legacy backup, install the original versions and run restore with its file path."
@@ -836,43 +896,55 @@ prepare_fresh_restore() {
         fi
     done
     [ -f "$recovery_compose" ] && [ ! -L "$recovery_compose" ] || return 1
-    if ! command -v yq >/dev/null 2>&1; then install_yq; fi
     if ! command -v jq >/dev/null 2>&1; then detect_os; install_package jq; fi
-    local services="" service="" digest="" image_id="" reference="" record=""
-    services=$(yq eval -r '.services | keys | .[]' "$recovery_compose") || return 1
-    [ -n "$services" ] || return 1
-    while IFS= read -r service; do
-        [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
-        record=$(awk -F '\t' -v service="$service" '$1 == "image" && $2 == service {print $3 "\t" $4; exit}' "$stage/backup-runtime.tsv")
-        IFS=$'\t' read -r digest image_id <<<"$record"
-        reference="$digest"
-        # docker save/load by image ID can retain the original image without
-        # RepoDigests. Use that local image when the digest is not available.
-        if [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] && \
-            ! docker image inspect "$reference" >/dev/null 2>&1 && docker image inspect "$image_id" >/dev/null 2>&1; then
-            reference="$image_id"
-        fi
-        if [[ ! "$reference" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]] && [[ ! "$reference" =~ ^sha256:[a-f0-9]{64}$ ]]; then
-            if [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] && docker image inspect "$image_id" >/dev/null 2>&1; then
-                reference="$image_id"
-            else
-                colorized_echo red "No reproducible image for service '$service'. Load its original Docker image or use ordinary restore with explicitly pinned source versions."
-                return 1
-            fi
-        fi
-        recovery_service="$service" recovery_image="$reference" yq eval -i \
-            '.services[strenv(recovery_service)].image = strenv(recovery_image)' "$recovery_compose" || return 1
-    done <<<"$services"
 
     local config="$stage/.pasarguard-recovery-compose.json"
-    # Resolve env_file references in staging, then translate relative bind
-    # paths for the storage checks against the eventual installation.
+    # Resolve env_file references and image interpolation in staging, then
+    # translate relative bind paths for the storage checks against the
+    # eventual installation.
     $COMPOSE --project-directory "$stage" --env-file "$stage/.env" -f "$recovery_compose" -p "$APP_NAME" \
         config --format json >"$config" 2>>"$log" || return 1
     jq --arg stage "$stage/" --arg app "$APP_DIR/" \
         '(.services[].volumes[]? | select(.type == "bind") | .source) |=
          (if startswith($stage) then $app + ltrimstr($stage) else . end)' \
         "$config" >"$config.tmp" && mv "$config.tmp" "$config" || return 1
+
+    # Pair each service's Compose image name with its recorded source image.
+    local services="" service="" image="" digest="" image_id="" reference="" record=""
+    local recovery_images=()
+    services=$(jq -r '.services | keys[]' "$config") || return 1
+    [ -n "$services" ] || return 1
+    while IFS= read -r service; do
+        [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+        image=$(jq -r --arg service "$service" '.services[$service].image // empty' "$config") || return 1
+        if [[ ! "$image" =~ ^[a-zA-Z0-9._:/@-]+$ ]]; then
+            colorized_echo red "Service '$service' has no usable image name in docker-compose.yml. --fresh supports image-based services only."
+            return 1
+        fi
+        record=$(awk -F '\t' -v service="$service" '$1 == "image" && $2 == service {print $3 "\t" $4; exit}' "$stage/backup-runtime.tsv")
+        IFS=$'\t' read -r digest image_id <<<"$record"
+        reference=""
+        [[ ! "$digest" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]] || reference="$digest"
+        # docker save/load by image ID can retain the original image without
+        # RepoDigests. Prefer that local image over a registry download.
+        if [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] && docker image inspect "$image_id" >/dev/null 2>&1 && \
+            { [ -z "$reference" ] || ! docker image inspect "$reference" >/dev/null 2>&1; }; then
+            reference="$image_id"
+        fi
+        if [ -z "$reference" ]; then
+            colorized_echo red "No reproducible image for service '$service'. Load its original Docker image or use ordinary restore with explicitly pinned source versions."
+            return 1
+        fi
+        # A name that is already a digest cannot be retagged; it must be the recorded one.
+        if [[ "$image" == *@sha256:* ]]; then
+            if [ "$image" != "$digest" ]; then
+                colorized_echo red "docker-compose.yml pins service '$service' to $image, but the backup recorded ${digest}. Restore the original Compose file or use ordinary restore."
+                return 1
+            fi
+            reference="$digest"
+        fi
+        recovery_images+=("$reference"$'\t'"$image")
+    done <<<"$services"
     local existing=""
     existing=$($COMPOSE --project-directory "$stage" --env-file "$stage/.env" -f "$recovery_compose" -p "$APP_NAME" ps -a -q 2>>"$log") || return 1
     [ -z "$existing" ] || { colorized_echo red "This Compose project already has containers. Use ordinary restore."; return 1; }
@@ -916,33 +988,39 @@ prepare_fresh_restore() {
         [ -n "$db_service" ] || { colorized_echo red "--fresh supports local database services in the official Compose layouts."; return 1; }
     fi
     colorized_echo blue "Fetching the recorded recovery images before provisioning the installation..."
-    while IFS= read -r reference; do
-        if [[ "$reference" == *@sha256:* ]] && ! docker image inspect "$reference" >/dev/null 2>&1; then
+    local entry=""
+    for entry in "${recovery_images[@]}"; do
+        reference="${entry%%$'\t'*}"
+        if ! docker image inspect "$reference" >/dev/null 2>&1; then
             docker pull "$reference" >>"$log" 2>&1 || {
                 colorized_echo red "Cannot fetch recovery image $reference. Check registry access, or docker load the original image and retry."
                 return 1
             }
         fi
-    done < <(jq -r '.services[].image' "$config")
+    done
+    for entry in "${recovery_images[@]}"; do
+        reference="${entry%%$'\t'*}"
+        image="${entry#*$'\t'}"
+        [[ "$image" != *@sha256:* ]] || continue
+        docker tag "$reference" "$image" >>"$log" 2>&1 || {
+            colorized_echo red "Cannot tag recovery image $reference as $image."
+            return 1
+        }
+        colorized_echo blue "Using recorded image $reference as $image"
+    done
     mkdir -p "$APP_DIR" "$DATA_DIR" || return 1
     install -m 600 "$stage/.env" "$ENV_FILE" || return 1
     install -m 600 "$recovery_compose" "$COMPOSE_FILE" || return 1
     if [ -n "$db_service" ]; then
         colorized_echo blue "Starting only the database; panel migrations stay stopped until the import finishes."
         $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" up -d --no-deps "$db_service" >>"$log" 2>&1 || return 1
-        local container="" state="" waited=0
+        local container=""
         container=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" ps -q "$db_service") || return 1
         [ -n "$container" ] || return 1
-        while [ "$waited" -lt 180 ]; do
-            state=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>>"$log") || return 1
-            [ "$state" != healthy ] || return 0
-            case "$state" in exited|dead|unhealthy) break ;; esac
-            sleep 2
-            waited=$((waited + 2))
-        done
-        docker logs --tail 80 "$container" >>"$log" 2>&1 || true
-        colorized_echo red "Recovery database did not become healthy. The panel has not been started. See the restore log."
-        return 1
+        wait_for_recovery_database "$container" "$engine" "$db_port" "$log" || return 1
+        # Hand the exact container to the import; name-based lookups can match
+        # an unrelated container on the host.
+        [ -z "$container_var" ] || printf -v "$container_var" '%s' "$container"
     fi
 }
 
@@ -1663,7 +1741,8 @@ restore_command() {
         if ! command -v docker >/dev/null 2>&1; then install_docker; fi
         ensure_docker_compose
         detect_compose
-        if ! prepare_fresh_restore "$temp_restore_dir" "$db_type" "$log_file"; then
+        local fresh_db_container=""
+        if ! prepare_fresh_restore "$temp_restore_dir" "$db_type" "$log_file" "$db_port" fresh_db_container; then
             cleanup_and_exit_restore_error 1
         fi
         current_mysql_root_password="$MYSQL_ROOT_PASSWORD"
@@ -1676,7 +1755,11 @@ restore_command() {
                 colorized_echo red "--fresh requires a local database from the official Compose templates."
                 cleanup_and_exit_restore_error 1
             fi
-            container_name=$(find_container "$db_type")
+            container_name="$fresh_db_container"
+            if [ -z "$container_name" ]; then
+                colorized_echo red "The recovery database container was not identified. The panel has not been started."
+                cleanup_and_exit_restore_error 1
+            fi
         fi
     fi
 
