@@ -853,6 +853,10 @@ wait_for_recovery_database() {
     return 1
 }
 
+# Left in APP_DIR by a --fresh run that provisioned the installation but did not
+# finish; holds the SHA256 of that backup's checksum inventory.
+FRESH_RESTORE_MARKER=".pasarguard-fresh-restore"
+
 # Prepare a fresh deployment using the source images. Refuse existing app/data,
 # containers and database storage; this mode is never an in-place downgrade.
 # The archived Compose file is installed unchanged. Each recorded source image
@@ -1028,6 +1032,10 @@ prepare_fresh_restore() {
     mkdir -p "$APP_DIR" "$DATA_DIR" || return 1
     install -m 600 "$stage/.env" "$ENV_FILE" || return 1
     install -m 600 "$recovery_compose" "$COMPOSE_FILE" || return 1
+    # From here on the directories are no longer empty. Record which backup
+    # provisioned them, so running the same --fresh command again continues
+    # this attempt; a successful restore removes the marker.
+    (umask 077 && sha256sum <"$stage/backup-files.sha256" | awk '{print $1}' >"$APP_DIR/$FRESH_RESTORE_MARKER") || return 1
     if [ -n "$db_service" ]; then
         colorized_echo blue "Starting only the database; panel migrations stay stopped until the import finishes."
         $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" up -d --no-deps "$db_service" >>"$log" 2>&1 || return 1
@@ -1086,6 +1094,17 @@ restore_command() {
         fi
     fi
     colorized_echo blue "Starting restore process..."
+
+    # A previous --fresh run provisioned this installation and then failed.
+    # The same command continues it as an ordinary restore (checked below to be
+    # the same backup) instead of refusing the now non-empty directories.
+    local fresh_resume=false
+    if [ "$fresh_restore" = true ] && [ "$check_only" = false ] && \
+        [ -f "$APP_DIR/$FRESH_RESTORE_MARKER" ] && [ ! -L "$APP_DIR/$FRESH_RESTORE_MARKER" ]; then
+        colorized_echo yellow "A previous --fresh run stopped after provisioning $APP_DIR. Continuing it as an ordinary restore; the database it created will be overwritten."
+        fresh_restore=false
+        fresh_resume=true
+    fi
 
     if [ "$fresh_restore" = false ] && [ "$check_only" = false ]; then
         if ! is_pasarguard_installed || [ ! -f "$COMPOSE_FILE" ]; then
@@ -1189,7 +1208,7 @@ restore_command() {
     # application services if they were shut down, and terminate with the error code.
     cleanup_and_exit_restore_error() {
         local code="${1:-1}"
-        if [ "$services_stopped" = true ] && [ "$fresh_restore" = false ]; then
+        if [ "$services_stopped" = true ] && [ "$fresh_restore" = false ] && [ "$fresh_resume" = false ]; then
             if [[ "$db_type" == "sqlite" ]]; then
                 up_pasarguard || echo "Failed to restart pasarguard after SQLite restore failure" >>"$log_file"
             else
@@ -1495,6 +1514,17 @@ restore_command() {
         cleanup_and_exit_restore_error 1
     fi
     if ! print_backup_runtime "$temp_restore_dir"; then cleanup_and_exit_restore_error 1; fi
+    if [ "$fresh_resume" = true ]; then
+        local previous_backup="" this_backup=""
+        previous_backup=$(cat "$APP_DIR/$FRESH_RESTORE_MARKER" 2>/dev/null) || previous_backup=""
+        if [ -f "$temp_restore_dir/backup-files.sha256" ]; then
+            this_backup=$(sha256sum <"$temp_restore_dir/backup-files.sha256" | awk '{print $1}')
+        fi
+        if [ -z "$this_backup" ] || [ "$previous_backup" != "$this_backup" ]; then
+            colorized_echo red "The unfinished --fresh run in $APP_DIR used a different backup. Retry with that backup, or restore this one without --fresh."
+            cleanup_and_exit_restore_error 1
+        fi
+    fi
 
     # Load environment variables from extracted .env
     colorized_echo blue "Loading configuration from backup..."
@@ -2239,7 +2269,7 @@ restore_command() {
         if ! rsync -av --exclude 'pasarguard_data' --exclude 'db_backup.sql' --exclude 'db_backup.sqlite' \
             --exclude 'db_backup.timescaledb-version' --exclude 'pg_dump' \
             --exclude 'backup-runtime.tsv' --exclude 'backup-files.sha256' --exclude '.pasarguard-recovery-compose.json' \
-            --exclude '.pasarguard-destination-compose.yml' --exclude 'pasarguard_ts_compat.*' \
+            --exclude '.pasarguard-destination-compose.yml' --exclude "$FRESH_RESTORE_MARKER" --exclude 'pasarguard_ts_compat.*' \
             --exclude '*_combined.zip' --exclude 'pasarguard_env_cleaned' \
             --exclude 'pasarguard_restore_error.log' --exclude "$sqlite_basename" \
             "$temp_restore_dir/" "$APP_DIR/" >>"$log_file" 2>&1; then
@@ -2292,6 +2322,7 @@ restore_command() {
     fi
     harden_secret_file "$ENV_FILE"
     harden_secret_file "$COMPOSE_FILE"
+    rm -f "$APP_DIR/$FRESH_RESTORE_MARKER"
     rm -rf "$temp_restore_dir"
     colorized_echo green "Restore completed successfully!"
     colorized_echo green "PasarGuard services have been started. Check panel login, subscriptions and node connections before upgrading."

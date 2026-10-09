@@ -158,8 +158,10 @@ restores can finish earlier databases before a later one fails. Take a separate
 current backup before replacing an existing installation. Fresh recovery leaves
 application services stopped on failure; it keeps provisioned storage for diagnosis
 rather than destroying it or claiming automatic rollback. Once a failed fresh
-recovery has provisioned Compose/configuration, diagnose the log and retry with
-ordinary restore against that installation.
+recovery has provisioned Compose/configuration, diagnose the log, fix the cause
+and run the same `--fresh` command again: it continues the earlier attempt as an
+ordinary restore of that installation (it refuses a different backup). An
+ordinary restore of the same backup does the same.
 
 ## Old backups without recovery metadata
 

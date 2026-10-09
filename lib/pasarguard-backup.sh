@@ -1859,6 +1859,7 @@ backup_command() {
             --exclude 'backup-files.sha256'
             --exclude '.pasarguard-recovery-compose.json'
             --exclude '.pasarguard-destination-compose.yml'
+            --exclude '.pasarguard-fresh-restore'
             --exclude 'pasarguard_ts_compat.*'
             --exclude '*_combined.zip'
             --exclude 'pasarguard_env_cleaned'
