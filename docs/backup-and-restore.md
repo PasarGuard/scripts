@@ -145,14 +145,19 @@ still applies. Use `pasarguard restore --help` for the options.
 
 Ordinary restore preserves the destination Compose file for server databases
 and the provisioned destination database credentials/connection URL. It validates
-payloads before stopping application writers. When source-version information is
-available, it refuses MySQL-to-MariaDB/MariaDB-to-MySQL imports and database
+payloads before stopping application writers. It refuses a backup from another
+database engine family (for example a SQLite backup onto a PostgreSQL
+installation) before changing anything. When source-version information is
+available, it also refuses MySQL-to-MariaDB/MariaDB-to-MySQL imports and database
 version downgrades before executing the import. Restore to the original engine
 and version when diagnosing an old backup. An allowed version comparison is not
 a guarantee that every vendor-specific SQL statement is compatible.
 
-Application/data files are saved before replacement, and SQLite receives a
-pre-restore safety snapshot. Server SQL imports are **not transactional recovery
+Application/data files are saved before replacement (the restore stops if that
+copy fails; database storage and Xray binaries inside the data directory are
+left in place rather than copied), and SQLite receives a pre-restore safety
+snapshot. Archives containing symbolic or hard links are refused before
+extraction. Server SQL imports are **not transactional recovery
 of the whole host**: an import can fail after changing data, and multi-database
 restores can finish earlier databases before a later one fails. Take a separate
 current backup before replacing an existing installation. Fresh recovery leaves
