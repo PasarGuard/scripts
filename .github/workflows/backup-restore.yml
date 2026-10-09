@@ -106,6 +106,8 @@ jobs:
             healthcheck: no-healthcheck
           - database: postgresql
             healthcheck: no-healthcheck
+          - database: postgresql
+            healthcheck: failing-healthcheck
 
     steps:
       - name: Checkout

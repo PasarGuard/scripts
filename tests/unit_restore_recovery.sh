@@ -255,6 +255,38 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
     make_sqlite_archive noinventory drop
     out=$(run_restore "$WORK_DIR/archives/noinventory.zip" --check 2>&1)
     assert_eq "$?" 1 "restore --check: recovery metadata without inventory rejected"
+
+    # A --fresh run that stopped after provisioning is continued by the same command.
+    ensure_docker_service_running() { :; }
+    make_sqlite_archive resume keep
+    mkdir -p "$APP_DIR"
+    unzip -p "$WORK_DIR/archives/resume.zip" .env >"$ENV_FILE"
+    unzip -p "$WORK_DIR/archives/resume.zip" docker-compose.yml >"$COMPOSE_FILE"
+    unzip -p "$WORK_DIR/archives/resume.zip" backup-files.sha256 | sha256sum | awk '{print $1}' >"$APP_DIR/.pasarguard-fresh-restore"
+    : >"$FAKE_DOCKER_DIR/calls.log"
+    out=$(run_restore "$WORK_DIR/archives/resume.zip" --fresh --yes 2>&1)
+    rc=$?
+    assert_eq "$rc" 0 "fresh retry: same command continues the unfinished run"
+    case "$out" in *"Continuing it as an ordinary restore"*) pass "fresh retry: continuation announced" ;; *) fail "fresh retry: continuation announced" ;; esac
+    assert_true "fresh retry: database restored" test -s "$DATA_DIR/db.sqlite3"
+    assert_true "fresh retry: data restored" test -f "$DATA_DIR/cert.pem"
+    assert_false "fresh retry: marker removed after success" test -e "$APP_DIR/.pasarguard-fresh-restore"
+    assert_true "fresh retry: services started at the end" grep -q ' up -d' "$FAKE_DOCKER_DIR/calls.log"
+
+    # The marker of another backup is not continued.
+    rm -rf "$APP_DIR" "$DATA_DIR"
+    mkdir -p "$APP_DIR"
+    unzip -p "$WORK_DIR/archives/resume.zip" .env >"$ENV_FILE"
+    unzip -p "$WORK_DIR/archives/resume.zip" docker-compose.yml >"$COMPOSE_FILE"
+    printf '%s\n' "$(printf '0%.0s' {1..64})" >"$APP_DIR/.pasarguard-fresh-restore"
+    : >"$FAKE_DOCKER_DIR/calls.log"
+    out=$(run_restore "$WORK_DIR/archives/resume.zip" --fresh --yes 2>&1)
+    rc=$?
+    assert_eq "$rc" 1 "fresh retry: marker from another backup refused"
+    case "$out" in *"used a different backup"*) pass "fresh retry: other backup explained" ;; *) fail "fresh retry: other backup explained" ;; esac
+    assert_false "fresh retry: refused retry stops no services" grep -qE ' (stop|down)( |$)' "$FAKE_DOCKER_DIR/calls.log"
+    assert_false "fresh retry: refused retry restores no data" test -e "$DATA_DIR/cert.pem"
+    rm -rf "$APP_DIR" "$DATA_DIR"
     rm -rf "$WORK_DIR/archives" "$WORK_DIR/edit" "$APP_DIR" "$DATA_DIR"
 else
     echo "(skipped restore --check cases: sqlite3/zip/unzip unavailable)"
@@ -363,6 +395,7 @@ make_fresh_stage() {
         '{services: ({pasarguard: {image: $panel, volumes: [{type: "bind", source: $data, target: "/var/lib/pasarguard"}]},
                       postgresql: {image: "postgres:16"}} + (if $worker == "" then {} else {worker: {image: $panel}} end)),
           volumes: {}}' >"$FAKE_DOCKER_DIR/config.json"
+    write_backup_checksums "$stage"
 }
 
 reset_fake_docker
@@ -385,6 +418,7 @@ assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "install_yq" "fresh: yq not insta
 assert_file_has "$FAKE_DOCKER_DIR/calls.log" "up -d --no-deps postgresql" "fresh: only the database started"
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: database container from Compose returned to the caller"
 assert_eq "$(stat -c %a "$ENV_FILE")" 600 "fresh: .env installed 0600"
+assert_eq "$(cat "$APP_DIR/.pasarguard-fresh-restore" 2>/dev/null)" "$(sha256sum <"$stage/backup-files.sha256" | awk '{print $1}')" "fresh: provisioned installation marked with the backup's inventory hash"
 
 # Offline: no registry digest was recorded, the original image ID is loaded.
 reset_fake_docker
@@ -415,6 +449,7 @@ prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_co
 assert_eq "$?" 1 "fresh: unreproducible image refused"
 assert_file_has "$WORK_DIR/fresh.out" "No reproducible image for service 'pasarguard'" "fresh: refusal names the service"
 assert_false "fresh: refusal installs no .env" test -e "$ENV_FILE"
+assert_false "fresh: refusal leaves no retry marker" test -e "$APP_DIR/.pasarguard-fresh-restore"
 assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" "tag " "fresh: refusal tags nothing"
 assert_file_lacks "$FAKE_DOCKER_DIR/calls.log" " up " "fresh: refusal starts nothing"
 
@@ -486,6 +521,16 @@ fresh_db_container=""
 prepare_fresh_restore "$stage" postgresql "$WORK_DIR/fresh.log" 5432 fresh_db_container >"$WORK_DIR/fresh.out" 2>&1
 assert_eq "$?" 0 "fresh: database without healthcheck accepted once it answers"
 assert_eq "$fresh_db_container" "cid-postgresql" "fresh: probed database container returned to the caller"
+
+# -----------------------------------------------------------------------
+# install_pasarguard drops a retry marker left by an unfinished --fresh
+# -----------------------------------------------------------------------
+rm -rf "$APP_DIR" "$DATA_DIR"
+mkdir -p "$APP_DIR"
+printf '%s\n' "$(printf '0%.0s' {1..64})" >"$APP_DIR/.pasarguard-fresh-restore"
+(install_pasarguard latest 1 sqlite) >/dev/null 2>&1
+assert_false "install: retry marker from an unfinished --fresh removed" test -e "$APP_DIR/.pasarguard-fresh-restore"
+rm -rf "$APP_DIR" "$DATA_DIR"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
