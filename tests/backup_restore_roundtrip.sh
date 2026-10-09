@@ -613,14 +613,14 @@ verify_backup_archive_contents() {
     fi
 
     if [ "$DB_TYPE" = "sqlite" ]; then
-        expected_files=$'.env\n'"$sqlite_basename"$'\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
+        expected_files=$'.env\nbackup-files.sha256\nbackup-runtime.tsv\n'"$sqlite_basename"$'\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
     elif [ "$DB_TYPE" = "postgresql" ] || [ "$DB_TYPE" = "timescaledb" ]; then
         # PostgreSQL/TimescaleDB back up every user database under pg_dump/
         # (globals + one db-NNN.sql per database + a manifest). The CI fixture
         # has exactly one user database (appdb), so it lands in db-001.sql.
-        expected_files=$'.env\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt\npg_dump/\npg_dump/db-001.sql\npg_dump/globals.sql\npg_dump/manifest.tsv'
+        expected_files=$'.env\nbackup-files.sha256\nbackup-runtime.tsv\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt\npg_dump/\npg_dump/db-001.sql\npg_dump/globals.sql\npg_dump/manifest.tsv'
     else
-        expected_files=$'.env\ndb_backup.sql\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
+        expected_files=$'.env\nbackup-files.sha256\nbackup-runtime.tsv\ndb_backup.sql\ndocker-compose.yml\npasarguard_data/\npasarguard_data/payload.bin\npasarguard_data/sentinel.txt'
     fi
 
     assert_zip_contains_exact_files "$archive_to_verify" "$expected_files"
