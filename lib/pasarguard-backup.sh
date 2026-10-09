@@ -1127,8 +1127,11 @@ write_timescaledb_single_dump_version() {
 # containers. A tag such as latest/lts is not a reproducible recovery image.
 # This is data, never a shell file to source. Missing pins keep ordinary backups
 # usable, but fresh-server recovery must refuse to guess an image version.
+# Arguments: stage, engine, database container, log, SQLite database path, and
+# the database user, password and name used to read the schema revision.
 write_backup_runtime() {
     local stage="$1" engine="$2" database_container="$3" log="$4"
+    local sqlite_file="$5" db_user="$6" db_password="$7" db_name="$8"
     local runtime="$stage/backup-runtime.tsv"
     local server_version="unknown" dump_tool_version="unknown" revision="unknown" dump=""
     local services="" service="" cid="" image_id="" digest="" pins=0
@@ -1143,7 +1146,9 @@ write_backup_runtime() {
         dump="$stage/pg_dump/db-001.sql"
     fi
     if [ "$engine" = sqlite ]; then
-        server_version=$(sqlite3 --version 2>>"$log" | awk '{print $1}') || server_version="unknown"
+        # The panel's own SQLite library version is not visible from here; record
+        # the host sqlite3 that made the snapshot instead.
+        dump_tool_version=$(sqlite3 --version 2>>"$log" | awk '{print "sqlite3 " $1}') || dump_tool_version="unknown"
         # The protected snapshot is immutable. A failed metadata query against
         # a WAL-mode database must not create new WAL/SHM files in the archive.
         local snapshot_uri="$stage/$(basename "$sqlite_file")"
@@ -1153,7 +1158,11 @@ write_backup_runtime() {
         revision=$(sqlite3 "file:${snapshot_uri}?immutable=1" 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
     elif [ -n "$dump" ]; then
         server_version=$(sed -n -E 's/^-- (Server version[[:space:]]+|Dumped from database version )//p' "$dump" | head -n 1)
-        dump_tool_version=$(sed -n -E 's/^-- Dumped by pg_dump version //p; s/^-- (MySQL|MariaDB) dump .*Distrib[[:space:]]+//p' "$dump" | head -n 1)
+        # Headers: "-- MySQL dump 10.13  Distrib 8.0.43, for ...", MariaDB up to 11
+        # the same with "Distrib", MariaDB 12 "-- MariaDB dump 10.19-12.3.2-MariaDB, for ...".
+        dump_tool_version=$(sed -n -E 's/^-- Dumped by pg_dump version //p
+            s/^-- (MySQL|MariaDB) dump .*Distrib[[:space:]]+([^,]+),.*/\2/p
+            s/^-- MariaDB dump [0-9.]+-([^,[:space:]]+),.*/\1/p' "$dump" | head -n 1)
         if [[ "$server_version" == *MariaDB* ]]; then engine="mariadb"; fi
         if [ -n "$database_container" ] && [ -n "$db_user" ] && [ -n "$db_name" ]; then
             case "$engine" in
@@ -1185,8 +1194,9 @@ write_backup_runtime() {
     services=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>>"$log") || services=""
     while IFS= read -r service; do
         [ -n "$service" ] || continue
-        [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
-        cid=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" ps -a -q "$service" 2>>"$log" | head -n 1) || cid=""
+        # Compose service names: letters, digits, ".", "_" and "-".
+        [[ "$service" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
+        cid=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" ps -a -q -- "$service" 2>>"$log" | head -n 1) || cid=""
         image_id=""
         digest=""
         if [ -n "$cid" ]; then
@@ -1205,13 +1215,21 @@ write_backup_runtime() {
     fi
 }
 
-# Cover the entire archive payload, including settings and version metadata.
+# Cover the archive payload, including settings and version metadata.
 # Checksums detect corruption; they do not authenticate an untrusted archive.
+# A file whose name holds a backslash, CR or LF cannot be written as one plain
+# inventory line; it is reported and left to the archive's own CRC instead of
+# failing the whole backup.
 write_backup_checksums() (
     cd "$1" || exit 1
     local payload="" checksum=""
     while IFS= read -r -d '' payload; do
-        case "$payload" in *$'\n'* | *$'\r'* | *\\*) exit 1 ;; esac
+        case "$payload" in
+            *$'\n'* | *$'\r'* | *\\*)
+                printf 'Warning: file not in the checksum inventory (unsupported characters in its name): %q\n' "$payload" >&2
+                continue
+                ;;
+        esac
         checksum=$(sha256sum -- "$payload") || exit 1
         printf '%s\n' "$checksum"
     done < <(find . -type f ! -path './backup-files.sha256' -print0 | sort -z)
@@ -1955,7 +1973,8 @@ backup_command() {
     fi
 
     if [ ${#error_messages[@]} -eq 0 ]; then
-        if ! write_backup_runtime "$temp_dir" "$db_type" "$container_name" "$log_file" || \
+        if ! write_backup_runtime "$temp_dir" "$db_type" "$container_name" "$log_file" \
+            "$sqlite_file" "$db_user" "$db_password" "$db_name" || \
             ! write_backup_checksums "$temp_dir"; then
             error_messages+=("Failed to record recovery versions or payload checksums.")
         fi

@@ -916,7 +916,7 @@ prepare_fresh_restore() {
     services=$(jq -r '.services | keys[]' "$config") || return 1
     [ -n "$services" ] || return 1
     while IFS= read -r service; do
-        [[ "$service" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || return 1
+        [[ "$service" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
         image=$(jq -r --arg service "$service" '.services[$service].image // empty' "$config") || return 1
         if [[ ! "$image" =~ ^[a-zA-Z0-9._:/@-]+$ ]]; then
             colorized_echo red "Service '$service' has no usable image name in docker-compose.yml. --fresh supports image-based services only."
@@ -2249,6 +2249,10 @@ restore_command() {
         else
             colorized_echo green "App directory files restored."
         fi
+        # The archived .env holds secrets: restrict it now, not only after the
+        # services start, so a later failure cannot leave it readable.
+        if [ -f "$ENV_FILE" ]; then harden_secret_file "$ENV_FILE"; fi
+        if [ -f "$COMPOSE_FILE" ]; then harden_secret_file "$COMPOSE_FILE"; fi
     fi
 
     # Keep the destination database identity. Archived credentials describe the

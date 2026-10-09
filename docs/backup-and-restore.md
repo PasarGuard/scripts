@@ -74,9 +74,9 @@ the recovery time; recovery cannot be guaranteed to take a fixed number of minut
 | `.env` | Application settings and secrets, including database connection fields |
 | `docker-compose.yml` | Source deployment configuration |
 | `pasarguard_data/` | Persistent application files, certificates and themes; database data directories and downloaded Xray binaries are excluded |
-| SQLite snapshot or SQL dumps | Consistent database backup, not a copy of a running database data directory |
+| SQLite snapshot or SQL dumps | A backup made with the database's own tools, not a copy of a running database data directory |
 | `backup-runtime.tsv` | Format version, UTC creation time, source engine/server version, schema revision when available, source project/paths, and actual container image digests/image IDs |
-| `backup-files.sha256` | SHA256 inventory of regular payload files, including configuration and recovery metadata |
+| `backup-files.sha256` | SHA256 inventory of regular payload files, including configuration and recovery metadata (a file whose name contains a backslash, CR or LF is left out and reported during the backup) |
 
 Image references come from the actual containers, including stopped containers,
 not from mutable `latest` or `lts` tags in the Compose template. If a service has
@@ -89,7 +89,7 @@ archive. Restore backups from your own trusted storage. ZIP archives are **not
 encrypted by this script** and contain passwords/private keys. Store off-server
 copies with appropriate access control or encryption. Archives and split parts
 are created with private permissions; restored `.env` and Compose files are
-restricted to their owner.
+restricted to their owner as soon as they are restored.
 
 ## Create and keep recoverable backups
 
@@ -106,7 +106,9 @@ the same server does not protect against complete server loss.
 SQLite uses the online `.backup` API and validates its snapshot with
 `PRAGMA quick_check`. WAL/SHM/journal files from the running database are not the
 restore authority. MySQL/MariaDB use the matching dump utility and verify its
-completion marker. PostgreSQL/TimescaleDB attempt to dump cluster globals and
+completion marker. These dumps use the utility's default table locks rather than
+one transaction snapshot, so panel writes wait while the dump runs.
+PostgreSQL/TimescaleDB attempt to dump cluster globals and
 all user databases with per-database manifests; if that is unavailable, the
 script falls back to the configured database. A fallback is **not** a backup of
 unrelated databases on the server. Each PostgreSQL dump is internally consistent;
