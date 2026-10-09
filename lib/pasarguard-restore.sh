@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 
+# True when the archive lists a symbolic or hard link member (or cannot be
+# listed). Checked before extraction; backups never contain links.
+archive_has_links() {
+    local archive="$1" kind="$2" listing=""
+    case "$kind" in
+        zip) listing=$(unzip -Z "$archive" 2>/dev/null) || return 0 ;;
+        tar) listing=$(tar -tvzf "$archive" 2>/dev/null) || return 0 ;;
+        *) return 0 ;;
+    esac
+    grep -q '^[lh]' <<<"$listing"
+}
+
 # Reject archives whose members would escape the extraction directory — an
 # absolute path or a '..' component (zip-slip / tar path traversal). Backups
 # are later rsynced into $DATA_DIR/$APP_DIR as root, so a tampered archive must
@@ -701,6 +713,24 @@ pg_restore_all_user_databases() {
     [ "$total" -gt 0 ] && [ "$ok" -eq "$total" ]
 }
 
+# Copy DATA_DIR aside before a restore replaces it. Database storage and Xray
+# binaries are skipped: the restore leaves them in place.
+save_data_dir_safety_copy() {
+    local destination="$1" log="$2"
+    rsync -a "${PASARGUARD_DATA_DIR_EXCLUDES[@]}" "$DATA_DIR/" "$destination/" 2>>"$log"
+}
+
+# Map an engine name or a SQLAlchemy URL to its engine family: sqlite, mysql
+# (MySQL and MariaDB) or postgresql (PostgreSQL and TimescaleDB). Prints nothing
+# for anything else.
+database_engine_family() {
+    case "$1" in
+        sqlite*) echo sqlite ;;
+        mysql* | mariadb*) echo mysql ;;
+        postgresql* | timescaledb*) echo postgresql ;;
+    esac
+}
+
 # Read recovery metadata as data, without evaluating archived shell input.
 backup_runtime_value() {
     local stage="$1" key="$2"
@@ -764,6 +794,8 @@ print_backup_runtime() {
 # Reject cross-engine imports and version downgrades before the first SQL
 # statement. Upgrades within one engine still use its normal logical restore
 # path (and the existing TimescaleDB compatibility conversion).
+# Returns 0 when compatible, 1 when refused (with the reason printed) and 2
+# when the destination version could not be read.
 check_restore_database_version() {
     local stage="$1" engine="$2" container="$3" log="$4"
     local source_version="" target_version="" client="mysql" user="" password=""
@@ -777,13 +809,22 @@ check_restore_database_version() {
     case "$engine" in
         mysql|mariadb)
             if docker exec "$container" mariadb --version >/dev/null 2>&1; then client=mariadb; fi
-            if [ -n "$current_mysql_root_password" ]; then
-                user=root; password="$current_mysql_root_password"
-            else
-                user="${current_db_user:-$db_user}"; password="${current_db_password:-$db_password}"
-            fi
-            target_version=$(docker exec -e MYSQL_PWD="$password" "$container" "$client" \
-                -u "$user" -N -s -e 'SELECT VERSION();' 2>>"$log") || return 1
+            # Same credential order as the import: current root, backup root,
+            # backup app user, current app user.
+            local credentials=() i=0
+            [ -z "${current_mysql_root_password:-}" ] || credentials+=(root "$current_mysql_root_password")
+            [ -z "${MYSQL_ROOT_PASSWORD:-}" ] || credentials+=(root "$MYSQL_ROOT_PASSWORD")
+            [ -z "${db_user:-}" ] || credentials+=("$db_user" "${db_password:-}")
+            [ -z "${current_db_user:-}" ] || credentials+=("$current_db_user" "${current_db_password:-}")
+            for ((i = 0; i < ${#credentials[@]}; i += 2)); do
+                user="${credentials[i]}"; password="${credentials[i + 1]}"
+                if target_version=$(docker exec -e MYSQL_PWD="$password" "$container" "$client" \
+                    -u "$user" -N -s -e 'SELECT VERSION();' 2>>"$log"); then
+                    break
+                fi
+                target_version=""
+            done
+            [ -n "$target_version" ] || return 2
             if { [[ "$source_version" == *MariaDB* ]] && [[ "$target_version" != *MariaDB* ]]; } || \
                 { [[ "$source_version" != *MariaDB* ]] && [[ "$target_version" == *MariaDB* ]]; }; then
                 colorized_echo red "Backup engine ($source_version) differs from destination ($target_version). Restore with the original engine, or use --fresh on an empty server."
@@ -793,11 +834,11 @@ check_restore_database_version() {
         postgresql|timescaledb)
             user="${current_db_user:-${db_user:-postgres}}"; password="${current_db_password:-$db_password}"
             target_version=$(docker exec -e PGPASSWORD="$password" "$container" psql -X -U "$user" -d postgres -At \
-                -c 'SHOW server_version;' 2>>"$log") || return 1
+                -c 'SHOW server_version;' 2>>"$log") || return 2
             ;;
         *) return 0 ;;
     esac
-    [[ "$target_version" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    [[ "$target_version" =~ ^([0-9]+)\.([0-9]+) ]] || return 2
     local target_major="${BASH_REMATCH[1]}" target_minor="${BASH_REMATCH[2]}"
     if [ "$source_major" -gt "$target_major" ] || \
         { [[ "$engine" =~ ^(mysql|mariadb)$ ]] && [ "$source_major" -eq "$target_major" ] && [ "$source_minor" -gt "$target_minor" ]; }; then
@@ -1457,6 +1498,12 @@ restore_command() {
             rm -rf "$temp_restore_dir"
             exit 1
         fi
+        if archive_has_links "$archive_to_extract" zip; then
+            colorized_echo red "ERROR: The backup archive contains symbolic or hard links. Repackage it with regular files before restoring."
+            echo "Link members detected in $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
         if ! unzip -oq "$archive_to_extract" -d "$temp_restore_dir" 2>>"$log_file"; then
             colorized_echo red "Failed to extract backup file."
             echo "Failed to extract $archive_to_extract" >>"$log_file"
@@ -1473,6 +1520,12 @@ restore_command() {
         if ! archive_entries_are_safe "$archive_to_extract" tar; then
             colorized_echo red "ERROR: The backup archive contains unsafe paths (absolute or '..'). Refusing to extract."
             echo "Unsafe archive paths detected in $archive_to_extract" >>"$log_file"
+            rm -rf "$temp_restore_dir"
+            exit 1
+        fi
+        if archive_has_links "$archive_to_extract" tar; then
+            colorized_echo red "ERROR: The backup archive contains symbolic or hard links. Repackage it with regular files before restoring."
+            echo "Link members detected in $archive_to_extract" >>"$log_file"
             rm -rf "$temp_restore_dir"
             exit 1
         fi
@@ -1719,6 +1772,17 @@ restore_command() {
         colorized_echo green "Backup validation passed. No services or destination data were changed. This check does not perform a database import."
         return 0
     fi
+    # Ordinary restore keeps the destination's database server. A backup from
+    # another engine family would replace its configuration instead (for SQLite,
+    # the restored .env and Compose file drop the database service).
+    if [ "$fresh_restore" = false ] && [ -n "$current_sqlalchemy_url" ]; then
+        local destination_engine=""
+        destination_engine=$(database_engine_family "$current_sqlalchemy_url")
+        if [ -n "$destination_engine" ] && [ "$(database_engine_family "$db_type")" != "$destination_engine" ]; then
+            colorized_echo red "Backup engine ($db_type) differs from destination ($destination_engine). Restore with the original engine, or use --fresh on an empty server."
+            cleanup_and_exit_restore_error 1
+        fi
+    fi
     if [ "$fresh_restore" = true ]; then
         if [ "$db_type" != sqlite ] && ! is_local_db_host "$db_host"; then
             colorized_echo red "--fresh requires a local database from the official Compose templates."
@@ -1785,10 +1849,12 @@ restore_command() {
             colorized_echo red "Destination database could not be started for compatibility checks."
             cleanup_and_exit_restore_error 1
         fi
-        if ! check_restore_database_version "$temp_restore_dir" "$db_type" "$container_name" "$log_file"; then
-            colorized_echo red "Could not validate database version compatibility. Check destination credentials and the restore log."
-            cleanup_and_exit_restore_error 1
+        local version_check=0
+        check_restore_database_version "$temp_restore_dir" "$db_type" "$container_name" "$log_file" || version_check=$?
+        if [ "$version_check" -eq 2 ]; then
+            colorized_echo red "Could not read the destination database version. Check destination credentials and the restore log."
         fi
+        [ "$version_check" -eq 0 ] || cleanup_and_exit_restore_error 1
     fi
 
     # Stop pasarguard services before restore for clean state
@@ -2178,11 +2244,19 @@ restore_command() {
             install_package rsync
         fi
         mkdir -p "$DATA_DIR"
+        # rsync --delete below relies on these excludes to keep database storage.
+        if [ "${#PASARGUARD_DATA_DIR_EXCLUDES[@]}" -eq 0 ]; then
+            colorized_echo red "The data directory exclude list is missing (mismatched script libraries). Refusing to sync the data directory."
+            cleanup_and_exit_restore_error 1
+        fi
         if [ "$fresh_restore" = false ] && [ "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
             colorized_echo blue "Backing up current data directory before restore..."
-            cp -r "$DATA_DIR" "$DATA_DIR.backup.$(date +%Y%m%d%H%M%S)" 2>>"$log_file" || true
+            if ! save_data_dir_safety_copy "$DATA_DIR.backup.$(date +%Y%m%d%H%M%S)" "$log_file"; then
+                colorized_echo red "Failed to save the current data directory before replacement."
+                cleanup_and_exit_restore_error 1
+            fi
         fi
-        if ! rsync -a --delete --exclude mysql --exclude mariadb --exclude postgresql --exclude timescaledb "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
+        if ! rsync -a --delete "${PASARGUARD_DATA_DIR_EXCLUDES[@]}" "$extracted_data_dir/" "$DATA_DIR/" 2>>"$log_file"; then
             colorized_echo red "Failed to restore data directory."
             echo "Failed to restore data directory from $extracted_data_dir to $DATA_DIR" >>"$log_file"
             cleanup_and_exit_restore_error 1

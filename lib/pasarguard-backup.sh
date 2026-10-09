@@ -1889,7 +1889,7 @@ backup_command() {
     colorized_echo blue "Copying data directory..."
     # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
     if [ -d "$DATA_DIR" ]; then
-        local rsync_args=(-av --exclude 'xray-core' --exclude 'mysql' --exclude 'mariadb' --exclude 'postgresql' --exclude 'timescaledb')
+        local rsync_args=(-av "${PASARGUARD_DATA_DIR_EXCLUDES[@]}")
         local normalized_data_dir=""
         normalized_data_dir=$(normalize_posix_path "$DATA_DIR")
 

@@ -93,6 +93,20 @@ sqlite_absolute_database_url() {
     printf '%s:////%s\n' "$driver" "${path#/}"
 }
 
+# rsync excludes for DATA_DIR, shared by backup and restore so they cannot drift
+# apart: database server storage (backed up as SQL dumps instead) and downloaded
+# Xray binaries. Backup skips them and restore's `rsync --delete` leaves them in
+# place. The leading slash anchors each pattern to the top of DATA_DIR, so a
+# nested directory with the same name is still part of the data.
+# shellcheck disable=SC2034 # used by pasarguard-backup.sh and pasarguard-restore.sh
+PASARGUARD_DATA_DIR_EXCLUDES=(
+    --exclude=/xray-core
+    --exclude=/mysql
+    --exclude=/mariadb
+    --exclude=/postgresql
+    --exclude=/timescaledb
+)
+
 # Ensure a secret-bearing file (e.g. .env, TLS private key) is only readable by
 # its owner. Creates the file with 0600 if it is missing so callers can harden
 # it *before* writing secrets; tightens it to 0600 if it already exists. A

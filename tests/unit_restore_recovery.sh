@@ -54,7 +54,13 @@ case "$1" in
                 exit "$code"
                 ;;
             *" mariadb --version"*) exit "$(cat "$d/has_mariadb")" ;;
-            *) cat "$d/target_version" ;;
+            *)
+                # With accept_pwd set, only a client call carrying that password works.
+                if [ -s "$d/accept_pwd" ]; then
+                    case " $* " in *" MYSQL_PWD=$(cat "$d/accept_pwd") "* | *" PGPASSWORD=$(cat "$d/accept_pwd") "*) ;; *) exit 1 ;; esac
+                fi
+                cat "$d/target_version"
+                ;;
         esac
         ;;
     *) exit 1 ;;
@@ -252,6 +258,23 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
     out=$(run_restore "$WORK_DIR/archives/edited.zip" --check 2>&1)
     assert_eq "$?" 1 "restore --check: edited payload rejected"
 
+    # An ordinary restore never switches the destination's database engine.
+    make_sqlite_archive cross keep
+    mkdir -p "$APP_DIR" "$DATA_DIR"
+    printf 'DB_USER=pg\nDB_PASSWORD=pgpass\nDB_NAME=panel\nSQLALCHEMY_DATABASE_URL="postgresql+asyncpg://pg:pgpass@127.0.0.1:5432/panel"\n' >"$ENV_FILE"
+    printf 'services:\n  pasarguard:\n    image: pasarguard/panel:latest\n  postgresql:\n    image: postgres:16\n' >"$COMPOSE_FILE"
+    cp "$ENV_FILE" "$WORK_DIR/env.before"
+    cp "$COMPOSE_FILE" "$WORK_DIR/compose.before"
+    : >"$FAKE_DOCKER_DIR/calls.log"
+    out=$(run_restore "$WORK_DIR/archives/cross.zip" --yes 2>&1)
+    rc=$?
+    assert_eq "$rc" 1 "restore: SQLite backup onto a PostgreSQL installation refused"
+    case "$out" in *"Backup engine (sqlite) differs from destination (postgresql)"*) pass "restore: engine mismatch explained" ;; *) fail "restore: engine mismatch explained" ;; esac
+    assert_true "restore: engine mismatch leaves .env unchanged" cmp -s "$ENV_FILE" "$WORK_DIR/env.before"
+    assert_true "restore: engine mismatch leaves docker-compose.yml unchanged" cmp -s "$COMPOSE_FILE" "$WORK_DIR/compose.before"
+    assert_false "restore: engine mismatch stops no services" grep -qE ' (stop|down)( |$)' "$FAKE_DOCKER_DIR/calls.log"
+    rm -rf "$APP_DIR" "$DATA_DIR"
+
     make_sqlite_archive noinventory drop
     out=$(run_restore "$WORK_DIR/archives/noinventory.zip" --check 2>&1)
     assert_eq "$?" 1 "restore --check: recovery metadata without inventory rejected"
@@ -292,12 +315,66 @@ assert_false "version guard: MariaDB backup into MySQL rejected" version_guard "
 assert_true "version guard: MariaDB 11.4 backup into 11.8 allowed" version_guard "11.4.2-MariaDB" "11.8.1-MariaDB" mariadb
 printf 'format\t1\nserver_version\tunknown\n' >"$stage/backup-runtime.tsv"
 : >"$FAKE_DOCKER_DIR/calls.log"
+# The probe tries the credentials the import tries: current root, backup root,
+# backup app user, current app user.
+echo 1 >"$FAKE_DOCKER_DIR/has_mariadb"
+# shellcheck disable=SC2034 # read by check_restore_database_version
+MYSQL_ROOT_PASSWORD="backup-root-pass"
+for accepted in root-pass backup-root-pass app-pass; do
+    printf '%s' "$accepted" >"$FAKE_DOCKER_DIR/accept_pwd"
+    assert_true "version guard: MySQL probe works with credential '$accepted'" version_guard "8.0.39" "8.4.3" mysql
+done
+printf 'app-pass' >"$FAKE_DOCKER_DIR/accept_pwd"
+: >"$FAKE_DOCKER_DIR/calls.log"
+version_guard "8.0.39" "8.4.3" mysql
+tried=$(grep -o 'MYSQL_PWD=[^ ]*' "$FAKE_DOCKER_DIR/calls.log" | paste -sd ' ')
+assert_eq "$tried" "MYSQL_PWD=root-pass MYSQL_PWD=backup-root-pass MYSQL_PWD=app-pass" "version guard: credentials tried in the import's order"
+printf 'nothing-matches' >"$FAKE_DOCKER_DIR/accept_pwd"
+printf 'format\t1\nserver_version\t8.0.39\n' >"$stage/backup-runtime.tsv"
+check_restore_database_version "$stage" mysql cid-db "$WORK_DIR/version.log" >/dev/null 2>&1
+assert_eq "$?" 2 "version guard: unreadable destination version returns 2"
+: >"$FAKE_DOCKER_DIR/accept_pwd"
+check_restore_database_version "$stage" mysql cid-db "$WORK_DIR/version.log" >/dev/null 2>&1
+assert_eq "$?" 0 "version guard: compatible destination returns 0"
+printf '8.0.1\n' >"$FAKE_DOCKER_DIR/target_version"
+printf 'format\t1\nserver_version\t8.4.3\n' >"$stage/backup-runtime.tsv"
+check_restore_database_version "$stage" mysql cid-db "$WORK_DIR/version.log" >/dev/null 2>&1
+assert_eq "$?" 1 "version guard: refused downgrade returns 1"
+unset MYSQL_ROOT_PASSWORD
+printf 'format\t1\nserver_version\tunknown\n' >"$stage/backup-runtime.tsv"
+: >"$FAKE_DOCKER_DIR/calls.log"
 assert_true "version guard: unknown source version is not guessed" check_restore_database_version "$stage" postgresql cid-db "$WORK_DIR/version.log"
 assert_eq "$(wc -l <"$FAKE_DOCKER_DIR/calls.log")" 0 "version guard: unknown source version makes no docker calls"
 printf 'format\t1\nserver_version\tunknown\n' >"$stage/backup-runtime.tsv"
 printf -- '-- Dumped from database version 17.2\n' >"$stage/db_backup.sql"
 assert_false "version guard: dump header version used when metadata is unknown" version_guard unknown "16.4" postgresql
 rm -f "$stage/db_backup.sql"
+
+# -----------------------------------------------------------------------
+# Data directory: shared excludes and the pre-restore safety copy
+# -----------------------------------------------------------------------
+rm -rf "$DATA_DIR" "$WORK_DIR/extracted"
+mkdir -p "$DATA_DIR/xray-core" "$DATA_DIR/mysql" "$DATA_DIR/certs/mysql" "$WORK_DIR/extracted/certs"
+printf 'binary\n' >"$DATA_DIR/xray-core/xray"
+printf 'ibdata\n' >"$DATA_DIR/mysql/ibdata1"
+printf 'old\n' >"$DATA_DIR/certs/mysql/ca.pem"
+printf 'stale\n' >"$DATA_DIR/stale.txt"
+printf 'restored\n' >"$WORK_DIR/extracted/certs/cert.pem"
+rsync -a --delete "${PASARGUARD_DATA_DIR_EXCLUDES[@]}" "$WORK_DIR/extracted/" "$DATA_DIR/"
+assert_true "data sync: Xray binaries kept" test -f "$DATA_DIR/xray-core/xray"
+assert_true "data sync: top-level database storage kept" test -f "$DATA_DIR/mysql/ibdata1"
+assert_false "data sync: nested directory named mysql is part of the data" test -e "$DATA_DIR/certs/mysql"
+assert_false "data sync: files missing from the backup are removed" test -e "$DATA_DIR/stale.txt"
+assert_true "data sync: backed-up files restored" test -f "$DATA_DIR/certs/cert.pem"
+
+printf 'old\n' >"$DATA_DIR/certs/mysql-ca.pem"
+assert_true "data safety copy: succeeds" save_data_dir_safety_copy "$WORK_DIR/data.copy" "$WORK_DIR/copy.log"
+assert_true "data safety copy: data files copied" test -f "$WORK_DIR/data.copy/certs/mysql-ca.pem"
+assert_false "data safety copy: database storage not copied" test -e "$WORK_DIR/data.copy/mysql"
+assert_false "data safety copy: Xray binaries not copied" test -e "$WORK_DIR/data.copy/xray-core"
+printf 'not a directory\n' >"$WORK_DIR/blocker"
+assert_false "data safety copy: failure is reported" save_data_dir_safety_copy "$WORK_DIR/blocker/copy" "$WORK_DIR/copy.log"
+rm -rf "$DATA_DIR" "$WORK_DIR/extracted" "$WORK_DIR/data.copy" "$WORK_DIR/blocker"
 
 # -----------------------------------------------------------------------
 # wait_for_recovery_database (docker and sleep mocked)

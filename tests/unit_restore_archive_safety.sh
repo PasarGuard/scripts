@@ -56,6 +56,24 @@ else
     echo "(skipped zip cases: zip/unzip unavailable)"
 fi
 
+# Symbolic and hard links are rejected from the listing, before extraction.
+mkdir -p links
+echo target > links/target.txt
+ln -s target.txt links/symlink
+tar -czf symlink.tgz -C links .
+rm links/symlink && ln links/target.txt links/hardlink
+tar -czf hardlink.tgz -C links .
+assert_true  "archive_has_links: tar symlink found" archive_has_links symlink.tgz tar
+assert_true  "archive_has_links: tar hard link found" archive_has_links hardlink.tgz tar
+assert_false "archive_has_links: clean tar passes" archive_has_links safe.tgz tar
+if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    rm links/hardlink && ln -s target.txt links/symlink
+    (cd links && zip -qry "$WORK_DIR/symlink.zip" .)
+    assert_true  "archive_has_links: zip symlink found" archive_has_links symlink.zip zip
+    assert_false "archive_has_links: clean zip passes" archive_has_links safe.zip zip
+fi
+assert_true "archive_has_links: unreadable archive treated as unsafe" archive_has_links /no/such.tgz tar
+
 # Unknown kind and unreadable archive are treated as unsafe.
 assert_false "archive_entries_are_safe: unknown kind rejected" archive_entries_are_safe safe.tgz bogus
 assert_false "archive_entries_are_safe: missing archive rejected" archive_entries_are_safe /no/such.tgz tar
