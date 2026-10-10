@@ -74,9 +74,9 @@ the recovery time; recovery cannot be guaranteed to take a fixed number of minut
 | `.env` | Application settings and secrets, including database connection fields |
 | `docker-compose.yml` | Source deployment configuration |
 | `pasarguard_data/` | Persistent application files, certificates and themes; database data directories and downloaded Xray binaries are excluded |
-| SQLite snapshot or SQL dumps | Consistent database backup, not a copy of a running database data directory |
+| SQLite snapshot or SQL dumps | A backup made with the database's own tools, not a copy of a running database data directory |
 | `backup-runtime.tsv` | Format version, UTC creation time, source engine/server version, schema revision when available, source project/paths, and actual container image digests/image IDs |
-| `backup-files.sha256` | SHA256 inventory of regular payload files, including configuration and recovery metadata |
+| `backup-files.sha256` | SHA256 inventory of regular payload files, including configuration and recovery metadata (a file whose name contains a backslash, CR or LF is left out and reported during the backup) |
 
 Image references come from the actual containers, including stopped containers,
 not from mutable `latest` or `lts` tags in the Compose template. If a service has
@@ -89,7 +89,7 @@ archive. Restore backups from your own trusted storage. ZIP archives are **not
 encrypted by this script** and contain passwords/private keys. Store off-server
 copies with appropriate access control or encryption. Archives and split parts
 are created with private permissions; restored `.env` and Compose files are
-restricted to their owner.
+restricted to their owner as soon as they are restored.
 
 ## Create and keep recoverable backups
 
@@ -106,7 +106,9 @@ the same server does not protect against complete server loss.
 SQLite uses the online `.backup` API and validates its snapshot with
 `PRAGMA quick_check`. WAL/SHM/journal files from the running database are not the
 restore authority. MySQL/MariaDB use the matching dump utility and verify its
-completion marker. PostgreSQL/TimescaleDB attempt to dump cluster globals and
+completion marker. These dumps use the utility's default table locks rather than
+one transaction snapshot, so panel writes wait while the dump runs.
+PostgreSQL/TimescaleDB attempt to dump cluster globals and
 all user databases with per-database manifests; if that is unavailable, the
 script falls back to the configured database. A fallback is **not** a backup of
 unrelated databases on the server. Each PostgreSQL dump is internally consistent;
@@ -145,14 +147,19 @@ still applies. Use `pasarguard restore --help` for the options.
 
 Ordinary restore preserves the destination Compose file for server databases
 and the provisioned destination database credentials/connection URL. It validates
-payloads before stopping application writers. When source-version information is
-available, it refuses MySQL-to-MariaDB/MariaDB-to-MySQL imports and database
+payloads before stopping application writers. It refuses a backup from another
+database engine family (for example a SQLite backup onto a PostgreSQL
+installation) before changing anything. When source-version information is
+available, it also refuses MySQL-to-MariaDB/MariaDB-to-MySQL imports and database
 version downgrades before executing the import. Restore to the original engine
 and version when diagnosing an old backup. An allowed version comparison is not
 a guarantee that every vendor-specific SQL statement is compatible.
 
-Application/data files are saved before replacement, and SQLite receives a
-pre-restore safety snapshot. Server SQL imports are **not transactional recovery
+Application/data files are saved before replacement (the restore stops if that
+copy fails; database storage and Xray binaries inside the data directory are
+left in place rather than copied), and SQLite receives a pre-restore safety
+snapshot. Archives containing symbolic or hard links are refused before
+extraction. Server SQL imports are **not transactional recovery
 of the whole host**: an import can fail after changing data, and multi-database
 restores can finish earlier databases before a later one fails. Take a separate
 current backup before replacing an existing installation. Fresh recovery leaves
