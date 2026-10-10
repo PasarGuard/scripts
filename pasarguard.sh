@@ -1141,6 +1141,9 @@ install_pasarguard() {
 
     mkdir -p "$DATA_DIR"
     mkdir -p "$APP_DIR"
+    # This installation replaces anything an unfinished `restore --fresh` left
+    # here; its retry marker must not turn a later --fresh into a restore over it.
+    rm -f "$APP_DIR/${FRESH_RESTORE_MARKER:-.pasarguard-fresh-restore}"
 
     colorized_echo blue "Fetching .env file"
     # Pre-create .env as 0600 (and tighten any pre-existing copy) so the DB,

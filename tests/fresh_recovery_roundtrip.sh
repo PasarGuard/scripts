@@ -4,9 +4,12 @@
 # Back up a source installation, remove it completely, recover it with --fresh,
 # then check the data, the installed Compose file and the images that run.
 #
-# Usage: bash tests/fresh_recovery_roundtrip.sh ENGINE [healthcheck|no-healthcheck]
+# Usage: bash tests/fresh_recovery_roundtrip.sh ENGINE [healthcheck|no-healthcheck|failing-healthcheck]
 #   ENGINE: sqlite | mysql | mariadb | postgresql | timescaledb
 #   no-healthcheck: the archived database service has no Compose healthcheck.
+#   failing-healthcheck: the archived healthcheck always fails, so the first
+#   --fresh stops after provisioning; the same command is then run again and
+#   must finish the recovery.
 #
 # Needs root (restore --fresh requires it), Docker with Compose v2, sqlite3, jq,
 # rsync, zip and unzip. Everything it creates is its own: the Compose project
@@ -26,9 +29,13 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 engine="${1:-}"
 healthcheck="${2:-healthcheck}"
 case "$healthcheck" in
-    healthcheck | no-healthcheck) ;;
-    *) echo "usage: $0 ENGINE [healthcheck|no-healthcheck]" >&2; exit 2 ;;
+    healthcheck | no-healthcheck | failing-healthcheck) ;;
+    *) echo "usage: $0 ENGINE [healthcheck|no-healthcheck|failing-healthcheck]" >&2; exit 2 ;;
 esac
+if [ "${1:-}" = sqlite ] && [ "$healthcheck" = failing-healthcheck ]; then
+    echo "failing-healthcheck needs a database service" >&2
+    exit 2
+fi
 
 app_image="${FRESH_APP_IMAGE:-alpine:3.20}"
 panel_ref="pasarguard-recovery-fixture/panel:latest"
@@ -39,7 +46,7 @@ case "$engine" in
     mariadb) db_image="${FRESH_DB_IMAGE:-mariadb:11.4}"; target=/var/lib/mysql; dbservice=mariadb ;;
     postgresql) db_image="${FRESH_DB_IMAGE:-postgres:16}"; target=/var/lib/postgresql/data; dbservice=postgresql ;;
     timescaledb) db_image="${FRESH_DB_IMAGE:-timescale/timescaledb:2.27.2-pg17}"; target=/var/lib/postgresql/data; dbservice=timescaledb ;;
-    *) echo "usage: $0 ENGINE [healthcheck|no-healthcheck]" >&2; exit 2 ;;
+    *) echo "usage: $0 ENGINE [healthcheck|no-healthcheck|failing-healthcheck]" >&2; exit 2 ;;
 esac
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/pasarguard-fresh-recovery.XXXXXX")
@@ -83,7 +90,7 @@ DB_NAME=appdb
 SQLALCHEMY_DATABASE_URL="$url"
 EOF
 
-# Write the Compose file; $1 is "healthcheck" or "no-healthcheck" for the database.
+# Write the Compose file; $1 is the database healthcheck mode (see usage).
 write_compose() {
     cat >"$COMPOSE_FILE" <<EOF
 services:
@@ -109,7 +116,13 @@ EOF
     volumes:
       - $DATA_DIR/$dbservice:$target
 EOF
-    [ "$1" = healthcheck ] || return 0
+    case "$1" in
+        no-healthcheck) return 0 ;;
+        failing-healthcheck)
+            printf '    healthcheck:\n      test: ["CMD", "false"]\n      interval: 1s\n      timeout: 1s\n      retries: 1\n' >>"$COMPOSE_FILE"
+            return 0
+            ;;
+    esac
     case "$engine" in
         mysql) printf '    healthcheck:\n      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root --password=fixture-password"]\n' ;;
         mariadb) printf '    healthcheck:\n      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]\n' ;;
@@ -127,6 +140,18 @@ run_sql() {
         mariadb) docker exec -e MYSQL_PWD=fixture-password "$cid" mariadb -u appuser appdb -N -s -e "$sql" ;;
         postgresql | timescaledb) docker exec -e PGPASSWORD=fixture-password "$cid" psql -X -U appuser -d appdb -v ON_ERROR_STOP=1 -At -c "$sql" ;;
     esac
+}
+
+# Wait up to 120 s until the database answers over TCP inside its container,
+# whatever its healthcheck says.
+wait_until_database_answers() {
+    local cid="$1" port=5432 attempt
+    case "$engine" in mysql | mariadb) port=3306 ;; esac
+    for ((attempt = 0; attempt < 60; attempt++)); do
+        if recovery_database_responds "$cid" "$engine" "$port" >/dev/null 2>&1; then return 0; fi
+        sleep 2
+    done
+    return 1
 }
 
 # The source always starts with a healthcheck so the fixture data can be written
@@ -162,7 +187,18 @@ fi
 [ ! -e "$APP_DIR" ] || fail "--check created the application directory"
 
 started=$(date +%s)
+if [ "$healthcheck" = failing-healthcheck ]; then
+    if (restore_command "$root/recovery.zip" --fresh --yes); then
+        fail "--fresh succeeded although the database never became healthy"
+    fi
+    [ -f "$APP_DIR/.pasarguard-fresh-restore" ] || fail "no retry marker after the failed --fresh"
+    # As an administrator would after reading the log: let the database finish
+    # starting, then run the same command again.
+    wait_until_database_answers "$(dc ps -q "$dbservice")" || fail "database did not answer after the failed --fresh"
+    echo "first --fresh stopped as expected; running the same command again"
+fi
 (restore_command "$root/recovery.zip" --fresh --yes)
+[ ! -e "$APP_DIR/.pasarguard-fresh-restore" ] || fail "retry marker left after a successful restore"
 echo "fresh recovery took $(($(date +%s) - started))s"
 
 [ "$(cat "$DATA_DIR/sentinel.txt")" = original-state ] || fail "data file not restored"
@@ -179,10 +215,10 @@ done <"$root/runtime.tsv"
 
 if [ "$engine" != sqlite ]; then
     dc restart "$dbservice"
-    dc up -d --wait --wait-timeout 180 "$dbservice"
+    [ "$healthcheck" = failing-healthcheck ] || dc up -d --wait --wait-timeout 180 "$dbservice"
     cid=$(dc ps -q "$dbservice")
-    if [ "$healthcheck" = no-healthcheck ]; then
-        wait_for_recovery_database "$cid" "$engine" "" "$root/wait.log" || fail "database did not answer after restart"
+    if [ "$healthcheck" != healthcheck ]; then
+        wait_until_database_answers "$cid" || fail "database did not answer after restart"
     fi
 fi
 [ "$(run_sql "$cid" 'SELECT value FROM ci_recovery;')" = 42 ] || fail "database row not restored"
