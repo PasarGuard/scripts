@@ -105,6 +105,8 @@ fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 assert_true() { local l="$1"; shift; if "$@"; then pass "$l"; else fail "$l"; fi; }
 # Assert that the given command evaluates to false (nonzero exit status).
 assert_false() { local l="$1"; shift; if ! "$@"; then pass "$l"; else fail "$l"; fi; }
+# True when a pre-restore safety copy of APP_DIR or DATA_DIR exists.
+has_safety_copies() { compgen -G "$APP_DIR.backup.*" >/dev/null || compgen -G "$DATA_DIR.backup.*" >/dev/null; }
 # Run a command with its output discarded.
 quiet() { "$@" >/dev/null 2>&1; }
 # Assert equality between actual and expected values.
@@ -282,14 +284,17 @@ if command -v sqlite3 >/dev/null 2>&1 && command -v zip >/dev/null 2>&1 && comma
     # A --fresh run that stopped after provisioning is continued by the same command.
     ensure_docker_service_running() { :; }
     make_sqlite_archive resume keep
-    mkdir -p "$APP_DIR"
+    mkdir -p "$APP_DIR" "$DATA_DIR"
     unzip -p "$WORK_DIR/archives/resume.zip" .env >"$ENV_FILE"
     unzip -p "$WORK_DIR/archives/resume.zip" docker-compose.yml >"$COMPOSE_FILE"
     unzip -p "$WORK_DIR/archives/resume.zip" backup-files.sha256 | sha256sum | awk '{print $1}' >"$APP_DIR/.pasarguard-fresh-restore"
+    printf 'half provisioned\n' >"$DATA_DIR/leftover"
+    rm -rf "$APP_DIR".backup.* "$DATA_DIR".backup.*
     : >"$FAKE_DOCKER_DIR/calls.log"
     out=$(run_restore "$WORK_DIR/archives/resume.zip" --fresh --yes 2>&1)
     rc=$?
     assert_eq "$rc" 0 "fresh retry: same command continues the unfinished run"
+    assert_false "fresh retry: no safety copies of the half-provisioned install" has_safety_copies
     case "$out" in *"Continuing it as an ordinary restore"*) pass "fresh retry: continuation announced" ;; *) fail "fresh retry: continuation announced" ;; esac
     assert_true "fresh retry: database restored" test -s "$DATA_DIR/db.sqlite3"
     assert_true "fresh retry: data restored" test -f "$DATA_DIR/cert.pem"

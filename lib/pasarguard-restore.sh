@@ -2279,7 +2279,8 @@ restore_command() {
             colorized_echo red "The data directory exclude list is missing (mismatched script libraries). Refusing to sync the data directory."
             cleanup_and_exit_restore_error 1
         fi
-        if [ "$fresh_restore" = false ] && [ "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
+        # A continued --fresh run (fresh_resume) has only its own half-provisioned files to copy.
+        if [ "$fresh_restore" = false ] && [ "$fresh_resume" = false ] && [ "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
             colorized_echo blue "Backing up current data directory before restore..."
             if ! save_data_dir_safety_copy "$DATA_DIR.backup.$(date +%Y%m%d%H%M%S)" "$log_file"; then
                 colorized_echo red "Failed to save the current data directory before replacement."
@@ -2333,7 +2334,7 @@ restore_command() {
             install_package rsync
         fi
         mkdir -p "$APP_DIR"
-        if [ "$fresh_restore" = false ] && [ "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+        if [ "$fresh_restore" = false ] && [ "$fresh_resume" = false ] && [ "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
             colorized_echo blue "Backing up current app directory before restore..."
             if ! rsync -a --exclude backup "$APP_DIR/" "$APP_DIR.backup.$(date +%Y%m%d%H%M%S)/" 2>>"$log_file"; then
                 colorized_echo red "Failed to save the current application files before replacement."
