@@ -233,7 +233,7 @@ PasarGuard supports 5 database engines tailored for different workloads:
 ## 💾 Backups & Disaster Recovery
 
 The management script backs up application settings, persistent files and
-consistent database snapshots. New backups also record actual image digests,
+database snapshots or dumps. New backups also record actual image digests,
 source database versions and a SHA256 payload inventory.
 
 - Run `pasarguard backup` for an immediate backup, or configure scheduled Telegram
