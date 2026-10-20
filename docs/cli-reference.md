@@ -205,7 +205,7 @@ Installs or re-installs a worker node instance.
 **Options:**
 - `-v`, `--version <VERSION>`: Install specific node image version.
 - `--pre-release`: Install latest pre-release image.
-- `--dev`: Install the `pasarguard/node:dev` image, built from the node `dev` branch. Unreleased, for testing only; `pg-node update` pulls the newest dev build. Cannot be combined with `--version` or `--pre-release`.
+- `--dev`: Install the `pasarguard/node:dev` image, built from the node `dev` branch. Unreleased, for testing only; `pg-node update` pulls the newest dev build. Cannot be combined with `--version` or `--pre-release`. To move an existing node to it, use `update --dev` instead.
 - `--name <NAME>`: Custom instance name (creates `/opt/<NAME>` and `/var/lib/<NAME>`).
 - `--override`: Force overwrite existing node instance.
 - `--api-key <KEY>`: Pre-configure API authentication key.
@@ -238,6 +238,21 @@ sudo pg-node status
 Streams real-time container logs.
 ```bash
 sudo pg-node logs
+```
+
+#### `update`
+Updates the `pg-node` script, pulls the node image and recreates the container. The image tag in `docker-compose.yml` is kept, so a node on `dev` stays on `dev`. Update never changes `.env`, the API key or the certificates.
+
+**Options:**
+- `--dev`: Switch the node to the `pasarguard/node:dev` image, built from the node `dev` branch (unreleased, for testing).
+- `-v`, `--version <VERSION>`: Switch the node to a release tag (`vX.Y.Z`), `latest` (the latest stable release) or `pre-release`. Checked against GitHub releases the same way as `install --version`.
+- `--no-update-service`: Do not update the companion node-serviced daemon.
+
+`--dev` and `--version` cannot be combined.
+
+```bash
+sudo pg-node update --dev
+sudo pg-node update --version latest
 ```
 
 #### `core-update`
