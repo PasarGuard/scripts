@@ -314,6 +314,180 @@ else
     fail "zsh completion: contains version-script and script-version"
 fi
 
+# -----------------------------------------------------------------------
+# install_command version selection (--dev, --pre-release, --version)
+# Host-touching steps are stubbed in a subshell; curl and install_node
+# record their calls so the release lookup and chosen tag can be checked.
+# -----------------------------------------------------------------------
+INSTALL_CALLS="$WORK_DIR/install-calls.log"
+INSTALL_OUT=""
+INSTALL_STATUS=0
+
+# Run install_command with stubbed host steps; sets INSTALL_OUT and INSTALL_STATUS.
+run_install_command() {
+    : > "$INSTALL_CALLS"
+    if INSTALL_OUT=$(
+        check_running_as_root() { :; }
+        print_script_execution_header() { :; }
+        is_node_installed() { return 1; }
+        detect_os() { :; }
+        install_package() { :; }
+        install_docker() { :; }
+        ensure_docker_compose() { :; }
+        install_yq() { :; }
+        detect_compose() { :; }
+        curl() {
+            echo "curl $*" >> "$INSTALL_CALLS"
+            case "$*" in
+                *"%{http_code}"*) printf '200' ;;
+                */releases/latest*) printf '{"tag_name":"v9.9.9"}' ;;
+                */releases) printf '[{"tag_name":"v9.9.10-beta","prerelease":true}]' ;;
+                *) printf '{}' ;;
+            esac
+        }
+        install_node() { echo "install_node $1" >> "$INSTALL_CALLS"; }
+        install_node_script() { :; }
+        install_completion() { :; }
+        up_node() { :; }
+        show_node_logs() { :; }
+        install_service_command() { :; }
+        INSTALL_SERVICE_CHOICE="n"
+        SERVICE_PORT="62050"
+        API_KEY="00000000-0000-4000-8000-000000000000"
+        SSL_CERT_FILE="/dev/null"
+        install_command "$@" 2>&1
+    ); then
+        INSTALL_STATUS=0
+    else
+        INSTALL_STATUS=$?
+    fi
+}
+
+# Print the version install_node was called with, or nothing.
+installed_version() {
+    sed -n 's/^install_node //p' "$INSTALL_CALLS"
+}
+
+# Succeed if any recorded curl call hit the node GitHub releases API.
+release_lookup_done() {
+    grep -q "api.github.com/repos/PasarGuard/node/releases" "$INSTALL_CALLS"
+}
+
+run_install_command --dev
+assert_eq "$INSTALL_STATUS" "0" "install --dev: exits 0"
+assert_eq "$(installed_version)" "dev" "install --dev: installs image tag dev"
+assert_false "install --dev: skips the GitHub release lookup" release_lookup_done
+if [[ "$INSTALL_OUT" == *"unreleased"* ]]; then
+    pass "install --dev: prints the unreleased build note"
+else
+    fail "install --dev: prints the unreleased build note"
+fi
+
+for dev_conflict in "--dev --version v1.2.3" "--version v1.2.3 --dev" "--dev --pre-release" "--pre-release --dev" "-v v1.2.3 --dev"; do
+    # shellcheck disable=SC2086
+    run_install_command $dev_conflict
+    assert_eq "$INSTALL_STATUS" "1" "install $dev_conflict: exits 1"
+    assert_eq "$(installed_version)" "" "install $dev_conflict: installs nothing"
+    if [[ "$INSTALL_OUT" == *"Cannot use --pre-release, --dev and --version options simultaneously."* ]]; then
+        pass "install $dev_conflict: names all three exclusive options"
+    else
+        fail "install $dev_conflict: names all three exclusive options (got: $INSTALL_OUT)"
+    fi
+done
+
+# Existing selections keep their release lookup and resolved tag
+run_install_command
+assert_eq "$INSTALL_STATUS" "0" "install (latest): exits 0"
+assert_eq "$(installed_version)" "latest" "install (latest): installs image tag latest"
+assert_true "install (latest): checks releases/latest" grep -q "PasarGuard/node/releases/latest" "$INSTALL_CALLS"
+if [[ "$INSTALL_OUT" != *"unreleased"* ]]; then
+    pass "install (latest): no dev note"
+else
+    fail "install (latest): no dev note"
+fi
+
+run_install_command --pre-release
+assert_eq "$INSTALL_STATUS" "0" "install --pre-release: exits 0"
+assert_eq "$(installed_version)" "v9.9.10-beta" "install --pre-release: installs the newest release tag"
+
+run_install_command --version v1.2.3
+assert_eq "$INSTALL_STATUS" "0" "install --version v1.2.3: exits 0"
+assert_eq "$(installed_version)" "v1.2.3" "install --version v1.2.3: installs image tag v1.2.3"
+assert_true "install --version v1.2.3: checks releases/tags/v1.2.3" grep -q "PasarGuard/node/releases/tags/v1.2.3" "$INSTALL_CALLS"
+
+run_install_command --version v1.2.3 --pre-release
+assert_eq "$INSTALL_STATUS" "1" "install --version with --pre-release: exits 1"
+
+run_install_command --version 1.2
+assert_eq "$INSTALL_STATUS" "1" "install --version 1.2: rejects an invalid version"
+assert_eq "$(installed_version)" "" "install --version 1.2: installs nothing"
+
+# -----------------------------------------------------------------------
+# set_node_image_tag  (compose image rewrite used by install_node)
+# Needs mikefarah yq v4 (what install_yq installs); skipped otherwise.
+# -----------------------------------------------------------------------
+if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefarah"; then
+    image_compose="$WORK_DIR/image-test/docker-compose.yml"
+    mkdir -p "$(dirname "$image_compose")"
+    cp "$ROOT_DIR/docker-compose/node.yml" "$image_compose"
+    if set_node_image_tag "dev" "$image_compose"; then
+        pass "set_node_image_tag: dev rewrite succeeds"
+    else
+        fail "set_node_image_tag: dev rewrite succeeds"
+    fi
+    assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "pasarguard/node:dev" \
+        "set_node_image_tag: image becomes pasarguard/node:dev"
+    assert_true "set_node_image_tag: compose file has 'image: pasarguard/node:dev'" \
+        grep -q "^    image: pasarguard/node:dev$" "$image_compose"
+    assert_eq "$(yq eval -r '.services["node"].container_name' "$image_compose")" "node" \
+        "set_node_image_tag: other keys untouched"
+    if set_node_image_tag "v0.5.4" "$image_compose"; then
+        pass "set_node_image_tag: release rewrite succeeds"
+    else
+        fail "set_node_image_tag: release rewrite succeeds"
+    fi
+    assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "pasarguard/node:v0.5.4" \
+        "set_node_image_tag: a dev compose file can move back to a release tag"
+else
+    echo "(skipped set_node_image_tag: mikefarah yq v4 not available)"
+fi
+
+# -----------------------------------------------------------------------
+# update_command keeps whatever image tag the compose file has (dev stays dev)
+# -----------------------------------------------------------------------
+update_app_dir="$WORK_DIR/update-test"
+mkdir -p "$update_app_dir"
+cat > "$update_app_dir/docker-compose.yml" <<'EOF'
+services:
+  node:
+    container_name: node
+    image: pasarguard/node:dev
+    restart: always
+EOF
+update_calls="$WORK_DIR/update-calls.log"
+: > "$update_calls"
+if (
+    APP_DIR="$update_app_dir"
+    COMPOSE_FILE="$update_app_dir/docker-compose.yml"
+    set_service_paths
+    check_running_as_root() { :; }
+    detect_compose() { COMPOSE="fake_compose"; }
+    fake_compose() { echo "compose $*" >> "$update_calls"; }
+    ensure_docker_service_running() { :; }
+    update_node_script() { :; }
+    uninstall_completion() { :; }
+    install_completion() { :; }
+    update_service_if_installed() { :; }
+    update_command --no-update-service >/dev/null 2>&1
+); then
+    pass "update on a dev install: exits 0"
+else
+    fail "update on a dev install: exits 0"
+fi
+assert_true "update on a dev install: pulls images" grep -q " pull$" "$update_calls"
+assert_true "update on a dev install: image stays pasarguard/node:dev" \
+    grep -q "^    image: pasarguard/node:dev$" "$update_app_dir/docker-compose.yml"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

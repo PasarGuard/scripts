@@ -205,6 +205,7 @@ Installs or re-installs a worker node instance.
 **Options:**
 - `-v`, `--version <VERSION>`: Install specific node image version.
 - `--pre-release`: Install latest pre-release image.
+- `--dev`: Install the `pasarguard/node:dev` image, built from the node `dev` branch. Unreleased, for testing only; `pg-node update` pulls the newest dev build. Cannot be combined with `--version` or `--pre-release`.
 - `--name <NAME>`: Custom instance name (creates `/opt/<NAME>` and `/var/lib/<NAME>`).
 - `--override`: Force overwrite existing node instance.
 - `--api-key <KEY>`: Pre-configure API authentication key.

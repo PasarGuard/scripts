@@ -711,6 +711,16 @@ read_and_save_file() {
     done
 }
 
+# Replace the image tag of the node service in a compose file (e.g. :latest -> :dev).
+# Arguments:
+#   $1 - Image tag (a release tag such as v0.5.4, or dev).
+#   $2 - Path to the docker-compose.yml to edit in place.
+set_node_image_tag() {
+    local tag="$1"
+    local compose_file="$2"
+    yq eval ".services[\"node\"].image = (.services[\"node\"].image | sub(\":.*$\"; \":${tag}\"))" -i "$compose_file" 2>/dev/null
+}
+
 # Download compose files, set up certificates, configure .env, and deploy the node.
 install_node() {
     local node_version=$1
@@ -887,7 +897,7 @@ install_node() {
     sed -i "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|" "$APP_DIR/.env"
     if [ "$node_version" != "latest" ]; then
         colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
-        if yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
+        if set_node_image_tag "$node_version" "$APP_DIR/docker-compose.yml"; then
             colorized_echo green "  ✓ Docker image version set to: ${node_version}"
         else
             colorized_echo yellow "  ⚠ Failed to set image version (may not be critical)"
@@ -1076,7 +1086,7 @@ install_command() {
         case $key in
         -v | --version)
             if [[ "$node_version_set" == "true" ]]; then
-                colorized_echo red "Error: Cannot use --pre-release and --version options simultaneously."
+                colorized_echo red "Error: Cannot use --pre-release, --dev and --version options simultaneously."
                 exit 1
             fi
             node_version="$2"
@@ -1085,10 +1095,19 @@ install_command() {
             ;;
         --pre-release)
             if [[ "$node_version_set" == "true" ]]; then
-                colorized_echo red "Error: Cannot use --pre-release and --version options simultaneously."
+                colorized_echo red "Error: Cannot use --pre-release, --dev and --version options simultaneously."
                 exit 1
             fi
             node_version="pre-release"
+            node_version_set="true"
+            shift
+            ;;
+        --dev)
+            if [[ "$node_version_set" == "true" ]]; then
+                colorized_echo red "Error: Cannot use --pre-release, --dev and --version options simultaneously."
+                exit 1
+            fi
+            node_version="dev"
             node_version_set="true"
             shift
             ;;
@@ -1182,6 +1201,10 @@ install_command() {
     check_version_exists() {
         local version=$1
         repo_url="https://api.github.com/repos/PasarGuard/node/releases"
+        # dev is the Docker image built from the node dev branch, not a GitHub release
+        if [ "$version" == "dev" ]; then
+            return 0
+        fi
         if [ "$version" == "latest" ]; then
             latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
             # Check if there is any stable release of  node v1
@@ -1214,12 +1237,16 @@ install_command() {
         fi
     }
     # Check if the version is valid and exists
-    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" == "dev" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if check_version_exists "$node_version"; then
             colorized_echo cyan "================================"
             colorized_echo cyan "Installing PasarGuard Node"
             colorized_echo cyan "Version: $node_version"
             colorized_echo cyan "================================"
+            if [ "$node_version" == "dev" ]; then
+                colorized_echo yellow "Note: pasarguard/node:dev is an unreleased build of the node dev branch, meant for testing only."
+                colorized_echo yellow "      '$APP_NAME update' pulls the newest dev build."
+            fi
             install_node "$node_version"
             colorized_echo green "✓ Node installation completed for version: $node_version"
         else
@@ -2116,6 +2143,7 @@ usage() {
     colorized_echo cyan "Install Options:"
     colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Install specific version"
     colorized_echo yellow "  --pre-release           $(tput sgr0)✓  Install pre-release version"
+    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Install the dev image (unreleased, for testing)"
     colorized_echo yellow "  --name NAME             $(tput sgr0)✓  Install with custom name"
     colorized_echo yellow "  --override              $(tput sgr0)✓  Override existing installation"
     colorized_echo yellow "  --api-key KEY           $(tput sgr0)✓  Set API Key"

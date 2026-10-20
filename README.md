@@ -136,6 +136,9 @@ sudo bash pg-node.sh install
 
 # Multi-instance node with custom name
 sudo bash pg-node.sh install --name node-de1 --self-signed
+
+# Testers only: the unreleased pasarguard/node:dev image (built from the node dev branch)
+sudo bash pg-node.sh install --dev
 ```
 
 Once installed, manage the node using the global `pg-node` command:
