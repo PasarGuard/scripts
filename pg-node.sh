@@ -712,13 +712,15 @@ read_and_save_file() {
 }
 
 # Replace the image tag of the node service in a compose file (e.g. :latest -> :dev).
+# Only a tag after the last path segment is replaced (an untagged image gets one),
+# so a registry port such as registry:5000/pasarguard/node is kept. Needs mikefarah yq v4.
 # Arguments:
 #   $1 - Image tag (a release tag such as v0.5.4, or dev).
 #   $2 - Path to the docker-compose.yml to edit in place.
 set_node_image_tag() {
     local tag="$1"
     local compose_file="$2"
-    yq eval ".services[\"node\"].image = (.services[\"node\"].image | sub(\":.*$\"; \":${tag}\"))" -i "$compose_file" 2>/dev/null
+    yq eval ".services[\"node\"].image = (.services[\"node\"].image | sub(\"(:[^/:]*)?$\"; \":${tag}\"))" -i "$compose_file"
 }
 
 # Download compose files, set up certificates, configure .env, and deploy the node.
@@ -1098,6 +1100,9 @@ check_node_version_exists() {
     if [ "$version" == "pre-release" ]; then
         local latest_stable_tag=$(curl -s "$repo_url/latest" | jq -r '.tag_name')
         local latest_pre_release_tag=$(curl -s "$repo_url" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
+        # An unreachable or rate-limited API leaves these empty; treat that like "no release"
+        [ -n "$latest_stable_tag" ] || latest_stable_tag="null"
+        [ -n "$latest_pre_release_tag" ] || latest_pre_release_tag="null"
         if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
             return 1 # No releases found at all
         elif [ "$latest_stable_tag" == "null" ]; then
@@ -1131,6 +1136,12 @@ validate_node_version() {
     fi
     if ! check_node_version_exists "$node_version"; then
         colorized_echo red "✗ Version $node_version does not exist. Please enter a valid version (e.g. v0.1.2)"
+        return 1
+    fi
+    # Never hand an empty or malformed resolved tag to the compose rewrite
+    local release_tag_regex='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+    if ! [[ "$node_version" == "latest" || "$node_version" == "dev" || "$node_version" =~ $release_tag_regex ]]; then
+        colorized_echo red "✗ Could not resolve a node release tag (got '$node_version'). Check that api.github.com is reachable."
         return 1
     fi
     return 0
@@ -1827,7 +1838,7 @@ update_command() {
             print_dev_image_note
         fi
         if ! set_node_image_tag "$node_version" "$COMPOSE_FILE"; then
-            colorized_echo red "✗ Failed to set the node image tag in $COMPOSE_FILE"
+            colorized_echo red "✗ Failed to set the node image tag in $COMPOSE_FILE (mikefarah yq v4 is required)"
             exit 1
         fi
         colorized_echo green "✓ Docker image version set to: $node_version"

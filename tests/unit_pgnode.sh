@@ -324,7 +324,20 @@ INSTALL_OUT=""
 INSTALL_STATUS=0
 
 # Canned GitHub releases API answers for the curl stubs: v9.9.99 does not exist.
+# RELEASE_API_MODE=empty simulates an unreachable api.github.com (curl prints
+# nothing); RELEASE_API_MODE=ratelimit returns GitHub's rate-limit reply.
+RELEASE_API_MODE="normal"
 release_api_reply() {
+    case "$RELEASE_API_MODE" in
+        empty) return 0 ;;
+        ratelimit)
+            case "$*" in
+                *"%{http_code}"*) printf '403' ;;
+                *) printf '{"message":"API rate limit exceeded"}' ;;
+            esac
+            return 0
+            ;;
+    esac
     case "$*" in
         *"/tags/v9.9.99"*) printf '404' ;;
         *"%{http_code}"*) printf '200' ;;
@@ -425,6 +438,22 @@ run_install_command --version 1.2
 assert_eq "$INSTALL_STATUS" "1" "install --version 1.2: rejects an invalid version"
 assert_eq "$(installed_version)" "" "install --version 1.2: installs nothing"
 
+# A failed release lookup must never resolve pre-release to an empty tag
+for api_mode in empty ratelimit; do
+    RELEASE_API_MODE="$api_mode"
+    run_install_command --pre-release
+    RELEASE_API_MODE="normal"
+    assert_eq "$INSTALL_STATUS" "1" "install --pre-release, GitHub $api_mode: exits 1"
+    assert_false "install --pre-release, GitHub $api_mode: install_node not called" grep -q "^install_node" "$INSTALL_CALLS"
+done
+
+# The default install keeps working without api.github.com: latest needs no resolved tag
+RELEASE_API_MODE="empty"
+run_install_command
+RELEASE_API_MODE="normal"
+assert_eq "$INSTALL_STATUS" "0" "install (latest), GitHub unreachable: exits 0"
+assert_eq "$(installed_version)" "latest" "install (latest), GitHub unreachable: installs image tag latest"
+
 # -----------------------------------------------------------------------
 # set_node_image_tag  (compose image rewrite used by install_node)
 # Needs mikefarah yq v4 (what install_yq installs); skipped otherwise.
@@ -451,6 +480,23 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     fi
     assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "pasarguard/node:v0.5.4" \
         "set_node_image_tag: a dev compose file can move back to a release tag"
+
+    # Only the tag after the last path segment changes; untagged images get one
+    for image_case in "pasarguard/node|pasarguard/node:dev" \
+        "registry.example.com:5000/pasarguard/node:latest|registry.example.com:5000/pasarguard/node:dev" \
+        "registry.example.com:5000/pasarguard/node|registry.example.com:5000/pasarguard/node:dev" \
+        "mirror.example.com/pasarguard/node:v0.5.4|mirror.example.com/pasarguard/node:dev"; do
+        image_before="${image_case%%|*}"
+        image_after="${image_case#*|}"
+        yq eval ".services[\"node\"].image = \"$image_before\"" -i "$image_compose"
+        if set_node_image_tag "dev" "$image_compose"; then
+            pass "set_node_image_tag: $image_before rewrite succeeds"
+        else
+            fail "set_node_image_tag: $image_before rewrite succeeds"
+        fi
+        assert_eq "$(yq eval -r '.services["node"].image' "$image_compose")" "$image_after" \
+            "set_node_image_tag: $image_before -> $image_after"
+    done
 else
     echo "(skipped set_node_image_tag: mikefarah yq v4 not available)"
 fi
@@ -591,6 +637,14 @@ assert_update_refused "update --version v9.9.99 (no such release)"
 assert_true "update --version v9.9.99: checked releases/tags/v9.9.99" \
     grep -q "PasarGuard/node/releases/tags/v9.9.99" "$UPDATE_CALLS"
 
+for api_mode in empty ratelimit; do
+    make_update_fixture "latest"
+    RELEASE_API_MODE="$api_mode"
+    run_update_command --version pre-release
+    RELEASE_API_MODE="normal"
+    assert_update_refused "update --version pre-release, GitHub $api_mode"
+done
+
 make_update_fixture "latest"
 UPDATE_TAG_FAILS="true"
 run_update_command --dev
@@ -636,6 +690,14 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     assert_eq "$UPDATE_STATUS" "0" "update -v latest: exits 0"
     assert_eq "$(fixture_image)" "pasarguard/node:latest" "update -v latest: dev node goes back to pasarguard/node:latest"
     assert_true "update -v latest: checked releases/latest" grep -q "PasarGuard/node/releases/latest" "$UPDATE_CALLS"
+
+    make_update_fixture "dev"
+    RELEASE_API_MODE="empty"
+    run_update_command --version latest
+    RELEASE_API_MODE="normal"
+    assert_eq "$UPDATE_STATUS" "0" "update --version latest, GitHub unreachable: exits 0"
+    assert_eq "$(fixture_image)" "pasarguard/node:latest" \
+        "update --version latest, GitHub unreachable: image becomes pasarguard/node:latest"
 
     make_update_fixture "latest"
     run_update_command --version pre-release

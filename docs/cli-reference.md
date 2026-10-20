@@ -245,10 +245,12 @@ Updates the `pg-node` script, pulls the node image and recreates the container. 
 
 **Options:**
 - `--dev`: Switch the node to the `pasarguard/node:dev` image, built from the node `dev` branch (unreleased, for testing).
-- `-v`, `--version <VERSION>`: Switch the node to a release tag (`vX.Y.Z`), `latest` (the latest stable release) or `pre-release`. Checked against GitHub releases the same way as `install --version`.
+- `-v`, `--version <VERSION>`: Switch the node to a release tag (`vX.Y.Z`), `latest` (the `latest` image tag, which follows stable releases on later updates) or `pre-release` (pins the newest release tag, pre-releases included). Checked against GitHub releases the same way as `install --version`; if that lookup fails, `pre-release` is refused before anything changes.
 - `--no-update-service`: Do not update the companion node-serviced daemon.
 
-`--dev` and `--version` cannot be combined.
+`--dev` and `--version` cannot be combined. The line `Switching node image to: dev` (or the chosen tag) shows that the switch was applied.
+
+On a node installed before these options existed, the installed script ignores them on its first run. Run `sudo pg-node update` once (it also updates the script itself), then `sudo pg-node update --dev`.
 
 ```bash
 sudo pg-node update --dev
