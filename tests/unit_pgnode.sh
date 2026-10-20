@@ -337,6 +337,16 @@ release_api_reply() {
             esac
             return 0
             ;;
+        rc_of_stable)
+            # The newest pre-release is an older candidate of the current stable release
+            case "$*" in
+                *"%{http_code}"*) printf '200' ;;
+                */releases/latest*) printf '{"tag_name":"v9.9.9"}' ;;
+                */releases) printf '[{"tag_name":"v9.9.9-rc.1","prerelease":true}]' ;;
+                *) printf '{}' ;;
+            esac
+            return 0
+            ;;
     esac
     case "$*" in
         *"/tags/v9.9.99"*) printf '404' ;;
@@ -426,6 +436,12 @@ run_install_command --pre-release
 assert_eq "$INSTALL_STATUS" "0" "install --pre-release: exits 0"
 assert_eq "$(installed_version)" "v9.9.10-beta" "install --pre-release: installs the newest release tag"
 
+RELEASE_API_MODE="rc_of_stable"
+run_install_command --pre-release
+RELEASE_API_MODE="normal"
+assert_eq "$INSTALL_STATUS" "0" "install --pre-release, rc older than stable: exits 0"
+assert_eq "$(installed_version)" "v9.9.9" "install --pre-release, rc older than stable: installs the stable release"
+
 run_install_command --version v1.2.3
 assert_eq "$INSTALL_STATUS" "0" "install --version v1.2.3: exits 0"
 assert_eq "$(installed_version)" "v1.2.3" "install --version v1.2.3: installs image tag v1.2.3"
@@ -500,6 +516,37 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
 else
     echo "(skipped set_node_image_tag: mikefarah yq v4 not available)"
 fi
+
+# -----------------------------------------------------------------------
+# set_install_image_tag: install must stop when it cannot set the requested tag
+# -----------------------------------------------------------------------
+INSTALL_TAG_CALLS="$WORK_DIR/install-tag-calls.log"
+for tag_case in "dev fail" "v1.2.3 fail" "dev ok" "latest fail"; do
+    read -r tag_version tag_result <<<"$tag_case"
+    : > "$INSTALL_TAG_CALLS"
+    if tag_out=$(
+        set_node_image_tag() { echo "set_node_image_tag $1" >> "$INSTALL_TAG_CALLS"; [ "$tag_result" = "ok" ]; }
+        set_install_image_tag "$tag_version" "$WORK_DIR/unused-compose.yml" 2>&1
+    ); then
+        tag_status=0
+    else
+        tag_status=$?
+    fi
+    case "$tag_case" in
+        "latest fail")
+            assert_eq "$tag_status" "0" "set_install_image_tag latest: exits 0"
+            assert_false "set_install_image_tag latest: no rewrite" test -s "$INSTALL_TAG_CALLS"
+            ;;
+        *fail)
+            assert_eq "$tag_status" "1" "set_install_image_tag $tag_version, rewrite fails: exits 1"
+            assert_true "set_install_image_tag $tag_version, rewrite fails: names the tag and mikefarah yq v4" \
+                grep -q "${tag_version}.*mikefarah yq v4" <<<"$tag_out"
+            ;;
+        *ok)
+            assert_eq "$tag_status" "0" "set_install_image_tag $tag_version, rewrite ok: exits 0"
+            ;;
+    esac
+done
 
 # -----------------------------------------------------------------------
 # update_command image selection (--dev, --version) and the plain update.
@@ -704,6 +751,14 @@ if command -v yq >/dev/null 2>&1 && yq --version 2>/dev/null | grep -q "mikefara
     assert_eq "$UPDATE_STATUS" "0" "update --version pre-release: exits 0"
     assert_eq "$(fixture_image)" "pasarguard/node:v9.9.10-beta" \
         "update --version pre-release: image becomes the newest release tag"
+
+    make_update_fixture "latest"
+    RELEASE_API_MODE="rc_of_stable"
+    run_update_command --version pre-release
+    RELEASE_API_MODE="normal"
+    assert_eq "$UPDATE_STATUS" "0" "update --version pre-release, rc older than stable: exits 0"
+    assert_eq "$(fixture_image)" "pasarguard/node:v9.9.9" \
+        "update --version pre-release, rc older than stable: image becomes the stable release"
 else
     echo "(skipped update --dev/--version tag rewrites: mikefarah yq v4 not available)"
 fi

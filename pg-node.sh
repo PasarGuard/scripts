@@ -723,6 +723,25 @@ set_node_image_tag() {
     yq eval ".services[\"node\"].image = (.services[\"node\"].image | sub(\"(:[^/:]*)?$\"; \":${tag}\"))" -i "$compose_file"
 }
 
+# Point a fresh install's compose file at the requested image tag. latest is the
+# downloaded default, so nothing is rewritten; any other tag must be set, or the
+# install would finish on the wrong image, so a failed rewrite stops the install.
+# Arguments:
+#   $1 - Requested node version (latest, dev or a release tag).
+#   $2 - Path to the docker-compose.yml to edit in place.
+set_install_image_tag() {
+    local node_version="$1"
+    local compose_file="$2"
+    [ "$node_version" = "latest" ] && return 0
+    colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
+    if set_node_image_tag "$node_version" "$compose_file"; then
+        colorized_echo green "  ✓ Docker image version set to: ${node_version}"
+    else
+        colorized_echo red "  ✗ Failed to set the node image tag to ${node_version} (mikefarah yq v4 is required)"
+        exit 1
+    fi
+}
+
 # Download compose files, set up certificates, configure .env, and deploy the node.
 install_node() {
     local node_version=$1
@@ -897,14 +916,7 @@ install_node() {
     ssl_key_env="${container_path}/certs/ssl_key.pem"
     sed -i "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|" "$APP_DIR/.env"
     sed -i "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|" "$APP_DIR/.env"
-    if [ "$node_version" != "latest" ]; then
-        colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
-        if set_node_image_tag "$node_version" "$APP_DIR/docker-compose.yml"; then
-            colorized_echo green "  ✓ Docker image version set to: ${node_version}"
-        else
-            colorized_echo yellow "  ⚠ Failed to set image version (may not be critical)"
-        fi
-    fi
+    set_install_image_tag "$node_version" "$APP_DIR/docker-compose.yml"
     # Final sync to ensure env has the correct SSL paths for custom names
     sync_env_ssl_paths
     colorized_echo green "✓ docker-compose.yml modified successfully"
@@ -1110,9 +1122,19 @@ check_node_version_exists() {
         elif [ "$latest_pre_release_tag" == "null" ]; then
             node_version=$latest_stable_tag
         else
-            # Compare versions using sort -V
-            local chosen_version=$(printf "%s\n" "$latest_stable_tag" "$latest_pre_release_tag" | sort -V | tail -n 1)
-            node_version=$chosen_version
+            # sort -V puts v1.0.0-rc.1 after v1.0.0, which would pick an older release
+            # candidate over the stable release it led to. Compare the base versions
+            # (the part before the first "-") instead: a pre-release wins only when its
+            # base is newer, so the result does not depend on which sort -V is installed.
+            local stable_base="${latest_stable_tag%%-*}"
+            local pre_release_base="${latest_pre_release_tag%%-*}"
+            local newest_base
+            newest_base=$(printf "%s\n" "$stable_base" "$pre_release_base" | sort -V | tail -n 1)
+            if [ "$pre_release_base" != "$stable_base" ] && [ "$newest_base" = "$pre_release_base" ]; then
+                node_version=$latest_pre_release_tag
+            else
+                node_version=$latest_stable_tag
+            fi
         fi
         return 0
     fi
