@@ -711,6 +711,37 @@ read_and_save_file() {
     done
 }
 
+# Replace the image tag of the node service in a compose file (e.g. :latest -> :dev).
+# Only a tag after the last path segment is replaced (an untagged image gets one),
+# so a registry port such as registry:5000/pasarguard/node is kept. Needs mikefarah yq v4.
+# Arguments:
+#   $1 - Image tag (a release tag such as v0.5.4, or dev).
+#   $2 - Path to the docker-compose.yml to edit in place.
+set_node_image_tag() {
+    local tag="$1"
+    local compose_file="$2"
+    yq eval ".services[\"node\"].image = (.services[\"node\"].image | sub(\"(:[^/:]*)?$\"; \":${tag}\"))" -i "$compose_file"
+}
+
+# Point a fresh install's compose file at the requested image tag. latest is the
+# downloaded default, so nothing is rewritten; any other tag must be set, or the
+# install would finish on the wrong image, so a failed rewrite stops the install.
+# Arguments:
+#   $1 - Requested node version (latest, dev or a release tag).
+#   $2 - Path to the docker-compose.yml to edit in place.
+set_install_image_tag() {
+    local node_version="$1"
+    local compose_file="$2"
+    [ "$node_version" = "latest" ] && return 0
+    colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
+    if set_node_image_tag "$node_version" "$compose_file"; then
+        colorized_echo green "  ✓ Docker image version set to: ${node_version}"
+    else
+        colorized_echo red "  ✗ Failed to set the node image tag to ${node_version} (mikefarah yq v4 is required)"
+        exit 1
+    fi
+}
+
 # Download compose files, set up certificates, configure .env, and deploy the node.
 install_node() {
     local node_version=$1
@@ -885,14 +916,7 @@ install_node() {
     ssl_key_env="${container_path}/certs/ssl_key.pem"
     sed -i "s|^SSL_CERT_FILE *=.*|SSL_CERT_FILE= ${ssl_cert_env}|" "$APP_DIR/.env"
     sed -i "s|^SSL_KEY_FILE *=.*|SSL_KEY_FILE= ${ssl_key_env}|" "$APP_DIR/.env"
-    if [ "$node_version" != "latest" ]; then
-        colorized_echo cyan "  Command: yq eval ...image = ...:${node_version}..."
-        if yq eval ".services[\"$service_name\"].image = (.services[\"$service_name\"].image | sub(\":.*$\"; \":${node_version}\"))" -i "$APP_DIR/docker-compose.yml" 2>/dev/null; then
-            colorized_echo green "  ✓ Docker image version set to: ${node_version}"
-        else
-            colorized_echo yellow "  ⚠ Failed to set image version (may not be critical)"
-        fi
-    fi
+    set_install_image_tag "$node_version" "$APP_DIR/docker-compose.yml"
     # Final sync to ensure env has the correct SSL paths for custom names
     sync_env_ssl_paths
     colorized_echo green "✓ docker-compose.yml modified successfully"
@@ -1063,6 +1087,94 @@ is_node_up() {
     fi
 }
 
+# Check that a node image version exists as a GitHub release of PasarGuard/node.
+# Arguments:
+#   $1 - latest, pre-release, dev, or a release tag such as v0.5.4.
+# Globals:
+#   node_version - for pre-release, set to the newer of the latest stable and latest pre-release tags.
+# Returns:
+#   0 if the version can be used, 1 otherwise.
+check_node_version_exists() {
+    local version=$1
+    local repo_url="https://api.github.com/repos/PasarGuard/node/releases"
+    # dev is the Docker image built from the node dev branch, not a GitHub release
+    if [ "$version" == "dev" ]; then
+        return 0
+    fi
+    if [ "$version" == "latest" ]; then
+        local latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
+        # Check if there is any stable release of  node v1
+        if [ "$latest_tag" == "null" ]; then
+            return 1
+        fi
+        return 0
+    fi
+    if [ "$version" == "pre-release" ]; then
+        local latest_stable_tag=$(curl -s "$repo_url/latest" | jq -r '.tag_name')
+        local latest_pre_release_tag=$(curl -s "$repo_url" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
+        # An unreachable or rate-limited API leaves these empty; treat that like "no release"
+        [ -n "$latest_stable_tag" ] || latest_stable_tag="null"
+        [ -n "$latest_pre_release_tag" ] || latest_pre_release_tag="null"
+        if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
+            return 1 # No releases found at all
+        elif [ "$latest_stable_tag" == "null" ]; then
+            node_version=$latest_pre_release_tag
+        elif [ "$latest_pre_release_tag" == "null" ]; then
+            node_version=$latest_stable_tag
+        else
+            # sort -V puts v1.0.0-rc.1 after v1.0.0, which would pick an older release
+            # candidate over the stable release it led to. Compare the base versions
+            # (the part before the first "-") instead: a pre-release wins only when its
+            # base is newer, so the result does not depend on which sort -V is installed.
+            local stable_base="${latest_stable_tag%%-*}"
+            local pre_release_base="${latest_pre_release_tag%%-*}"
+            local newest_base
+            newest_base=$(printf "%s\n" "$stable_base" "$pre_release_base" | sort -V | tail -n 1)
+            if [ "$pre_release_base" != "$stable_base" ] && [ "$newest_base" = "$pre_release_base" ]; then
+                node_version=$latest_pre_release_tag
+            else
+                node_version=$latest_stable_tag
+            fi
+        fi
+        return 0
+    fi
+    # Check if the repos contains the version tag
+    if curl -s -o /dev/null -w "%{http_code}" "${repo_url}/tags/${version}" | grep -q "^200$"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Validate node_version (format, then GitHub release) and print why it cannot be used.
+# Globals:
+#   node_version - the requested version; pre-release is resolved to a release tag.
+# Returns:
+#   0 if the version can be used, 1 otherwise.
+validate_node_version() {
+    if ! [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" == "dev" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        colorized_echo red "✗ Invalid version format. Please enter a valid version (e.g. v1.0.0)"
+        return 1
+    fi
+    if ! check_node_version_exists "$node_version"; then
+        colorized_echo red "✗ Version $node_version does not exist. Please enter a valid version (e.g. v0.1.2)"
+        return 1
+    fi
+    # Never hand an empty or malformed resolved tag to the compose rewrite
+    local release_tag_regex='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+    if ! [[ "$node_version" == "latest" || "$node_version" == "dev" || "$node_version" =~ $release_tag_regex ]]; then
+        colorized_echo red "✗ Could not resolve a node release tag (got '$node_version'). Check that api.github.com is reachable."
+        return 1
+    fi
+    return 0
+}
+
+# Warn that the dev image is an unreleased build and how to leave it.
+print_dev_image_note() {
+    colorized_echo yellow "Note: pasarguard/node:dev is an unreleased build of the node dev branch, meant for testing only."
+    colorized_echo yellow "      '$APP_NAME update' pulls the newest dev build; '$APP_NAME update --version latest' returns to the latest release."
+}
+
 # Execute node installation workflow with option parsing and setup.
 install_command() {
     check_running_as_root
@@ -1076,7 +1188,7 @@ install_command() {
         case $key in
         -v | --version)
             if [[ "$node_version_set" == "true" ]]; then
-                colorized_echo red "Error: Cannot use --pre-release and --version options simultaneously."
+                colorized_echo red "Error: Cannot use --pre-release, --dev and --version options simultaneously."
                 exit 1
             fi
             node_version="$2"
@@ -1085,10 +1197,19 @@ install_command() {
             ;;
         --pre-release)
             if [[ "$node_version_set" == "true" ]]; then
-                colorized_echo red "Error: Cannot use --pre-release and --version options simultaneously."
+                colorized_echo red "Error: Cannot use --pre-release, --dev and --version options simultaneously."
                 exit 1
             fi
             node_version="pre-release"
+            node_version_set="true"
+            shift
+            ;;
+        --dev)
+            if [[ "$node_version_set" == "true" ]]; then
+                colorized_echo red "Error: Cannot use --pre-release, --dev and --version options simultaneously."
+                exit 1
+            fi
+            node_version="dev"
             node_version_set="true"
             shift
             ;;
@@ -1178,58 +1299,19 @@ install_command() {
         install_yq
     fi
     detect_compose
-    # Function to check if a version exists in the GitHub releases
-    check_version_exists() {
-        local version=$1
-        repo_url="https://api.github.com/repos/PasarGuard/node/releases"
-        if [ "$version" == "latest" ]; then
-            latest_tag=$(curl -s ${repo_url}/latest | jq -r '.tag_name')
-            # Check if there is any stable release of  node v1
-            if [ "$latest_tag" == "null" ]; then
-                return 1
-            fi
-            return 0
-        fi
-        if [ "$version" == "pre-release" ]; then
-            local latest_stable_tag=$(curl -s "$repo_url/latest" | jq -r '.tag_name')
-            local latest_pre_release_tag=$(curl -s "$repo_url" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
-            if [ "$latest_stable_tag" == "null" ] && [ "$latest_pre_release_tag" == "null" ]; then
-                return 1 # No releases found at all
-            elif [ "$latest_stable_tag" == "null" ]; then
-                node_version=$latest_pre_release_tag
-            elif [ "$latest_pre_release_tag" == "null" ]; then
-                node_version=$latest_stable_tag
-            else
-                # Compare versions using sort -V
-                local chosen_version=$(printf "%s\n" "$latest_stable_tag" "$latest_pre_release_tag" | sort -V | tail -n 1)
-                node_version=$chosen_version
-            fi
-            return 0
-        fi
-        # Check if the repos contains the version tag
-        if curl -s -o /dev/null -w "%{http_code}" "${repo_url}/tags/${version}" | grep -q "^200$"; then
-            return 0
-        else
-            return 1
-        fi
-    }
     # Check if the version is valid and exists
-    if [[ "$node_version" == "latest" || "$node_version" == "pre-release" || "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        if check_version_exists "$node_version"; then
-            colorized_echo cyan "================================"
-            colorized_echo cyan "Installing PasarGuard Node"
-            colorized_echo cyan "Version: $node_version"
-            colorized_echo cyan "================================"
-            install_node "$node_version"
-            colorized_echo green "✓ Node installation completed for version: $node_version"
-        else
-            colorized_echo red "✗ Version $node_version does not exist. Please enter a valid version (e.g. v0.1.2)"
-            exit 1
-        fi
-    else
-        colorized_echo red "✗ Invalid version format. Please enter a valid version (e.g. v1.0.0)"
+    if ! validate_node_version; then
         exit 1
     fi
+    colorized_echo cyan "================================"
+    colorized_echo cyan "Installing PasarGuard Node"
+    colorized_echo cyan "Version: $node_version"
+    colorized_echo cyan "================================"
+    if [ "$node_version" == "dev" ]; then
+        print_dev_image_note
+    fi
+    install_node "$node_version"
+    colorized_echo green "✓ Node installation completed for version: $node_version"
     install_node_script
     install_completion
     up_node
@@ -1712,12 +1794,37 @@ logs_command() {
 update_command() {
     check_running_as_root
     local no_update_service=false
+    # Image tag to switch to (--dev or --version); empty keeps the tag in the compose file
+    local node_version=""
+    local node_version_set="false"
     # Parse args
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
         --no-update-service)
             no_update_service=true
             shift
+            ;;
+        --dev)
+            if [[ "$node_version_set" == "true" ]]; then
+                colorized_echo red "Error: Cannot use --dev and --version options simultaneously."
+                exit 1
+            fi
+            node_version="dev"
+            node_version_set="true"
+            shift
+            ;;
+        -v | --version)
+            if [[ "$node_version_set" == "true" ]]; then
+                colorized_echo red "Error: Cannot use --dev and --version options simultaneously."
+                exit 1
+            fi
+            if [[ -z "${2:-}" ]]; then
+                colorized_echo red "Error: --version requires a value."
+                exit 1
+            fi
+            node_version="$2"
+            node_version_set="true"
+            shift 2
             ;;
         *)
             break
@@ -1730,10 +1837,34 @@ update_command() {
         colorized_echo red "node not installed!"
         exit 1
     fi
+    if [ "$node_version_set" = true ]; then
+        if ! command -v jq >/dev/null 2>&1; then
+            detect_os
+            install_package jq
+        fi
+        if ! command -v yq >/dev/null 2>&1; then
+            install_yq
+        fi
+        if ! validate_node_version; then
+            exit 1
+        fi
+    fi
     detect_compose
     update_node_script
     uninstall_completion
     install_completion
+    if [ "$node_version_set" = true ]; then
+        # Only the image tag changes; .env, the API key and certificates stay as they are
+        colorized_echo blue "Switching node image to: $node_version"
+        if [ "$node_version" == "dev" ]; then
+            print_dev_image_note
+        fi
+        if ! set_node_image_tag "$node_version" "$COMPOSE_FILE"; then
+            colorized_echo red "✗ Failed to set the node image tag in $COMPOSE_FILE (mikefarah yq v4 is required)"
+            exit 1
+        fi
+        colorized_echo green "✓ Docker image version set to: $node_version"
+    fi
     colorized_echo blue "Pulling latest version"
     update_node
     colorized_echo blue "Restarting node services"
@@ -2110,12 +2241,15 @@ usage() {
     colorized_echo yellow "  --no-restart-service    $(tput sgr0)✓  Skip restarting systemd service"
     colorized_echo cyan "Update Options:"
     colorized_echo yellow "  --no-update-service     $(tput sgr0)✓  Skip updating systemd service"
+    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Switch to the dev image (unreleased, for testing)"
+    colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Switch to a release tag, latest or pre-release"
     colorized_echo cyan "Uninstall Options:"
     colorized_echo yellow "  -y, --yes               $(tput sgr0)✓  Auto-confirm uninstall and data removal"
     colorized_echo yellow "  --name NAME             $(tput sgr0)✓  Uninstall specific node instance"
     colorized_echo cyan "Install Options:"
     colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Install specific version"
     colorized_echo yellow "  --pre-release           $(tput sgr0)✓  Install pre-release version"
+    colorized_echo yellow "  --dev                   $(tput sgr0)✓  Install the dev image (unreleased, for testing)"
     colorized_echo yellow "  --name NAME             $(tput sgr0)✓  Install with custom name"
     colorized_echo yellow "  --override              $(tput sgr0)✓  Override existing installation"
     colorized_echo yellow "  --api-key KEY           $(tput sgr0)✓  Set API Key"
