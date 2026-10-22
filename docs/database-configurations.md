@@ -92,12 +92,15 @@ In `/opt/pasarguard/.env`, you can customize PostgreSQL and PgBouncer memory and
 PG_MAX_CONNECTIONS=400       # Maximum physical backend connections
 PG_SHARED_BUFFERS=512MB      # Dedicated cache memory (recommended: 25% of RAM)
 PG_WORK_MEM=16MB             # Memory used for internal sort operations
+PG_SHM_SIZE=1gb              # Container /dev/shm size (parallel queries and VACUUM)
 
 # PgBouncer Pooling Parameters
 PG_MAX_CLIENT_CONN=600       # Maximum client connections accepted by PgBouncer
 PG_DEFAULT_POOL_SIZE=50      # Default connection pool size per database
 PG_RESERVE_POOL_SIZE=25      # Reserve connections for traffic bursts
 ```
+
+The PostgreSQL and TimescaleDB containers set `shm_size` to `PG_SHM_SIZE` (default `1gb`). PostgreSQL keeps parallel-query and parallel `VACUUM` shared memory in `/dev/shm`, and Docker's default of 64 MB makes concurrent dashboard queries and `VACUUM` fail with `could not resize shared memory segment`. Installs created before this change do not get it automatically: add `shm_size: ${PG_SHM_SIZE:-1gb}` to the `postgresql` (or `timescaledb`) service in `/opt/pasarguard/docker-compose.yml` (`pasarguard edit`), then run `pasarguard restart`, which recreates the containers (a short downtime for the whole stack).
 
 #### pgAdmin 4 Management Interface
 - **Access**: `http://<server-ip>:8010`

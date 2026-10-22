@@ -17,6 +17,7 @@ SUITES=(
     "unit_restore_archive_safety.sh"
     "unit_restore_recovery.sh"
     "unit_backup_metadata.sh"
+    "unit_compose_templates.sh"
     "test_script_update_safety.sh"
 )
 

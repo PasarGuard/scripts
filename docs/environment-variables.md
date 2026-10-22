@@ -46,6 +46,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 | `PG_MAX_CONNECTIONS` | Max backend connections for PostgreSQL. | `400` | `400` |
 | `PG_SHARED_BUFFERS` | Dedicated database buffer cache. | `512MB` (or 25% of RAM) | `512MB` |
 | `PG_WORK_MEM` | Memory allocated per query sort operation. | `16MB` | `16MB` |
+| `PG_SHM_SIZE` | Container `/dev/shm` size, used by parallel queries and `VACUUM`. | `1gb` | `1gb` |
 | `PG_MAX_CLIENT_CONN` | Maximum incoming client connections handled by PgBouncer. | `600` | `600` |
 | `PG_DEFAULT_POOL_SIZE` | Persistent server connection pool size in PgBouncer. | `50` | `50` |
 | `PG_RESERVE_POOL_SIZE` | Emergency burst pool size for peak connection spikes. | `25` | `25` |
