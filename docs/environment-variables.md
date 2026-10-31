@@ -34,6 +34,7 @@ Complete reference for configuration parameters found in `/opt/pasarguard/.env` 
 | `DB_USER` | Primary database user. | `pasarguard` |
 | `DB_PASSWORD` | Primary database user password. | `Secr3tP@ssw0rd!` |
 | `MYSQL_ROOT_PASSWORD` | Root password for MySQL or MariaDB containers. | `RootP@ssw0rd!` |
+| `MYSQL_BUFFER_POOL_SIZE` | InnoDB buffer pool size for MySQL or MariaDB. The installer sets about 25% of RAM (256M to 4096M); the compose default is `256M`. | `1024M` |
 
 ---
 

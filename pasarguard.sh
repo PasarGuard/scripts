@@ -1126,6 +1126,23 @@ set_pasarguard_panel_image() {
     fi
 }
 
+# Print an InnoDB buffer pool size for this host: about 25% of RAM in 128M steps,
+# kept between 256M and 4096M. Falls back to 256M when RAM cannot be read.
+# Arguments:
+#   $1 - meminfo file (default /proc/meminfo).
+mysql_buffer_pool_size_for_ram() {
+    local meminfo="${1:-/proc/meminfo}" total_kb mb
+    total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "$meminfo" 2>/dev/null || true)
+    if ! [[ "$total_kb" =~ ^[0-9]+$ ]]; then
+        echo "256M"
+        return
+    fi
+    mb=$((total_kb / 1024 / 4 / 128 * 128))
+    [ "$mb" -lt 256 ] && mb=256
+    [ "$mb" -gt 4096 ] && mb=4096
+    echo "${mb}M"
+}
+
 # Download template files, configure database, and set image tag for PasarGuard installation.
 # Arguments:
 #   $1 - Version string.
@@ -1193,6 +1210,9 @@ install_pasarguard() {
             DB_PORT="3306"
             MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             echo "MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\"" >>"$ENV_FILE"
+            MYSQL_BUFFER_POOL_SIZE=$(mysql_buffer_pool_size_for_ram)
+            echo "MYSQL_BUFFER_POOL_SIZE=\"$MYSQL_BUFFER_POOL_SIZE\"" >>"$ENV_FILE"
+            colorized_echo green "$db_name buffer pool: $MYSQL_BUFFER_POOL_SIZE (change MYSQL_BUFFER_POOL_SIZE in .env)"
         fi
 
         if [[ "$database_type" =~ ^(postgresql|timescaledb)$ ]]; then

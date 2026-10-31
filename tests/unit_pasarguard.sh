@@ -752,6 +752,21 @@ assert_true "run_all.sh: increments FAILED for missing suites" \
 assert_true "run_all.sh: records missing suites in FAILED_LIST" \
     contains "$missing_branch" 'FAILED_LIST+=("$suite (missing)")'
 
+# -----------------------------------------------------------------------
+# mysql_buffer_pool_size_for_ram
+# -----------------------------------------------------------------------
+meminfo_with() { printf 'MemTotal:       %s kB\nMemFree:         1000 kB\n' "$1" >"$WORK_DIR/meminfo"; echo "$WORK_DIR/meminfo"; }
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 1000000)")" "256M" "buffer_pool: 1 GB host gets the 256M floor"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 2014000)")" "384M" "buffer_pool: 2 GB host gets 384M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 4194304)")" "1024M" "buffer_pool: 4 GB host gets 1024M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)")" "2048M" "buffer_pool: 8 GB host gets 2048M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 67108864)")" "4096M" "buffer_pool: 64 GB host is capped at 4096M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$WORK_DIR/no-such-meminfo")" "256M" "buffer_pool: unreadable meminfo falls back to 256M"
+for f in pasarguard-mysql.yml pasarguard-mariadb.yml; do
+    assert_true "$f: buffer pool reads MYSQL_BUFFER_POOL_SIZE" \
+        grep -Fq -- '--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}' "$ROOT_DIR/docker-compose/$f"
+done
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

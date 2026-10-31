@@ -63,8 +63,10 @@ MySQL and MariaDB run in dedicated Docker containers with optional phpMyAdmin ac
   DB_USER="pasarguard"
   DB_PASSWORD="your-strong-password"
   MYSQL_ROOT_PASSWORD="generated-root-password"
+  MYSQL_BUFFER_POOL_SIZE="1024M"
   SQLALCHEMY_DATABASE_URL="mysql+pymysql://pasarguard:your-strong-password@127.0.0.1:3306/pasarguard"
   ```
+- **Buffer pool**: `MYSQL_BUFFER_POOL_SIZE` sets `--innodb-buffer-pool-size`, the InnoDB cache for tables and indexes. The installer sets it to about 25% of the host RAM, between `256M` and `4096M` (for example `1024M` on a 4 GB host). Without the variable the container uses `256M`. A large panel needs more: in a test with 100k users and 33M usage rows on 2 CPUs and 4 GB, one usage write took about 11.6 s with `256M` (the job runs every 10 s) and 1.7 s with `2048M`. To change it, edit `/opt/pasarguard/.env` and run `pasarguard restart`. Installs created before this change keep the fixed `256M` in their compose file: replace `--innodb-buffer-pool-size=256M` with `--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}` in `/opt/pasarguard/docker-compose.yml` (`pasarguard edit`) and add the variable to `.env`.
 
 ---
 
