@@ -752,6 +752,45 @@ assert_true "run_all.sh: increments FAILED for missing suites" \
 assert_true "run_all.sh: records missing suites in FAILED_LIST" \
     contains "$missing_branch" 'FAILED_LIST+=("$suite (missing)")'
 
+# -----------------------------------------------------------------------
+# mysql_buffer_pool_size_for_ram
+# -----------------------------------------------------------------------
+meminfo_with() { printf 'MemTotal:       %s kB\nMemFree:         1000 kB\n' "$1" >"$WORK_DIR/meminfo"; echo "$WORK_DIR/meminfo"; }
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 1000000)" "$WORK_DIR/no-cgroup")" "256M" "buffer_pool: 1 GB host gets the 256M floor"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 2014000)" "$WORK_DIR/no-cgroup")" "384M" "buffer_pool: 2 GB host gets 384M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 4194304)" "$WORK_DIR/no-cgroup")" "1024M" "buffer_pool: 4 GB host gets 1024M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/no-cgroup")" "2048M" "buffer_pool: 8 GB host gets 2048M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 67108864)" "$WORK_DIR/no-cgroup")" "4096M" "buffer_pool: 64 GB host is capped at 4096M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$WORK_DIR/no-such-meminfo")" "256M" "buffer_pool: unreadable meminfo falls back to 256M"
+# Fake cgroup trees: v2 has cgroup.controllers at the root, v1 a memory/ hierarchy
+CG="$WORK_DIR/cg"
+mkdir -p "$CG/v2/outer/inner" "$CG/v2max/a" "$CG/v1/memory/outer/inner"
+touch "$CG/v2/cgroup.controllers" "$CG/v2max/cgroup.controllers"
+echo max >"$CG/v2/outer/inner/memory.max"
+echo 2147483648 >"$CG/v2/outer/memory.max"
+echo max >"$CG/v2max/a/memory.max"
+echo 9223372036854771712 >"$CG/v1/memory/memory.limit_in_bytes"
+echo 1073741824 >"$CG/v1/memory/outer/memory.limit_in_bytes"
+echo 9223372036854771712 >"$CG/v1/memory/outer/inner/memory.limit_in_bytes"
+printf '0::/outer/inner\n' >"$CG/self-v2"
+printf '0::/a\n' >"$CG/self-v2max"
+printf '5:cpu,cpuacct:/x\n4:memory:/outer/inner\n' >"$CG/self-v1"
+printf '0::/\n' >"$CG/self-root"
+mem32=$(meminfo_with 33554432)
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v2" "$CG/self-v2")" "512M" "buffer_pool: cgroup v2 ancestor limit of 2 GB wins over 32 GB RAM"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v1" "$CG/self-v1")" "256M" "buffer_pool: cgroup v1 ancestor limit of 1 GB wins over 32 GB RAM"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v2max" "$CG/self-v2max")" "4096M" "buffer_pool: cgroup v2 'max' means no limit"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v2" "$CG/self-root")" "4096M" "buffer_pool: root cgroup v2 has no limit"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/no-cgroup" "$CG/none")" "2048M" "buffer_pool: no cgroup files uses RAM"
+for f in pasarguard-mysql.yml pasarguard-mariadb.yml; do
+    assert_true "$f: buffer pool reads MYSQL_BUFFER_POOL_SIZE" \
+        grep -Fq -- '--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}' "$ROOT_DIR/docker-compose/$f"
+done
+assert_true "pasarguard-mysql.yml: one buffer pool instance keeps the exact size" \
+    grep -Fq -- '--innodb-buffer-pool-instances=1' "$ROOT_DIR/docker-compose/pasarguard-mysql.yml"
+assert_false "pasarguard-mariadb.yml: no removed instances option" \
+    grep -Fq -- 'innodb-buffer-pool-instances' "$ROOT_DIR/docker-compose/pasarguard-mariadb.yml"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
