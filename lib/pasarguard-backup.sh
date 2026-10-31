@@ -508,6 +508,77 @@ send_backup_error_to_telegram() {
 }
 
 # Interactive configuration wizard for scheduled automated Telegram backups.
+
+# --- light backup helpers ---
+LIGHT_BACKUP_FILE="/etc/pasarguard/backup-light"
+
+is_light_backup() {
+    [ -f "$LIGHT_BACKUP_FILE" ] || [ "${PASARGUARD_BACKUP_LIGHT:-0}" = "1" ]
+}
+
+toggle_light_backup() {
+    if [ -f "$LIGHT_BACKUP_FILE" ]; then
+        rm -f "$LIGHT_BACKUP_FILE"
+        colorized_echo yellow "Light backup disabled (full backup mode)."
+    else
+        mkdir -p "$(dirname "$LIGHT_BACKUP_FILE")"
+        touch "$LIGHT_BACKUP_FILE"
+        colorized_echo green "Light backup enabled: node_user_usages and node_usages will be skipped."
+    fi
+}
+
+append_light_schema() {
+    local container="$1"
+    local db="$2"
+    [ -n "$container" ] && [ -n "$db" ] || return 0
+    [ -s "$temp_dir/db_backup.sql" ] || return 0
+
+    local db_user="root"
+    local db_pass="${MYSQL_ROOT_PASSWORD:-}"
+    if [ -z "$db_pass" ]; then
+        db_user="${DB_USER:-${MYSQL_USER:-root}}"
+        db_pass="${DB_PASSWORD:-${MYSQL_PASSWORD:-}}"
+    fi
+    [ -n "$db_pass" ] || return 0
+
+    local dump_cmd="mariadb-dump"
+    if ! docker exec "$container" mariadb-dump --version >/dev/null 2>&1; then
+        dump_cmd="mysqldump"
+    fi
+
+    local schema_file
+    schema_file=$(mktemp) || return 0
+    if ! docker exec -e MYSQL_PWD="$db_pass" "$container" "$dump_cmd" \
+        -u "$db_user" --no-data --skip-add-drop-table --skip-comments --compact --no-create-db \
+        "$db" node_user_usages node_usages >"$schema_file" 2>>"$log_file"; then
+        rm -f "$schema_file"
+        return 0
+    fi
+
+    sed -i '/^-- Dump completed on/d' "$temp_dir/db_backup.sql"
+    {
+        printf '\n-- Light backup: schema for excluded usage tables\n'
+        printf 'USE `%s`;\n' "$db"
+        sed 's/^CREATE TABLE /CREATE TABLE IF NOT EXISTS /' "$schema_file"
+        printf -- '-- Dump completed on %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')"
+    } >>"$temp_dir/db_backup.sql"
+    rm -f "$schema_file"
+}
+
+sqlite_light_prune() {
+    local snapshot="$1"
+    is_light_backup || return 0
+    [ -f "$snapshot" ] || return 1
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    if ! sqlite3 "$snapshot" \
+        "PRAGMA journal_mode=DELETE; DELETE FROM node_user_usages; DELETE FROM node_usages; VACUUM;" \
+        >>"$log_file" 2>&1; then
+        return 1
+    fi
+    rm -f "${snapshot}-wal" "${snapshot}-shm" "${snapshot}-journal" 2>/dev/null || true
+    return 0
+}
+
 backup_service() {
     local telegram_bot_key=""
     local telegram_chat_id=""
@@ -515,6 +586,7 @@ backup_service() {
     local interval_minutes=""
     local backup_proxy_enabled="false"
     local backup_proxy_url=""
+    local light_status="OFF"
 
     colorized_echo blue "====================================="
     colorized_echo blue "      Welcome to Backup Service      "
@@ -534,6 +606,8 @@ backup_service() {
             interval_minutes=$(backup_interval_minutes_from_cron "$cron_schedule")
 
             masked_telegram_bot_key=$(mask_telegram_bot_key "$telegram_bot_key")
+            light_status="OFF"
+            [ -f "$LIGHT_BACKUP_FILE" ] && light_status="ON"
 
             colorized_echo green "====================================="
             colorized_echo green "Current Backup Configuration:"
@@ -546,6 +620,7 @@ backup_service() {
                 colorized_echo cyan "Proxy: Disabled"
             fi
             colorized_echo green "====================================="
+            colorized_echo cyan "Light backup: $light_status"
             echo "Choose an option:"
             echo "1. Check Backup Service"
             echo "2. Edit Backup Service"
@@ -553,7 +628,8 @@ backup_service() {
             echo "4. Remove Backup Service"
             echo "5. Request Instant Backup"
             echo "6. Exit"
-            read -p "Enter your choice (1-6): " user_choice
+            echo "7. Toggle light backup [$light_status]"
+            read -p "Enter your choice (1-7): " user_choice
 
             case $user_choice in
             1)
@@ -583,6 +659,10 @@ backup_service() {
             6)
                 colorized_echo yellow "Exiting..."
                 return
+                ;;
+            7)
+                toggle_light_backup
+                echo ""
                 ;;
             *)
                 colorized_echo red "Invalid choice. Please try again."
@@ -1052,7 +1132,7 @@ pg_dump_all_user_databases() {
 
         # Dump this database.
         if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" \
-            pg_dump -U "$backup_user" -d "$dbname" --clean --if-exists >"$out_dir/$filename" 2>>"$log_file"; then
+            pg_dump -U "$backup_user" -d "$dbname" --clean --if-exists "${LIGHT_PG_ARGS[@]}" >"$out_dir/$filename" 2>>"$log_file"; then
             echo "pg_dump failed for database '$dbname'" >>"$log_file"
             rm -rf "$out_dir"
             return 1
@@ -1504,6 +1584,14 @@ backup_command() {
         echo "Database host: ${db_host:-localhost}" >>"$log_file"
         colorized_echo blue "Database detected: $db_type"
         colorized_echo blue "Backing up database..."
+        local -a LIGHT_IGNORE_ARGS=()
+        local -a LIGHT_PG_ARGS=()
+        if is_light_backup; then
+            LIGHT_PG_ARGS=(--exclude-table-data='*.node_user_usages' --exclude-table-data='*.node_usages')
+        fi
+        if is_light_backup && [ -n "${db_name:-}" ]; then
+            LIGHT_IGNORE_ARGS=(--ignore-table="${db_name}.node_user_usages" --ignore-table="${db_name}.node_usages")
+        fi
         case $db_type in
         mariadb)
             if is_local_db_host "$db_host"; then
@@ -1535,7 +1623,7 @@ backup_command() {
                         fi
                     done <<<"$mariadb_databases"
 
-                    if [ "$configured_db_found" = true ] && docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                    if [ "$configured_db_found" = true ] && docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" mariadb-dump -u root --all-databases --ignore-database=mysql --ignore-database=performance_schema --ignore-database=information_schema --ignore-database=sys --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                         colorized_echo green "MariaDB backup completed successfully (all databases)"
                     else
                         # Fallback to SQL URL credentials for specific database
@@ -1548,7 +1636,7 @@ backup_command() {
                             error_messages+=("MariaDB backup failed - root backup failed and fallback credentials incomplete.")
                         else
                             colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
-                            if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" mariadb-dump -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                            if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" mariadb-dump -u "$backup_user" "$db_name" --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                 colorized_echo red "MariaDB dump failed. Check log file for details."
                                 error_messages+=("MariaDB dump failed.")
                             else
@@ -1569,7 +1657,7 @@ backup_command() {
                         error_messages+=("MariaDB database name not found.")
                     else
                         colorized_echo blue "Backing up MariaDB database '$db_name' from container: $container_name (using app user)"
-                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" mariadb-dump -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" mariadb-dump -u "$backup_user" "$db_name" --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                             colorized_echo red "MariaDB dump failed. Check log file for details."
                             error_messages+=("MariaDB dump failed.")
                         else
@@ -1643,14 +1731,14 @@ backup_command() {
                                 error_messages+=("MySQL backup failed - no databases found and fallback credentials incomplete.")
                             else
                                         colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
-                                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                             colorized_echo red "$db_type_name dump failed. Check log file for details."
                                             error_messages+=("$db_type_name dump failed.")
                                         else
                                             colorized_echo green "$db_type_name backup completed successfully"
                                         fi
                                     fi
-                                elif ! docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$dump_cmd" -u root --databases "${database_list[@]}" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                elif ! docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$container_name" "$dump_cmd" -u root --databases "${database_list[@]}" --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                             # Root backup failed, fallback to SQL URL credentials
                             colorized_echo yellow "Root backup failed, falling back to app user for specific database"
                             local backup_user="${db_user:-${DB_USER:-}}"
@@ -1661,7 +1749,7 @@ backup_command() {
                                 error_messages+=("MySQL backup failed - root backup failed and fallback credentials incomplete.")
                             else
                                         colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
-                                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                        if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                             colorized_echo red "$db_type_name dump failed. Check log file for details."
                                             error_messages+=("$db_type_name dump failed.")
                                         else
@@ -1690,7 +1778,7 @@ backup_command() {
                             error_messages+=("MySQL database name not found.")
                         else
                                     colorized_echo blue "Backing up $db_type_name database '$db_name' from container: $container_name (using app user)"
-                                    if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                    if ! docker exec -e MYSQL_PWD="$backup_password" "$container_name" "$dump_cmd" -u "$backup_user" "$db_name" --events --triggers "${LIGHT_IGNORE_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                         colorized_echo red "$db_type_name dump failed. Check log file for details."
                                         error_messages+=("$db_type_name dump failed.")
                                     else
@@ -1735,7 +1823,7 @@ backup_command() {
                                 colorized_echo green "PostgreSQL backup completed successfully (all databases)"
                             else
                                 colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
-                                if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists "${LIGHT_PG_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                     colorized_echo red "PostgreSQL dump failed. Check log file for details."
                                     error_messages+=("PostgreSQL dump failed.")
                                 else
@@ -1806,7 +1894,7 @@ backup_command() {
                                 colorized_echo green "TimescaleDB backup completed successfully (all databases)"
                             else
                                 colorized_echo yellow "Multi-database backup unavailable; falling back to single database '$db_name'."
-                                if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
+                                if ! docker exec -e PGPASSWORD="$backup_password" "$container_name" pg_dump -U "$backup_user" -d "$db_name" --clean --if-exists "${LIGHT_PG_ARGS[@]}" >"$temp_dir/db_backup.sql" 2>>"$log_file"; then
                                     colorized_echo red "TimescaleDB dump failed. Check log file for details: $log_file"
                                     error_messages+=("TimescaleDB dump failed for database '$db_name'.")
                                 elif ! write_timescaledb_single_dump_version "$container_name" "$backup_user" "$backup_password" "$db_name" "$temp_dir" "$log_file"; then
@@ -1844,6 +1932,8 @@ backup_command() {
                         error_messages+=("Failed to create protected SQLite snapshot staging directory.")
                     elif ! sqlite3 "$sqlite_file" ".backup '$sqlite_snapshot_dir/$sqlite_basename'" >>"$log_file" 2>&1; then
                         error_messages+=("Failed to create SQLite backup snapshot.")
+                    elif is_light_backup && ! sqlite_light_prune "$sqlite_snapshot_dir/$sqlite_basename"; then
+                        error_messages+=("Failed to prune usage tables from SQLite snapshot.")
                     fi
                 else
                     error_messages+=("sqlite3 is required to create a consistent SQLite backup snapshot.")
@@ -1965,6 +2055,9 @@ backup_command() {
             rm -f "$temp_dir/${final_sqlite_basename}-wal" \
                 "$temp_dir/${final_sqlite_basename}-shm" \
                 "$temp_dir/${final_sqlite_basename}-journal" 2>>"$log_file" || true
+        fi
+        if [ ${#error_messages[@]} -eq 0 ] && is_light_backup && { [ "$db_type" = "mysql" ] || [ "$db_type" = "mariadb" ]; } && [ -s "$temp_dir/db_backup.sql" ]; then
+            append_light_schema "${container_name:-}" "$db_name"
         fi
         if [ ${#error_messages[@]} -eq 0 ] && ! database_backup_looks_restorable "$db_type" "$temp_dir" "$db_name" "$sqlite_file"; then
             colorized_echo red "Database backup artifact failed completeness validation."
