@@ -1127,15 +1127,22 @@ set_pasarguard_panel_image() {
 }
 
 # Print an InnoDB buffer pool size for this host: about 25% of RAM in 128M steps,
-# kept between 256M and 4096M. Falls back to 256M when RAM cannot be read.
+# kept between 256M and 4096M. A cgroup memory limit lower than the RAM is used
+# instead of it. Falls back to 256M when RAM cannot be read.
 # Arguments:
 #   $1 - meminfo file (default /proc/meminfo).
+#   $2 - cgroup mount (default /sys/fs/cgroup).
 mysql_buffer_pool_size_for_ram() {
-    local meminfo="${1:-/proc/meminfo}" total_kb mb
+    local meminfo="${1:-/proc/meminfo}" cgroup="${2:-/sys/fs/cgroup}" total_kb limit_bytes mb
     total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "$meminfo" 2>/dev/null || true)
     if ! [[ "$total_kb" =~ ^[0-9]+$ ]]; then
         echo "256M"
         return
+    fi
+    # cgroup v2 writes "max" for no limit; v1 writes a huge number, which the min below ignores
+    limit_bytes=$(cat "$cgroup/memory.max" 2>/dev/null || cat "$cgroup/memory/memory.limit_in_bytes" 2>/dev/null || true)
+    if [[ "$limit_bytes" =~ ^[0-9]+$ ]] && [ $((limit_bytes / 1024)) -lt "$total_kb" ]; then
+        total_kb=$((limit_bytes / 1024))
     fi
     mb=$((total_kb / 1024 / 4 / 128 * 128))
     [ "$mb" -lt 256 ] && mb=256

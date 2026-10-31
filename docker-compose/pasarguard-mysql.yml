@@ -28,6 +28,7 @@ services:
       - --host-cache-size=0 # Disables host cache to prevent DNS issues
       - --innodb-open-files=1024 # Sets the limit for InnoDB open files
       - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M} # InnoDB cache; the installer sets about 25% of RAM
+      - --innodb-buffer-pool-instances=1 # Keeps the pool at the set size (several instances round it up)
       - --general_log=0 # Disables general query log for lower disk usage
       - --slow_query_log=1 # Enables slow query log for performance analysis
       - --slow_query_log_file=/var/lib/mysql/slow.log # Logs slow queries for troubleshooting

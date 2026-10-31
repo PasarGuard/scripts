@@ -756,16 +756,28 @@ assert_true "run_all.sh: records missing suites in FAILED_LIST" \
 # mysql_buffer_pool_size_for_ram
 # -----------------------------------------------------------------------
 meminfo_with() { printf 'MemTotal:       %s kB\nMemFree:         1000 kB\n' "$1" >"$WORK_DIR/meminfo"; echo "$WORK_DIR/meminfo"; }
-assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 1000000)")" "256M" "buffer_pool: 1 GB host gets the 256M floor"
-assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 2014000)")" "384M" "buffer_pool: 2 GB host gets 384M"
-assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 4194304)")" "1024M" "buffer_pool: 4 GB host gets 1024M"
-assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)")" "2048M" "buffer_pool: 8 GB host gets 2048M"
-assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 67108864)")" "4096M" "buffer_pool: 64 GB host is capped at 4096M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 1000000)" "$WORK_DIR/no-cgroup")" "256M" "buffer_pool: 1 GB host gets the 256M floor"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 2014000)" "$WORK_DIR/no-cgroup")" "384M" "buffer_pool: 2 GB host gets 384M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 4194304)" "$WORK_DIR/no-cgroup")" "1024M" "buffer_pool: 4 GB host gets 1024M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/no-cgroup")" "2048M" "buffer_pool: 8 GB host gets 2048M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 67108864)" "$WORK_DIR/no-cgroup")" "4096M" "buffer_pool: 64 GB host is capped at 4096M"
 assert_eq "$(mysql_buffer_pool_size_for_ram "$WORK_DIR/no-such-meminfo")" "256M" "buffer_pool: unreadable meminfo falls back to 256M"
+mkdir -p "$WORK_DIR/cg2" "$WORK_DIR/cg2max" "$WORK_DIR/cg1/memory"
+echo 2147483648 >"$WORK_DIR/cg2/memory.max"
+echo max >"$WORK_DIR/cg2max/memory.max"
+echo 9223372036854771712 >"$WORK_DIR/cg1/memory/memory.limit_in_bytes"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 33554432)" "$WORK_DIR/cg2")" "512M" "buffer_pool: cgroup v2 limit of 2 GB wins over 32 GB RAM"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/cg2max")" "2048M" "buffer_pool: cgroup v2 'max' means no limit"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/cg1")" "2048M" "buffer_pool: unlimited cgroup v1 uses RAM"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/no-cgroup")" "2048M" "buffer_pool: no cgroup files uses RAM"
 for f in pasarguard-mysql.yml pasarguard-mariadb.yml; do
     assert_true "$f: buffer pool reads MYSQL_BUFFER_POOL_SIZE" \
         grep -Fq -- '--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}' "$ROOT_DIR/docker-compose/$f"
 done
+assert_true "pasarguard-mysql.yml: one buffer pool instance keeps the exact size" \
+    grep -Fq -- '--innodb-buffer-pool-instances=1' "$ROOT_DIR/docker-compose/pasarguard-mysql.yml"
+assert_false "pasarguard-mariadb.yml: no removed instances option" \
+    grep -Fq -- 'innodb-buffer-pool-instances' "$ROOT_DIR/docker-compose/pasarguard-mariadb.yml"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
