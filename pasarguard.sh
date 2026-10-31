@@ -1126,21 +1126,50 @@ set_pasarguard_panel_image() {
     fi
 }
 
+# Print the lowest cgroup memory limit in bytes on the path of this process, from its
+# own cgroup up to the mount root (cgroup v2 or v1). Prints nothing when there is no limit.
+# Arguments:
+#   $1 - cgroup mount (default /sys/fs/cgroup).
+#   $2 - cgroup membership file (default /proc/self/cgroup).
+cgroup_memory_limit_bytes() {
+    local root="${1:-/sys/fs/cgroup}" membership="${2:-/proc/self/cgroup}"
+    local base file path value lowest=""
+    if [ -f "$root/cgroup.controllers" ]; then
+        base="$root" file="memory.max"
+        path=$(awk -F: '$1 == "0" { print $3; exit }' "$membership" 2>/dev/null || true)
+    else
+        base="$root/memory" file="memory.limit_in_bytes"
+        path=$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3; exit }' "$membership" 2>/dev/null || true)
+    fi
+    path="${path%/}"
+    while :; do
+        # cgroup v2 writes "max" for no limit; v1 writes a huge number, which the caller's min ignores
+        value=$(cat "$base$path/$file" 2>/dev/null || true)
+        if [[ "$value" =~ ^[0-9]+$ ]] && { [ -z "$lowest" ] || [ "$value" -lt "$lowest" ]; }; then
+            lowest="$value"
+        fi
+        [ -z "$path" ] && break
+        path="${path%/*}"
+    done
+    [ -n "$lowest" ] && echo "$lowest"
+    return 0
+}
+
 # Print an InnoDB buffer pool size for this host: about 25% of RAM in 128M steps,
 # kept between 256M and 4096M. A cgroup memory limit lower than the RAM is used
 # instead of it. Falls back to 256M when RAM cannot be read.
 # Arguments:
 #   $1 - meminfo file (default /proc/meminfo).
 #   $2 - cgroup mount (default /sys/fs/cgroup).
+#   $3 - cgroup membership file (default /proc/self/cgroup).
 mysql_buffer_pool_size_for_ram() {
-    local meminfo="${1:-/proc/meminfo}" cgroup="${2:-/sys/fs/cgroup}" total_kb limit_bytes mb
+    local meminfo="${1:-/proc/meminfo}" total_kb limit_bytes mb
     total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "$meminfo" 2>/dev/null || true)
     if ! [[ "$total_kb" =~ ^[0-9]+$ ]]; then
         echo "256M"
         return
     fi
-    # cgroup v2 writes "max" for no limit; v1 writes a huge number, which the min below ignores
-    limit_bytes=$(cat "$cgroup/memory.max" 2>/dev/null || cat "$cgroup/memory/memory.limit_in_bytes" 2>/dev/null || true)
+    limit_bytes=$(cgroup_memory_limit_bytes "${2:-}" "${3:-}")
     if [[ "$limit_bytes" =~ ^[0-9]+$ ]] && [ $((limit_bytes / 1024)) -lt "$total_kb" ]; then
         total_kb=$((limit_bytes / 1024))
     fi
