@@ -199,8 +199,20 @@ hide an import error.
 
 The source extension version is recorded per database in `pg_dump/manifest.tsv`,
 or in `db_backup.timescaledb-version` for a single-database fallback. For an
-ordinary restore to a newer extension, the script attempts conversion in a
-temporary compatibility container before changing the destination database.
+ordinary restore to a newer extension, the script first checks whether the
+destination database container also ships the backup's extension version. The
+stock `timescale/timescaledb` images ship many older releases (for PostgreSQL
+17, every release from 2.17.0 on). When it does, the database is restored at
+the backup's version and the extension is then updated in place with
+`ALTER EXTENSION timescaledb UPDATE`. This needs no extra image, container or
+disk space.
+
+Only when the destination does not ship the backup's version does the script
+convert the dumps in a temporary compatibility container before changing the
+destination database. That path needs several GB of free disk: the
+`timescaledb-ha` image (about 2.3 GB to download and 8 GB unpacked), a full
+copy of each converted database and the converted dumps. The script checks free
+space before pulling anything and removes the image afterwards if it pulled it.
 That image must contain the source extension version and support its upgrade
 path. PostgreSQL major-version downgrades are refused; extension conversion is
 not an arbitrary PostgreSQL downgrade mechanism.
@@ -213,8 +225,8 @@ sudo env TIMESCALEDB_BACKUP_VERSION=2.27.2 \
   pasarguard restore /root/legacy-backup.zip
 ```
 
-For a destination on PostgreSQL 17 / TimescaleDB 2.28, for example, the compatible
-image can be supplied explicitly:
+When the conversion is needed, the compatibility image can be supplied
+explicitly. For a destination on PostgreSQL 17 / TimescaleDB 2.28, for example:
 
 ```bash
 sudo env TIMESCALEDB_COMPAT_IMAGE=timescale/timescaledb-ha:pg17-ts2.28-all \
