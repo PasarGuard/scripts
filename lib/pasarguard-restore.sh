@@ -192,19 +192,27 @@ timescaledb_version_is_safe() {
 }
 
 # True (0) when the destination container can create the timescaledb extension
-# at exactly this version. The stock image ships the shared libraries of many
-# older releases next to the current one. PostgreSQL also lists versions whose
-# library is missing, and trying one of those kills the session, so both the
-# install script and the library are checked without touching any database.
+# at exactly this version and update it to target_version. The stock image
+# ships the shared libraries of many older releases next to the current one.
+# PostgreSQL also lists versions whose library is missing, and trying one of
+# those kills the session, so the install script, the update path and the
+# library are all checked without touching any database.
 timescaledb_version_installable() {
-    local container="$1" admin_user="$2" admin_password="$3" version="$4" log_file="$5"
+    local container="$1" admin_user="$2" admin_password="$3" version="$4" log_file="$5" target_version="$6"
     timescaledb_version_is_safe "$version" || return 1
+    timescaledb_version_is_safe "$target_version" || return 1
     local listed=""
     listed=$(docker exec -e PGPASSWORD="$admin_password" "$container" \
         psql -X -U "$admin_user" -d postgres -At \
         -c "SELECT count(*) FROM pg_available_extension_versions WHERE name = 'timescaledb' AND version = '$version';" \
         2>>"$log_file") || return 1
     [ "$listed" = "1" ] || return 1
+    local update_path=""
+    update_path=$(docker exec -e PGPASSWORD="$admin_password" "$container" \
+        psql -X -U "$admin_user" -d postgres -At \
+        -c "SELECT count(*) FROM pg_extension_update_paths('timescaledb') WHERE source = '$version' AND target = '$target_version' AND path IS NOT NULL;" \
+        2>>"$log_file") || return 1
+    [ "$update_path" = "1" ] || return 1
     # shellcheck disable=SC2016 # $1 expands inside the container shell.
     docker exec "$container" sh -c 'test -f "$(pg_config --pkglibdir)/timescaledb-$1.so"' sh "$version" 2>>"$log_file"
 }
@@ -212,6 +220,11 @@ timescaledb_version_installable() {
 # Print the free space in KiB on the filesystem that holds a path.
 free_space_kb() {
     df -Pk "$1" 2>/dev/null | awk 'NR == 2 {print $4}'
+}
+
+# Print the device id of the filesystem that holds a path.
+filesystem_id() {
+    stat -c %d "$1" 2>/dev/null
 }
 
 # The compatibility image is several GB once unpacked. Remove it after use when
@@ -340,7 +353,7 @@ pg_prepare_timescaledb_compatible_dumps() {
         [ -n "$dbname" ] || continue
         if [ "$has_ts" = "1" ] && [ -n "$source_version" ] && [ "$source_version" != "$target_version" ]; then
             if timescaledb_version_installable "$destination_container" "$admin_user" "$admin_password" \
-                "$source_version" "$log_file"; then
+                "$source_version" "$log_file" "$target_version"; then
                 in_place_versions+=" $source_version"
                 continue
             fi
@@ -396,6 +409,11 @@ pg_prepare_timescaledb_compatible_dumps() {
     docker_root=$(docker info -f '{{.DockerRootDir}}' 2>>"$log_file") || docker_root=""
     [ -n "$docker_root" ] && docker_free_kb=$(free_space_kb "$docker_root")
     staging_free_kb=$(free_space_kb "$(dirname "$output_dir")")
+    # Docker storage and the restore staging dir are often the same disk. Then
+    # both estimates come out of the same free space.
+    if [ -n "$docker_root" ] && [ "$(filesystem_id "$docker_root")" = "$(filesystem_id "$(dirname "$output_dir")")" ]; then
+        docker_need_kb=$((docker_need_kb + dump_kb))
+    fi
     if [[ "$docker_free_kb" =~ ^[0-9]+$ ]] && [ "$docker_free_kb" -lt "$docker_need_kb" ]; then
         colorized_echo red "Not enough disk space for the TimescaleDB compatibility conversion: it needs about $((docker_need_kb / 1048576 + 1)) GB free under $docker_root, and $((docker_free_kb / 1048576)) GB is free."
         echo "Compatibility conversion needs ${docker_need_kb} KiB under $docker_root; ${docker_free_kb} KiB free" >>"$log_file"
@@ -409,20 +427,25 @@ pg_prepare_timescaledb_compatible_dumps() {
 
     colorized_echo blue "Preparing TimescaleDB $target_version-compatible dumps before changing the destination..."
     colorized_echo yellow "This server does not ship the backup's TimescaleDB version, so a temporary conversion container is used. It is removed when the restore finishes."
+    # Arm cleanup before the pull so an interrupt also removes the image.
+    arm_timescaledb_compat_cleanup "" ""
     if [ "$image_present" = false ]; then
         colorized_echo blue "Pulling temporary compatibility image: $compat_image"
         TIMESCALEDB_COMPAT_PULLED_IMAGE="$compat_image"
         if ! docker pull "$compat_image" >>"$log_file" 2>&1; then
             echo "Could not pull TimescaleDB compatibility image: $compat_image" >>"$log_file"
-            remove_pulled_timescaledb_compat_image
+            finish_timescaledb_compat_cleanup
             return 1
         fi
     fi
     if ! compat_volume=$(docker volume create --label "com.pasarguard.restore=$compat_suffix" 2>>"$log_file"); then
         echo "Could not create temporary TimescaleDB compatibility volume" >>"$log_file"
-        remove_pulled_timescaledb_compat_image
+        finish_timescaledb_compat_cleanup
         return 1
     fi
+    # Track the container before it exists: docker rm -f on a missing name is
+    # harmless, and an interrupt during docker run must not leave it behind.
+    arm_timescaledb_compat_cleanup "$compat_container" "$compat_volume"
     if ! docker run -d --name "$compat_container" --restart=no \
         --user 0 \
         -e POSTGRES_USER="$admin_user" \
@@ -433,11 +456,9 @@ pg_prepare_timescaledb_compatible_dumps() {
         -v "$compat_volume:$compat_pgdata" \
         "$compat_image" >>"$log_file" 2>&1; then
         echo "Could not start temporary TimescaleDB compatibility container" >>"$log_file"
-        cleanup_timescaledb_compat_container "$compat_container" "$compat_volume"
-        remove_pulled_timescaledb_compat_image
+        finish_timescaledb_compat_cleanup
         return 1
     fi
-    arm_timescaledb_compat_cleanup "$compat_container" "$compat_volume"
 
     local ready=false
     local waited=0
@@ -710,8 +731,7 @@ pg_restore_all_user_databases() {
                 target_ts=""
             fi
             if [ "$probe_ok" = "1" ] && ! timescaledb_version_matches "$ts_version" "$target_ts" &&
-                timescaledb_version_is_safe "$target_ts" &&
-                timescaledb_version_installable "$container_name" "$admin_user" "$admin_password" "$ts_version" "$log_file"; then
+                timescaledb_version_installable "$container_name" "$admin_user" "$admin_password" "$ts_version" "$log_file" "$target_ts"; then
                 update_extension_to="$target_ts"
             elif [ "$probe_ok" = "1" ] && ! timescaledb_version_matches "$ts_version" "$target_ts"; then
                 local svn="" pg_major=""

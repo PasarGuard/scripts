@@ -707,6 +707,8 @@ docker() {
         *"SHOW server_version_num"*) printf '170010\n' ;;
         *"FROM pg_available_extension_versions"*"'2.27.2'"*) printf '1\n' ;;
         *"FROM pg_available_extension_versions"*) printf '0\n' ;;
+        *"pg_extension_update_paths"*"'2.27.2'"*"'2.31.0'"*) printf '1\n' ;;
+        *"pg_extension_update_paths"*) printf '0\n' ;;
         *"pkglibdir"*) [ "$MOCK_HAS_LIBRARY" = true ] ;;
         *" pull "* | "pull "*) MOCK_COMPAT_PULL=true; return 1 ;;
         "image rm "*) MOCK_IMAGE_RM=true ;;
@@ -715,11 +717,13 @@ docker() {
     esac
 }
 assert_true "ts_installable: listed version with its library" \
-    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log"
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log" 2.31.0
+assert_false "ts_installable: no update path to the target" \
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log" 2.30.0
 assert_false "ts_installable: unlisted version" \
-    timescaledb_version_installable destination appuser pass 2.16.1 "$WORK_DIR/ts-prepare.log"
+    timescaledb_version_installable destination appuser pass 2.16.1 "$WORK_DIR/ts-prepare.log" 2.31.0
 assert_false "ts_installable: unsafe version is never queried" \
-    timescaledb_version_installable destination appuser pass "2.27'; --" "$WORK_DIR/ts-prepare.log"
+    timescaledb_version_installable destination appuser pass "2.27'; --" "$WORK_DIR/ts-prepare.log" 2.31.0
 assert_true "ts_prepare: shipped older version restores in place" \
     pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
         "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
@@ -730,13 +734,25 @@ assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: in-place restore pulls no com
 # refuses before pulling anything when the disk is too small.
 MOCK_HAS_LIBRARY=false
 assert_false "ts_installable: listed version without its library" \
-    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log"
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log" 2.31.0
 _real_free_space_kb=$(declare -f free_space_kb)
 free_space_kb() { printf '1024\n'; }
 assert_false "ts_prepare: conversion refused when disk space is short" \
     pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
         "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
 assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: short disk stops before the image pull"
+
+# Enough space for Docker or for the staging dumps alone, but not for both on
+# one shared filesystem.
+_ts_dump_kb=$(du -sk "$TS_PREP_DIR" | awk '{print $1}')
+_real_filesystem_id=$(declare -f filesystem_id)
+filesystem_id() { printf 'shared\n'; }
+free_space_kb() { printf '%s\n' $((TIMESCALEDB_COMPAT_IMAGE_KB + _ts_dump_kb * 3 - 1)); }
+assert_false "ts_prepare: shared filesystem needs Docker and staging space together" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: shared filesystem shortage stops before the pull"
+eval "$_real_filesystem_id"
 
 # With enough space the image is pulled; a failed pull still removes it.
 free_space_kb() { printf '%s\n' $((100 * 1048576)); }
