@@ -694,6 +694,61 @@ assert_false "ts_prepare: versionless Timescale manifest fails closed" \
         "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
 unset -f docker
 
+# Older backup version that the destination image still ships: restore in
+# place, no compatibility image, container or volume.
+printf 'appdb\tappuser\t1\tdb-001.sql\t2.27.2\n' >"$TS_PREP_DIR/manifest.tsv"
+MOCK_COMPAT_PULL=false
+MOCK_HAS_LIBRARY=true
+MOCK_IMAGE_RM=false
+# Mock docker CLI for a 2.31.0 destination that lists 2.27.2.
+docker() {
+    case "$*" in
+        *"default_version FROM pg_available_extensions"*) printf '2.31.0\n' ;;
+        *"SHOW server_version_num"*) printf '170010\n' ;;
+        *"FROM pg_available_extension_versions"*"'2.27.2'"*) printf '1\n' ;;
+        *"FROM pg_available_extension_versions"*) printf '0\n' ;;
+        *"pkglibdir"*) [ "$MOCK_HAS_LIBRARY" = true ] ;;
+        *" pull "* | "pull "*) MOCK_COMPAT_PULL=true; return 1 ;;
+        "image rm "*) MOCK_IMAGE_RM=true ;;
+        "info "*) printf '/var/lib/docker\n' ;;
+        *) return 1 ;;
+    esac
+}
+assert_true "ts_installable: listed version with its library" \
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log"
+assert_false "ts_installable: unlisted version" \
+    timescaledb_version_installable destination appuser pass 2.16.1 "$WORK_DIR/ts-prepare.log"
+assert_false "ts_installable: unsafe version is never queried" \
+    timescaledb_version_installable destination appuser pass "2.27'; --" "$WORK_DIR/ts-prepare.log"
+assert_true "ts_prepare: shipped older version restores in place" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$PG_PREPARED_DUMP_DIR" "$TS_PREP_DIR" "ts_prepare: in-place restore keeps the original dump"
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: in-place restore pulls no compatibility image"
+
+# A listed version without its library falls back to the conversion, which
+# refuses before pulling anything when the disk is too small.
+MOCK_HAS_LIBRARY=false
+assert_false "ts_installable: listed version without its library" \
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log"
+_real_free_space_kb=$(declare -f free_space_kb)
+free_space_kb() { printf '1024\n'; }
+assert_false "ts_prepare: conversion refused when disk space is short" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: short disk stops before the image pull"
+
+# With enough space the image is pulled; a failed pull still removes it.
+free_space_kb() { printf '%s\n' $((100 * 1048576)); }
+assert_false "ts_prepare: failed compatibility pull fails closed" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "true" "ts_prepare: missing library triggers the conversion"
+assert_eq "$MOCK_IMAGE_RM" "true" "ts_prepare: image pulled by the restore is removed"
+assert_eq "$TIMESCALEDB_COMPAT_PULLED_IMAGE" "" "ts_prepare: pulled image marker cleared"
+unset -f docker
+eval "$_real_free_space_kb"
+
 # -----------------------------------------------------------------------
 # format_timescaledb_mismatch_help
 # -----------------------------------------------------------------------

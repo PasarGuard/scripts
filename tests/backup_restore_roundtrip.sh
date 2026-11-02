@@ -477,6 +477,12 @@ setup_postgresql_container() {
     wait_for_command 30 docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
         psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" \
         -c "CREATE TABLE ci_roundtrip (id INT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO ci_roundtrip (id, value) VALUES (1, '$initial_value');"
+
+    if [ "$DB_TYPE" = "timescaledb" ]; then
+        docker exec -e PGPASSWORD="$password" "$CONTAINER_NAME" \
+            psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" \
+            -c "CREATE TABLE ci_metrics (time TIMESTAMPTZ NOT NULL, value INT NOT NULL); SELECT create_hypertable('ci_metrics', 'time'); INSERT INTO ci_metrics VALUES ('2026-01-01', 1), ('2026-02-01', 2);" >/dev/null
+    fi
 }
 
 # Query test row value from PostgreSQL or TimescaleDB container.
@@ -804,6 +810,17 @@ verify_restored_database() {
     esac
 
     assert_equals "$restored_value" "$EXPECTED_DB_VALUE" "Database value was not restored from backup."
+
+    if [ "$DB_TYPE" = "timescaledb" ]; then
+        # The extension ends at the destination's version, the hypertable and
+        # its rows survive, and no temporary conversion container is left.
+        local ts_state=""
+        ts_state=$(docker exec -e PGPASSWORD="$CURRENT_DB_PASSWORD" "$CONTAINER_NAME" \
+            psql -h 127.0.0.1 -At -U "$DB_USER" -d "$DB_NAME" \
+            -c "SELECT (SELECT extversion FROM pg_extension WHERE extname = 'timescaledb') = (SELECT default_version FROM pg_available_extensions WHERE name = 'timescaledb'), (SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_name = 'ci_metrics'), (SELECT sum(value) FROM ci_metrics);")
+        assert_equals "$ts_state" "t|1|3" "TimescaleDB extension version, hypertable or rows not restored."
+        assert_equals "$(docker ps -a --filter name=pasarguard-ts-compat- --format '{{.Names}}')" "" "TimescaleDB conversion container left behind."
+    fi
 
     case "$DB_TYPE" in
     mysql)
