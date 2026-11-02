@@ -700,6 +700,7 @@ printf 'appdb\tappuser\t1\tdb-001.sql\t2.27.2\n' >"$TS_PREP_DIR/manifest.tsv"
 MOCK_COMPAT_PULL=false
 MOCK_HAS_LIBRARY=true
 MOCK_IMAGE_RM=false
+MOCK_DOCKER_INFO_FAILS=false
 # Mock docker CLI for a 2.31.0 destination that lists 2.27.2.
 docker() {
     case "$*" in
@@ -712,7 +713,7 @@ docker() {
         *"pkglibdir"*) [ "$MOCK_HAS_LIBRARY" = true ] ;;
         *" pull "* | "pull "*) MOCK_COMPAT_PULL=true; return 1 ;;
         "image rm "*) MOCK_IMAGE_RM=true ;;
-        "info "*) printf '/var/lib/docker\n' ;;
+        "info "*) [ "$MOCK_DOCKER_INFO_FAILS" = true ] && return 1; printf '/var/lib/docker\n' ;;
         *) return 1 ;;
     esac
 }
@@ -753,6 +754,14 @@ assert_false "ts_prepare: shared filesystem needs Docker and staging space toget
         "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
 assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: shared filesystem shortage stops before the pull"
 eval "$_real_filesystem_id"
+
+# An unknown Docker root means free space cannot be measured: stop, no pull.
+MOCK_DOCKER_INFO_FAILS=true
+assert_false "ts_prepare: unmeasurable Docker free space fails closed" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: unmeasurable free space stops before the pull"
+MOCK_DOCKER_INFO_FAILS=false
 
 # With enough space the image is pulled; a failed pull still removes it.
 free_space_kb() { printf '%s\n' $((100 * 1048576)); }

@@ -414,12 +414,19 @@ pg_prepare_timescaledb_compatible_dumps() {
     if [ -n "$docker_root" ] && [ "$(filesystem_id "$docker_root")" = "$(filesystem_id "$(dirname "$output_dir")")" ]; then
         docker_need_kb=$((docker_need_kb + dump_kb))
     fi
-    if [[ "$docker_free_kb" =~ ^[0-9]+$ ]] && [ "$docker_free_kb" -lt "$docker_need_kb" ]; then
+    # Without a reading the conversion could fill the disk the live database
+    # uses, so an unknown amount of free space stops it as well.
+    if [[ ! "$docker_free_kb" =~ ^[0-9]+$ ]] || [[ ! "$staging_free_kb" =~ ^[0-9]+$ ]]; then
+        colorized_echo red "Could not measure free disk space for the TimescaleDB compatibility conversion (Docker root: ${docker_root:-unknown}). It needs about $((docker_need_kb / 1048576 + 1)) GB free; the current database was not changed."
+        echo "Free space unknown: docker_root='${docker_root}' docker_free_kb='${docker_free_kb}' staging_free_kb='${staging_free_kb}'" >>"$log_file"
+        return 1
+    fi
+    if [ "$docker_free_kb" -lt "$docker_need_kb" ]; then
         colorized_echo red "Not enough disk space for the TimescaleDB compatibility conversion: it needs about $((docker_need_kb / 1048576 + 1)) GB free under $docker_root, and $((docker_free_kb / 1048576)) GB is free."
         echo "Compatibility conversion needs ${docker_need_kb} KiB under $docker_root; ${docker_free_kb} KiB free" >>"$log_file"
         return 1
     fi
-    if [[ "$staging_free_kb" =~ ^[0-9]+$ ]] && [ "$staging_free_kb" -lt "$dump_kb" ]; then
+    if [ "$staging_free_kb" -lt "$dump_kb" ]; then
         colorized_echo red "Not enough disk space for the converted TimescaleDB dumps: they need about $((dump_kb / 1048576 + 1)) GB free next to the restore files."
         echo "Converted dumps need ${dump_kb} KiB in $(dirname "$output_dir"); ${staging_free_kb} KiB free" >>"$log_file"
         return 1
