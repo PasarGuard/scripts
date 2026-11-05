@@ -763,6 +763,117 @@ else
     echo "(skipped update --dev/--version tag rewrites: mikefarah yq v4 not available)"
 fi
 
+# -----------------------------------------------------------------------
+# geofiles_command: region names, help and unknown input
+# -----------------------------------------------------------------------
+GEO_CALLS="$WORK_DIR/geofiles-calls.log"
+GEO_DIR="$WORK_DIR/geofiles"
+GEO_OUT=""
+GEO_STATUS=0
+
+# Run geofiles_command with downloads and restart stubbed; sets GEO_OUT and GEO_STATUS.
+run_geofiles_command() {
+    : > "$GEO_CALLS"
+    rm -rf "$GEO_DIR"
+    mkdir -p "$GEO_DIR/app" "$GEO_DIR/data"
+    printf 'SERVICE_PORT= 62050\n# XRAY_ASSETS_PATH = /usr/local/share/xray\n' > "$GEO_DIR/app/.env"
+    if GEO_OUT=$(
+        APP_DIR="$GEO_DIR/app"
+        DATA_DIR="$GEO_DIR/data"
+        ENV_FILE="$APP_DIR/.env"
+        check_running_as_root() { echo "check_running_as_root" >> "$GEO_CALLS"; }
+        yq() { echo "null"; }
+        restart_command() { echo "restart_command $*" >> "$GEO_CALLS"; }
+        curl() { echo "curl $*" >> "$GEO_CALLS"; }
+        geofiles_command "$@" 2>&1
+    ); then
+        GEO_STATUS=0
+    else
+        GEO_STATUS=$?
+    fi
+}
+
+# Print the download URLs geofiles_command requested, one per line.
+geo_urls() {
+    sed -n 's|^curl .*\(https://[^ ]*\).*|\1|p' "$GEO_CALLS"
+}
+
+# Assert that the last run downloaded both files of one region and restarted the node.
+assert_geofiles_region() {
+    local label="$1" repo="$2"
+    assert_eq "$GEO_STATUS" "0" "$label: exits 0"
+    assert_eq "$(geo_urls)" "https://github.com/$repo/releases/latest/download/geoip.dat
+https://github.com/$repo/releases/latest/download/geosite.dat" "$label: downloads $repo"
+    assert_true "$label: restarts the node" grep -q "^restart_command " "$GEO_CALLS"
+    assert_true "$label: sets XRAY_ASSETS_PATH" grep -q "^XRAY_ASSETS_PATH = " "$GEO_DIR/app/.env"
+}
+
+# Assert that the last run printed help and touched nothing.
+assert_geofiles_no_action() {
+    local label="$1" status="$2"
+    assert_eq "$GEO_STATUS" "$status" "$label: exits $status"
+    assert_eq "$(geo_urls)" "" "$label: downloads nothing"
+    assert_false "$label: no restart" grep -q "^restart_command " "$GEO_CALLS"
+    if [[ "$GEO_OUT" == *"russia"*"china"* ]]; then
+        pass "$label: lists the regions"
+    else
+        fail "$label: lists the regions (got: $GEO_OUT)"
+    fi
+}
+
+for geo_arg in --russia russia ru RU Russia; do
+    run_geofiles_command "$geo_arg"
+    assert_geofiles_region "geofiles $geo_arg" "runetfreedom/russia-v2ray-rules-dat"
+done
+for geo_arg in --iran iran ir IR; do
+    run_geofiles_command "$geo_arg"
+    assert_geofiles_region "geofiles $geo_arg" "Chocolate4U/Iran-v2ray-rules"
+done
+for geo_arg in --china china cn CN; do
+    run_geofiles_command "$geo_arg"
+    assert_geofiles_region "geofiles $geo_arg" "Loyalsoldier/v2ray-rules-dat"
+done
+
+run_geofiles_command
+assert_geofiles_region "geofiles (no region)" "Chocolate4U/Iran-v2ray-rules"
+if [[ "$GEO_OUT" == *"defaulting to Iran"* ]]; then
+    pass "geofiles (no region): says it defaults to Iran"
+else
+    fail "geofiles (no region): says it defaults to Iran (got: $GEO_OUT)"
+fi
+
+for geo_arg in help --help -h "?" HELP; do
+    run_geofiles_command "$geo_arg"
+    assert_geofiles_no_action "geofiles $geo_arg" "0"
+    assert_false "geofiles $geo_arg: help needs no root" grep -q "^check_running_as_root$" "$GEO_CALLS"
+done
+
+for geo_arg in germany --ru -russia; do
+    run_geofiles_command "$geo_arg"
+    assert_geofiles_no_action "geofiles $geo_arg" "1"
+    if [[ "$GEO_OUT" == *"Unknown region: $geo_arg"* ]]; then
+        pass "geofiles $geo_arg: names the unknown region"
+    else
+        fail "geofiles $geo_arg: names the unknown region (got: $GEO_OUT)"
+    fi
+done
+
+# A bad region later on the line is rejected before anything is downloaded
+run_geofiles_command ru germany
+assert_geofiles_no_action "geofiles ru germany" "1"
+
+# Tab completion offers regions after "geofiles"
+eval "$(generate_bash_completion)"
+COMP_WORDS=("$APP_NAME" geofiles r); COMP_CWORD=2
+_node_completions
+assert_eq "${COMPREPLY[*]}" "russia" "bash completion: geofiles r -> russia"
+COMP_WORDS=("$APP_NAME" geofiles ""); COMP_CWORD=2
+_node_completions
+assert_false "bash completion: geofiles offers no subcommands" grep -qw "uninstall" <<< "${COMPREPLY[*]}"
+COMP_WORDS=("$APP_NAME" ge); COMP_CWORD=1
+_node_completions
+assert_eq "${COMPREPLY[*]}" "geofiles" "bash completion: ge -> geofiles"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

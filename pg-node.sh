@@ -2112,6 +2112,10 @@ _node_completions()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    if [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "geofiles" ]; then
+        COMPREPLY=( $(compgen -W "iran russia china help" -- "$cur") )
+        return 0
+    fi
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -2243,6 +2247,8 @@ usage() {
     colorized_echo yellow "  --no-update-service     $(tput sgr0)✓  Skip updating systemd service"
     colorized_echo yellow "  --dev                   $(tput sgr0)✓  Switch to the dev image (unreleased, for testing)"
     colorized_echo yellow "  -v, --version VERSION   $(tput sgr0)✓  Switch to a release tag, latest or pre-release"
+    colorized_echo cyan "Geofiles Options:"
+    colorized_echo yellow "  iran | russia | china   $(tput sgr0)✓  Region to download (default: iran; also ir/ru/cn, --iran/--russia/--china)"
     colorized_echo cyan "Uninstall Options:"
     colorized_echo yellow "  -y, --yes               $(tput sgr0)✓  Auto-confirm uninstall and data removal"
     colorized_echo yellow "  --name NAME             $(tput sgr0)✓  Uninstall specific node instance"
@@ -2287,14 +2293,46 @@ usage() {
     colorized_echo blue "================================="
     echo
 }
+# Print the regions accepted by the geofiles command.
+geofiles_usage() {
+    echo "Usage: $APP_NAME geofiles [REGION]"
+    echo
+    echo "Download geoip.dat and geosite.dat for a region and restart the node."
+    echo "Region names are case-insensitive. Without a region, Iran is used."
+    echo
+    echo "Regions:"
+    echo "  iran, ir, --iran        Chocolate4U/Iran-v2ray-rules (default)"
+    echo "  russia, ru, --russia    runetfreedom/russia-v2ray-rules-dat"
+    echo "  china, cn, --china      Loyalsoldier/v2ray-rules-dat"
+}
+
 # Download regional geoip and geosite rule files and restart node services.
 geofiles_command() {
+    # Map region names to the flags below; reject bad input before downloading anything.
+    local regions=() arg
+    for arg in "$@"; do
+        case "${arg,,}" in
+        help | -h | --help | "?")
+            geofiles_usage
+            return 0
+            ;;
+        iran | ir | --iran) regions+=("--iran") ;;
+        russia | ru | --russia) regions+=("--russia") ;;
+        china | cn | --china) regions+=("--china") ;;
+        *)
+            colorized_echo red "Unknown region: $arg" >&2
+            geofiles_usage >&2
+            exit 1
+            ;;
+        esac
+    done
+    set -- "${regions[@]}"
     check_running_as_root
     mkdir -p "$DATA_DIR/assets"
     local restart_needed=false
     local args_provided=false
     if [[ $# -eq 0 ]]; then
-        colorized_echo blue "No region specified, defaulting to Iran geofiles..."
+        colorized_echo blue "No region specified, defaulting to Iran geofiles (see: $APP_NAME geofiles help)..."
         set -- "--iran"
     fi
     while [[ $# -gt 0 ]]; do
