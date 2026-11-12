@@ -862,7 +862,7 @@ done
 run_geofiles_command ru germany
 assert_geofiles_no_action "geofiles ru germany" "1"
 
-# Tab completion offers regions after "geofiles"
+# Tab completion offers regions after "geofiles", also after a first region
 eval "$(generate_bash_completion)"
 COMP_WORDS=("$APP_NAME" geofiles r); COMP_CWORD=2
 _node_completions
@@ -870,6 +870,9 @@ assert_eq "${COMPREPLY[*]}" "russia" "bash completion: geofiles r -> russia"
 COMP_WORDS=("$APP_NAME" geofiles ""); COMP_CWORD=2
 _node_completions
 assert_false "bash completion: geofiles offers no subcommands" grep -qw "uninstall" <<< "${COMPREPLY[*]}"
+COMP_WORDS=("$APP_NAME" geofiles russia c); COMP_CWORD=3
+_node_completions
+assert_eq "${COMPREPLY[*]}" "china" "bash completion: geofiles russia c -> china"
 COMP_WORDS=("$APP_NAME" ge); COMP_CWORD=1
 _node_completions
 assert_eq "${COMPREPLY[*]}" "geofiles" "bash completion: ge -> geofiles"

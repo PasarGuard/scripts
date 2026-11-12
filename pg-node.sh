@@ -2112,7 +2112,7 @@ _node_completions()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
-    if [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "geofiles" ]; then
+    if [ "$COMP_CWORD" -ge 2 ] && [ "${COMP_WORDS[1]}" = "geofiles" ]; then
         COMPREPLY=( $(compgen -W "iran russia china help" -- "$cur") )
         return 0
     fi
