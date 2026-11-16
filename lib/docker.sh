@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Download and install the official Docker Engine package via get.docker.com script.
 install_docker() {
     colorized_echo blue "Installing Docker"
     if ! bash -o pipefail -c 'curl -fsSL https://get.docker.com | sh'; then
@@ -9,6 +10,7 @@ install_docker() {
     colorized_echo green "Docker installed successfully"
 }
 
+# Verify that the systemd docker service unit is active and started.
 ensure_docker_service_running() {
     if ! command -v systemctl >/dev/null 2>&1; then
         return
@@ -32,6 +34,7 @@ ensure_docker_service_running() {
     fi
 }
 
+# Detect whether Docker Compose v2 is functional and assign the COMPOSE variable.
 detect_compose() {
     if docker compose version >/dev/null 2>&1; then
         COMPOSE='docker compose'
@@ -58,19 +61,23 @@ ensure_docker_compose() {
     colorized_echo green "Docker Compose v2 plugin installed"
 }
 
+# Start all containers defined in COMPOSE_FILE in detached mode with orphan removal.
 compose_up() {
     ensure_docker_service_running
     $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" up -d --remove-orphans
 }
 
+# Stop and remove containers and networks defined in COMPOSE_FILE.
 compose_down() {
     $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" down
 }
 
+# View recent aggregate logs from services defined in COMPOSE_FILE.
 compose_logs() {
     $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" logs
 }
 
+# Stream and follow live log output from services defined in COMPOSE_FILE.
 compose_logs_follow() {
     $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" logs -f
 }

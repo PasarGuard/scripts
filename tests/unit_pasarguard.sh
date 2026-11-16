@@ -31,19 +31,24 @@ source "$ROOT_DIR/pasarguard.sh"
 PASS=0
 FAIL=0
 
+# Record and print a passed test assertion.
 pass() { echo "✓ $1"; PASS=$((PASS + 1)); }
+# Record and print a failed test assertion.
 fail() { echo "✗ $1"; FAIL=$((FAIL + 1)); }
 
+# Assert that the given command evaluates to true (zero exit status).
 assert_true() {
     local label="$1"; shift
     if "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert that the given command evaluates to false (nonzero exit status).
 assert_false() {
     local label="$1"; shift
     if ! "$@"; then pass "$label"; else fail "$label"; fi
 }
 
+# Assert equality between actual and expected values.
 assert_eq() {
     local actual="$1" expected="$2" label="$3"
     if [ "$actual" = "$expected" ]; then pass "$label"; else fail "$label (expected='$expected' got='$actual')"; fi
@@ -295,16 +300,21 @@ assert_false "backup validation: configured PostgreSQL database must be present"
 printf '%s\n' "$(pg_manifest_encode appdb appuser 0 db-001.sql '')" >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
 assert_true "backup validation: PostgreSQL manifest with empty ts_version accepted" \
     database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
+printf 'appdb\tappuser\t0\tdb-001.sql\n' >"$DB_VALIDATION_DIR/pg_dump/manifest.tsv"
+assert_true "backup validation: legacy 4-field manifest accepted" \
+    database_backup_looks_restorable postgresql "$DB_VALIDATION_DIR" appdb ""
 
 SQLITE_VALIDATION_DIR="$WORK_DIR/sqlite-validation"
 mkdir -p "$SQLITE_VALIDATION_DIR"
 printf 'sqlite fixture\n' >"$SQLITE_VALIDATION_DIR/app.sqlite3"
+# Mock sqlite3 to simulate successful PRAGMA quick_check integrity test.
 sqlite3() {
     [ "$2" = "PRAGMA quick_check;" ] || return 1
     printf 'ok\n'
 }
 assert_true "backup validation: SQLite quick_check success accepted" \
     database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
+# Mock sqlite3 to simulate a corrupted database disk image.
 sqlite3() { printf 'database disk image is malformed\n'; }
 assert_false "backup validation: corrupt SQLite snapshot rejected" \
     database_backup_looks_restorable sqlite "$SQLITE_VALIDATION_DIR" "" /source/app.sqlite3
@@ -313,6 +323,7 @@ unset -f sqlite3
 # A multi-database PostgreSQL/TimescaleDB backup must be atomic. Previously the
 # helper returned success as long as any one database dumped successfully.
 MOCK_PG_FAIL_DB=""
+# Mock docker CLI commands for PostgreSQL cluster dump testing.
 docker() {
     local joined="$*"
     case "$joined" in
@@ -441,6 +452,24 @@ EOF
 assert_eq "$(detect_pasarguard_backend_service)" "pasarguard" \
     "detect_pasarguard_backend_service: identifies pasarguard as fallback"
 
+# Test start_pasarguard_app_services exit status propagation
+cat > "$COMPOSE_MOCK_FILE" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"start"* ]]; then
+    exit 0
+fi
+EOF
+assert_true "start_pasarguard_app_services: propagates success (exit 0)" start_pasarguard_app_services
+
+cat > "$COMPOSE_MOCK_FILE" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"start"* ]]; then
+    exit 1
+fi
+EOF
+assert_false "start_pasarguard_app_services: propagates failure (exit 1)" start_pasarguard_app_services
+
+
 # -----------------------------------------------------------------------
 # is_port_in_use
 # -----------------------------------------------------------------------
@@ -453,6 +482,7 @@ ss() {
     fi
     return 1
 }
+# Mock netstat to simulate listening network ports.
 netstat() {
     if [[ "${1:-}" == "-lnt" ]]; then
         echo "tcp 0 0 0.0.0.0:55555 0.0.0.0:* LISTEN"
@@ -542,6 +572,29 @@ unset TIMESCALEDB_BACKUP_VERSION 2>/dev/null || true
 assert_false "single_ts: unversioned legacy dump fails safely" \
     pg_promote_timescaledb_single_backup "$UNVERSIONED_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
 
+COMPOSE_TS_DIR="$WORK_DIR/compose-timescale"
+mkdir -p "$COMPOSE_TS_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$COMPOSE_TS_DIR/db_backup.sql"
+printf '%s\n' \
+    'services:' \
+    '  db:' \
+    '    image: timescale/timescaledb:2.11.0-pg14' >"$COMPOSE_TS_DIR/docker-compose.yml"
+assert_true "single_ts: docker-compose timescale/timescaledb tag promoted" \
+    pg_promote_timescaledb_single_backup "$COMPOSE_TS_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$COMPOSE_TS_DIR/pg_dump/manifest.tsv")" "2.11.0" "single_ts: source version extracted from compose"
+
+COMPOSE_TSHA_DIR="$WORK_DIR/compose-timescale-ha"
+mkdir -p "$COMPOSE_TSHA_DIR"
+cp "$SINGLE_TS_DIR/db_backup.sql" "$COMPOSE_TSHA_DIR/db_backup.sql"
+printf '%s\n' \
+    'services:' \
+    '  db:' \
+    '    image: timescale/timescaledb-ha:pg16-ts2.13.0-all' >"$COMPOSE_TSHA_DIR/docker-compose.yml"
+assert_true "single_ts: docker-compose timescale/timescaledb-ha tag promoted" \
+    pg_promote_timescaledb_single_backup "$COMPOSE_TSHA_DIR" "appdb" "appuser" "$WORK_DIR/promote.log"
+assert_eq "$(cut -f5 "$COMPOSE_TSHA_DIR/pg_dump/manifest.tsv")" "2.13.0" "single_ts: source version extracted from compose-ha"
+
+
 # -----------------------------------------------------------------------
 # pg_filter_timescaledb_extension_lines
 # -----------------------------------------------------------------------
@@ -620,6 +673,7 @@ printf '%s\n' '-- PostgreSQL database cluster dump complete' >"$TS_PREP_DIR/glob
 printf '%s\n' 'CREATE TABLE metrics (id int);' '-- PostgreSQL database dump complete' >"$TS_PREP_DIR/db-001.sql"
 printf 'appdb\tappuser\t1\tdb-001.sql\t2.28.3\n' >"$TS_PREP_DIR/manifest.tsv"
 MOCK_COMPAT_PULL=false
+# Mock docker CLI commands for TimescaleDB extension version compatibility tests.
 docker() {
     case "$*" in
         *"default_version FROM pg_available_extensions"*) printf '2.28.3\n' ;;
@@ -639,6 +693,86 @@ assert_false "ts_prepare: versionless Timescale manifest fails closed" \
     pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
         "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
 unset -f docker
+
+# Older backup version that the destination image still ships: restore in
+# place, no compatibility image, container or volume.
+printf 'appdb\tappuser\t1\tdb-001.sql\t2.27.2\n' >"$TS_PREP_DIR/manifest.tsv"
+MOCK_COMPAT_PULL=false
+MOCK_HAS_LIBRARY=true
+MOCK_IMAGE_RM=false
+MOCK_DOCKER_INFO_FAILS=false
+# Mock docker CLI for a 2.31.0 destination that lists 2.27.2.
+docker() {
+    case "$*" in
+        *"default_version FROM pg_available_extensions"*) printf '2.31.0\n' ;;
+        *"SHOW server_version_num"*) printf '170010\n' ;;
+        *"FROM pg_available_extension_versions"*"'2.27.2'"*) printf '1\n' ;;
+        *"FROM pg_available_extension_versions"*) printf '0\n' ;;
+        *"pg_extension_update_paths"*"'2.27.2'"*"'2.31.0'"*) printf '1\n' ;;
+        *"pg_extension_update_paths"*) printf '0\n' ;;
+        *"pkglibdir"*) [ "$MOCK_HAS_LIBRARY" = true ] ;;
+        *" pull "* | "pull "*) MOCK_COMPAT_PULL=true; return 1 ;;
+        "image rm "*) MOCK_IMAGE_RM=true ;;
+        "info "*) [ "$MOCK_DOCKER_INFO_FAILS" = true ] && return 1; printf '/var/lib/docker\n' ;;
+        *) return 1 ;;
+    esac
+}
+assert_true "ts_installable: listed version with its library" \
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log" 2.31.0
+assert_false "ts_installable: no update path to the target" \
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log" 2.30.0
+assert_false "ts_installable: unlisted version" \
+    timescaledb_version_installable destination appuser pass 2.16.1 "$WORK_DIR/ts-prepare.log" 2.31.0
+assert_false "ts_installable: unsafe version is never queried" \
+    timescaledb_version_installable destination appuser pass "2.27'; --" "$WORK_DIR/ts-prepare.log" 2.31.0
+assert_true "ts_prepare: shipped older version restores in place" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$PG_PREPARED_DUMP_DIR" "$TS_PREP_DIR" "ts_prepare: in-place restore keeps the original dump"
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: in-place restore pulls no compatibility image"
+
+# A listed version without its library falls back to the conversion, which
+# refuses before pulling anything when the disk is too small.
+MOCK_HAS_LIBRARY=false
+assert_false "ts_installable: listed version without its library" \
+    timescaledb_version_installable destination appuser pass 2.27.2 "$WORK_DIR/ts-prepare.log" 2.31.0
+_real_free_space_kb=$(declare -f free_space_kb)
+free_space_kb() { printf '1024\n'; }
+assert_false "ts_prepare: conversion refused when disk space is short" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: short disk stops before the image pull"
+
+# Enough space for Docker or for the staging dumps alone, but not for both on
+# one shared filesystem.
+_ts_dump_kb=$(du -sk "$TS_PREP_DIR" | awk '{print $1}')
+_real_filesystem_id=$(declare -f filesystem_id)
+filesystem_id() { printf 'shared\n'; }
+free_space_kb() { printf '%s\n' $((TIMESCALEDB_COMPAT_IMAGE_KB + _ts_dump_kb * 3 - 1)); }
+assert_false "ts_prepare: shared filesystem needs Docker and staging space together" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: shared filesystem shortage stops before the pull"
+eval "$_real_filesystem_id"
+
+# An unknown Docker root means free space cannot be measured: stop, no pull.
+MOCK_DOCKER_INFO_FAILS=true
+assert_false "ts_prepare: unmeasurable Docker free space fails closed" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "false" "ts_prepare: unmeasurable free space stops before the pull"
+MOCK_DOCKER_INFO_FAILS=false
+
+# With enough space the image is pulled; a failed pull still removes it.
+free_space_kb() { printf '%s\n' $((100 * 1048576)); }
+assert_false "ts_prepare: failed compatibility pull fails closed" \
+    pg_prepare_timescaledb_compatible_dumps destination appuser pass "$TS_PREP_DIR" \
+        "$WORK_DIR/ts-prepare/output/pg_dump" "$WORK_DIR/ts-prepare.log" appdb
+assert_eq "$MOCK_COMPAT_PULL" "true" "ts_prepare: missing library triggers the conversion"
+assert_eq "$MOCK_IMAGE_RM" "true" "ts_prepare: image pulled by the restore is removed"
+assert_eq "$TIMESCALEDB_COMPAT_PULLED_IMAGE" "" "ts_prepare: pulled image marker cleared"
+unset -f docker
+eval "$_real_free_space_kb"
 
 # -----------------------------------------------------------------------
 # format_timescaledb_mismatch_help
@@ -679,6 +813,63 @@ assert_true "version-script: output contains '# Executing pasarguard script, com
 comp_out=$(generate_completion)
 assert_true "completion: contains version-script" contains "$comp_out" "version-script"
 assert_true "completion: contains script-version" contains "$comp_out" "script-version"
+
+# -----------------------------------------------------------------------
+# mirror.sh HTTPS transport and entrypoint guard
+# -----------------------------------------------------------------------
+http_mirrors=$(grep -E '^[[:space:]]*"http://' "$ROOT_DIR/iran-sanction/mirror.sh" || true)
+assert_eq "$http_mirrors" "" "mirror.sh: no plaintext HTTP APT mirrors"
+assert_true "mirror.sh: has direct-execution guard" \
+    grep -Fq 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then' \
+    "$ROOT_DIR/iran-sanction/mirror.sh"
+
+# -----------------------------------------------------------------------
+# run_all.sh missing suite detection
+# -----------------------------------------------------------------------
+missing_branch=$(grep -A 3 -F 'Suite not found:' "$ROOT_DIR/tests/run_all.sh" || true)
+assert_true "run_all.sh: increments FAILED for missing suites" \
+    contains "$missing_branch" 'FAILED=$((FAILED + 1))'
+assert_true "run_all.sh: records missing suites in FAILED_LIST" \
+    contains "$missing_branch" 'FAILED_LIST+=("$suite (missing)")'
+
+# -----------------------------------------------------------------------
+# mysql_buffer_pool_size_for_ram
+# -----------------------------------------------------------------------
+meminfo_with() { printf 'MemTotal:       %s kB\nMemFree:         1000 kB\n' "$1" >"$WORK_DIR/meminfo"; echo "$WORK_DIR/meminfo"; }
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 1000000)" "$WORK_DIR/no-cgroup")" "256M" "buffer_pool: 1 GB host gets the 256M floor"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 2014000)" "$WORK_DIR/no-cgroup")" "384M" "buffer_pool: 2 GB host gets 384M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 4194304)" "$WORK_DIR/no-cgroup")" "1024M" "buffer_pool: 4 GB host gets 1024M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/no-cgroup")" "2048M" "buffer_pool: 8 GB host gets 2048M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 67108864)" "$WORK_DIR/no-cgroup")" "4096M" "buffer_pool: 64 GB host is capped at 4096M"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$WORK_DIR/no-such-meminfo")" "256M" "buffer_pool: unreadable meminfo falls back to 256M"
+# Fake cgroup trees: v2 has cgroup.controllers at the root, v1 a memory/ hierarchy
+CG="$WORK_DIR/cg"
+mkdir -p "$CG/v2/outer/inner" "$CG/v2max/a" "$CG/v1/memory/outer/inner"
+touch "$CG/v2/cgroup.controllers" "$CG/v2max/cgroup.controllers"
+echo max >"$CG/v2/outer/inner/memory.max"
+echo 2147483648 >"$CG/v2/outer/memory.max"
+echo max >"$CG/v2max/a/memory.max"
+echo 9223372036854771712 >"$CG/v1/memory/memory.limit_in_bytes"
+echo 1073741824 >"$CG/v1/memory/outer/memory.limit_in_bytes"
+echo 9223372036854771712 >"$CG/v1/memory/outer/inner/memory.limit_in_bytes"
+printf '0::/outer/inner\n' >"$CG/self-v2"
+printf '0::/a\n' >"$CG/self-v2max"
+printf '5:cpu,cpuacct:/x\n4:memory:/outer/inner\n' >"$CG/self-v1"
+printf '0::/\n' >"$CG/self-root"
+mem32=$(meminfo_with 33554432)
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v2" "$CG/self-v2")" "512M" "buffer_pool: cgroup v2 ancestor limit of 2 GB wins over 32 GB RAM"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v1" "$CG/self-v1")" "256M" "buffer_pool: cgroup v1 ancestor limit of 1 GB wins over 32 GB RAM"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v2max" "$CG/self-v2max")" "4096M" "buffer_pool: cgroup v2 'max' means no limit"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$mem32" "$CG/v2" "$CG/self-root")" "4096M" "buffer_pool: root cgroup v2 has no limit"
+assert_eq "$(mysql_buffer_pool_size_for_ram "$(meminfo_with 8388608)" "$WORK_DIR/no-cgroup" "$CG/none")" "2048M" "buffer_pool: no cgroup files uses RAM"
+for f in pasarguard-mysql.yml pasarguard-mariadb.yml; do
+    assert_true "$f: buffer pool reads MYSQL_BUFFER_POOL_SIZE" \
+        grep -Fq -- '--innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M}' "$ROOT_DIR/docker-compose/$f"
+done
+assert_true "pasarguard-mysql.yml: one buffer pool instance keeps the exact size" \
+    grep -Fq -- '--innodb-buffer-pool-instances=1' "$ROOT_DIR/docker-compose/pasarguard-mysql.yml"
+assert_false "pasarguard-mariadb.yml: no removed instances option" \
+    grep -Fq -- 'innodb-buffer-pool-instances' "$ROOT_DIR/docker-compose/pasarguard-mariadb.yml"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

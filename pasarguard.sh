@@ -95,6 +95,11 @@ COMPOSE_FILE="$APP_DIR/docker-compose.yml"
 ENV_FILE="$APP_DIR/.env"
 LAST_XRAY_CORES=10
 
+# Validate whether the provided string is a supported proxy URL.
+# Arguments:
+#   $1 - Proxy URL to validate.
+# Returns:
+#   0 if valid proxy scheme, 1 otherwise.
 is_valid_proxy_url() {
     local proxy_url="$1"
     [[ -z "$proxy_url" ]] && return 1
@@ -104,6 +109,11 @@ is_valid_proxy_url() {
     return 1
 }
 
+# Retrieve the configured backup proxy URL if enabled.
+# Outputs:
+#   Writes the proxy URL to stdout if configured and enabled.
+# Returns:
+#   0 if proxy URL is configured and enabled, 1 otherwise.
 get_backup_proxy_url() {
     local proxy_value="${BACKUP_PROXY_URL:-${BACKUP_PROXY:-}}"
     local proxy_enabled="${BACKUP_PROXY_ENABLED:-}"
@@ -120,10 +130,20 @@ get_backup_proxy_url() {
     return 0
 }
 
+# Check if the given string is a valid domain name format.
+# Arguments:
+#   $1 - String to check.
+# Returns:
+#   0 if domain format is valid, 1 otherwise.
 is_domain() {
     [[ "$1" =~ ^([A-Za-z0-9](-*[A-Za-z0-9])*\.)+(xn--[a-z0-9]{2,}|[A-Za-z]{2,})$ ]] && return 0 || return 1
 }
 
+# Check if the given string is a valid IPv4 address.
+# Arguments:
+#   $1 - IP string to validate.
+# Returns:
+#   0 if valid IPv4, 1 otherwise.
 is_ipv4() {
     local ip="$1"
     local IFS='.'
@@ -142,10 +162,20 @@ is_ipv4() {
     return 0
 }
 
+# Check if the given string resembles an IPv6 address.
+# Arguments:
+#   $1 - IP string to check.
+# Returns:
+#   0 if contains colons (IPv6), 1 otherwise.
 is_ipv6() {
     [[ "$1" =~ : ]] && return 0 || return 1
 }
 
+# Retrieve the server's public IPv4 address using external IP lookup services.
+# Outputs:
+#   Writes resolved IPv4 address to stdout.
+# Returns:
+#   0 on success, 1 on failure.
 get_public_ipv4() {
     local urls=(
         "https://api4.ipify.org"
@@ -168,6 +198,11 @@ get_public_ipv4() {
     return 1
 }
 
+# Check whether a specified TCP port is currently in use/listening on the host.
+# Arguments:
+#   $1 - Port number to check.
+# Returns:
+#   0 if in use, 1 if available.
 is_port_in_use() {
     local port="$1"
 
@@ -207,6 +242,9 @@ get_cron_package_name() {
     fi
 }
 
+# Install prerequisite packages for SSL certificate generation via acme.sh.
+# Returns:
+#   0 on success.
 ensure_acme_dependencies() {
     command -v socat >/dev/null 2>&1 || install_package socat
     command -v openssl >/dev/null 2>&1 || install_package openssl
@@ -222,6 +260,9 @@ ensure_acme_dependencies() {
     fi
 }
 
+# Download and install the acme.sh SSL client into the system.
+# Returns:
+#   0 on successful installation, 1 on error.
 install_acme() {
     colorized_echo blue "Installing acme.sh for SSL certificate management..."
     # curl | sh exits 0 even when acme.sh's own installer bails (e.g. a failed
@@ -238,6 +279,11 @@ install_acme() {
     return 1
 }
 
+# Locate the installed acme.sh binary executable in standard installation paths.
+# Outputs:
+#   Writes the path to the acme.sh binary to stdout.
+# Returns:
+#   0 if acme.sh executable is found, 1 otherwise.
 get_acme_sh_binary() {
     if [ -x "${HOME}/.acme.sh/acme.sh" ]; then
         echo "${HOME}/.acme.sh/acme.sh"
@@ -257,6 +303,11 @@ get_acme_sh_binary() {
     return 1
 }
 
+# Configure automatic updates and cron job scheduling for acme.sh certificates.
+# Arguments:
+#   $1 - Path to acme.sh binary.
+# Returns:
+#   0 on completion.
 ensure_acme_auto_renew() {
     local acme_bin="$1"
 
@@ -265,6 +316,9 @@ ensure_acme_auto_renew() {
     "$acme_bin" --install-cronjob >/dev/null 2>&1 || true
 }
 
+# Generate the shell command executed by acme.sh to reload PasarGuard after cert renewal.
+# Outputs:
+#   Writes docker-compose restart command string to stdout.
 build_pasarguard_ssl_reload_command() {
     local backend_service=""
     backend_service=$(detect_pasarguard_backend_service 2>/dev/null || true)
@@ -276,6 +330,12 @@ build_pasarguard_ssl_reload_command() {
     fi
 }
 
+# Check if both certificate and private key files exist and have non-zero file sizes.
+# Arguments:
+#   $1 - Path to SSL certificate file.
+#   $2 - Path to SSL private key file.
+# Returns:
+#   0 if both files exist and are non-empty, 1 otherwise.
 has_nonempty_ssl_pair() {
     local cert_file="$1"
     local key_file="$2"
@@ -283,6 +343,13 @@ has_nonempty_ssl_pair() {
     [ -s "$cert_file" ] && [ -s "$key_file" ]
 }
 
+# Copy issued certificate and key pair from acme.sh repository store to target paths.
+# Arguments:
+#   $1 - Domain or IP identifier.
+#   $2 - Target certificate file path.
+#   $3 - Target private key file path.
+# Returns:
+#   0 on success, 1 if certificates could not be copied.
 copy_acme_cert_pair_from_store() {
     local identifier="$1"
     local cert_file="$2"
@@ -312,6 +379,14 @@ copy_acme_cert_pair_from_store() {
     return 1
 }
 
+# Install acme.sh issued certificate and key into target directory with reload hook.
+# Arguments:
+#   $1 - Path to acme.sh binary.
+#   $2 - Domain or IP identifier.
+#   $3 - Target certificate directory.
+#   $4 - Reload command string.
+# Returns:
+#   0 on success, 1 on failure.
 install_acme_cert_pair() {
     local acme_bin="$1"
     local identifier="$2"
@@ -345,6 +420,12 @@ install_acme_cert_pair() {
     return 1
 }
 
+# Issue and configure a Let's Encrypt SSL certificate for a domain name.
+# Arguments:
+#   $1 - Domain name to issue certificate for.
+#   $2 - HTTP challenge port (default: 80).
+# Returns:
+#   0 on success, 1 on validation or issuance failure.
 setup_ssl_certificate() {
     local domain="$1"
     local http_port="${2:-80}"
@@ -368,7 +449,6 @@ setup_ssl_certificate() {
     fi
 
     ensure_acme_dependencies
-
     if ! acme_bin=$(get_acme_sh_binary); then
         install_acme || return 1
         acme_bin=$(get_acme_sh_binary) || {
@@ -407,6 +487,13 @@ setup_ssl_certificate() {
     return 0
 }
 
+# Issue and configure a Let's Encrypt IP SSL certificate for IPv4 and optional IPv6.
+# Arguments:
+#   $1 - Server public IPv4 address.
+#   $2 - Optional server IPv6 address.
+#   $3 - HTTP challenge port (default: 80).
+# Returns:
+#   0 on success, 1 on validation or issuance failure.
 setup_ip_ssl_certificate() {
     local ipv4="$1"
     local ipv6="$2"
@@ -484,6 +571,13 @@ setup_ip_ssl_certificate() {
     return 0
 }
 
+# Copy and configure custom user-provided SSL certificate and private key files.
+# Arguments:
+#   $1 - Path to source certificate file.
+#   $2 - Path to source private key file.
+#   $3 - CA type identifier (default: "public").
+# Returns:
+#   0 on success, 1 if files are missing or unreadable.
 configure_custom_ssl_certificate() {
     local cert_source="$1"
     local key_source="$2"
@@ -512,6 +606,11 @@ configure_custom_ssl_certificate() {
     return 0
 }
 
+# Configure SSL certificate and key paths and CA type in PasarGuard .env configuration.
+# Arguments:
+#   $1 - Certificate file path.
+#   $2 - Key file path.
+#   $3 - CA type (default: "public").
 enable_pasarguard_ssl_env() {
     local cert_file="$1"
     local key_file="$2"
@@ -522,12 +621,20 @@ enable_pasarguard_ssl_env() {
     set_or_uncomment_env_var "UVICORN_SSL_CA_TYPE" "$ca_type" true "$ENV_FILE"
 }
 
+# Comment out UVICORN_SSL variables in PasarGuard .env to disable SSL termination.
 disable_pasarguard_ssl_env() {
     comment_out_env_var "UVICORN_SSL_CERTFILE" "$ENV_FILE"
     comment_out_env_var "UVICORN_SSL_KEYFILE" "$ENV_FILE"
     comment_out_env_var "UVICORN_SSL_CA_TYPE" "$ENV_FILE"
 }
 
+# Run interactive or automated SSL certificate configuration wizard during installation.
+# Arguments:
+#   $1 - SSL mode ("disabled", "domain", or empty for interactive prompt).
+#   $2 - Pre-specified domain name (optional).
+#   $3 - HTTP challenge port number.
+# Returns:
+#   0 on success or skip, 1 on configuration failure.
 setup_pasarguard_ssl_during_install() {
     local ssl_mode="$1"
     local ssl_domain="$2"
@@ -668,16 +775,23 @@ setup_pasarguard_ssl_during_install() {
     return 0
 }
 
+# Check if a specific service is defined in docker-compose.yml.
 compose_service_exists() {
     local service_name="$1"
     [ -z "$service_name" ] && return 1
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>/dev/null | grep -Fxq "$service_name"
+    local services
+    services=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>/dev/null) || return 1
+    grep -Fxq "$service_name" <<< "$services"
 }
 
+# List all PasarGuard application services (panel, worker, scheduler) defined in compose file.
+# Outputs:
+#   Writes service names line-by-line to stdout.
 list_pasarguard_app_services() {
     local detected_services=""
     detected_services=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config 2>/dev/null | awk '
         BEGIN { in_services = 0; service = ""; is_app = 0 }
+        # Flush the currently parsed service if it matches app criteria.
         function flush_service() {
             if (service != "" && is_app) {
                 print service
@@ -734,6 +848,11 @@ list_pasarguard_app_services() {
     done
 }
 
+# Detect the main backend service name for PasarGuard from docker-compose.yml.
+# Outputs:
+#   Writes the detected service name to stdout.
+# Returns:
+#   0 if backend service is found, 1 otherwise.
 detect_pasarguard_backend_service() {
     local service_name=""
 
@@ -746,6 +865,7 @@ detect_pasarguard_backend_service() {
 
     service_name=$($COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" config 2>/dev/null | awk '
         BEGIN { in_services = 0; service = ""; is_backend = 0 }
+        # Flush the currently parsed service if it matches backend criteria.
         function flush_service() {
             if (service != "" && is_backend) {
                 print service
@@ -801,6 +921,7 @@ detect_pasarguard_backend_service() {
     return 1
 }
 
+# Stop application services defined in docker-compose.yml while keeping database containers running.
 stop_pasarguard_app_services() {
     local services
     services=$(list_pasarguard_app_services | xargs)
@@ -808,13 +929,20 @@ stop_pasarguard_app_services() {
     $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" stop $services 2>/dev/null || true
 }
 
+# Start application services defined in docker-compose.yml and propagate Compose exit status.
 start_pasarguard_app_services() {
     local services
     services=$(list_pasarguard_app_services | xargs)
     [ -z "$services" ] && services="pasarguard"
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start $services 2>/dev/null || true
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" start $services 2>/dev/null
 }
 
+
+# Locate the container ID or name corresponding to a database engine type.
+# Arguments:
+#   $1 - Database engine type (mysql, mariadb, postgresql, timescaledb).
+# Outputs:
+#   Writes the container identifier to stdout.
 find_container() {
     local db_type=$1
     local container_name=""
@@ -845,6 +973,14 @@ find_container() {
     echo "$container_name"
 }
 
+# Check if a database container exists and is running.
+# Arguments:
+#   $1 - Expected container name or ID.
+#   $2 - Database engine type.
+# Outputs:
+#   Writes confirmed running container identifier to stdout.
+# Returns:
+#   0 if container is running, 1 otherwise.
 check_container() {
     local container_name=$1
     local db_type=$2
@@ -881,6 +1017,14 @@ check_container() {
     return 0
 }
 
+# Verify database container is running, attempting to start it if stopped.
+# Arguments:
+#   $1 - Expected container name or ID.
+#   $2 - Database engine type.
+# Outputs:
+#   Writes running container identifier to stdout.
+# Returns:
+#   0 if container is running or started, 1 on failure.
 verify_and_start_container() {
     local container_name=$1
     local db_type=$2
@@ -927,6 +1071,9 @@ verify_and_start_container() {
     [ "$container_running" = true ] && { echo "$container_name"; return 0; } || { echo ""; return 1; }
 }
 
+# Install the pasarguard CLI script and shared libraries from GitHub repository.
+# Returns:
+#   0 on successful installation.
 install_pasarguard_script() {
     print_script_execution_header "pasarguard" "$SCRIPT_COMMIT_SHA" "install"
     FETCH_REPO="PasarGuard/scripts"
@@ -936,6 +1083,9 @@ install_pasarguard_script() {
     colorized_echo green "pasarguard script installed successfully"
 }
 
+# Check whether the PasarGuard application directory exists on the system.
+# Returns:
+#   0 if installed, 1 otherwise.
 is_pasarguard_installed() {
     if [ -d $APP_DIR ]; then
         return 0
@@ -944,6 +1094,9 @@ is_pasarguard_installed() {
     fi
 }
 
+# Update the PasarGuard panel container image tag in docker-compose.yml using yq.
+# Arguments:
+#   $1 - Target Docker image tag.
 set_pasarguard_panel_image() {
     local target_image="$1"
     local service_name=""
@@ -973,6 +1126,64 @@ set_pasarguard_panel_image() {
     fi
 }
 
+# Print the lowest cgroup memory limit in bytes on the path of this process, from its
+# own cgroup up to the mount root (cgroup v2 or v1). Prints nothing when there is no limit.
+# Arguments:
+#   $1 - cgroup mount (default /sys/fs/cgroup).
+#   $2 - cgroup membership file (default /proc/self/cgroup).
+cgroup_memory_limit_bytes() {
+    local root="${1:-/sys/fs/cgroup}" membership="${2:-/proc/self/cgroup}"
+    local base file path value lowest=""
+    if [ -f "$root/cgroup.controllers" ]; then
+        base="$root" file="memory.max"
+        path=$(awk -F: '$1 == "0" { print $3; exit }' "$membership" 2>/dev/null || true)
+    else
+        base="$root/memory" file="memory.limit_in_bytes"
+        path=$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3; exit }' "$membership" 2>/dev/null || true)
+    fi
+    path="${path%/}"
+    while :; do
+        # cgroup v2 writes "max" for no limit; v1 writes a huge number, which the caller's min ignores
+        value=$(cat "$base$path/$file" 2>/dev/null || true)
+        if [[ "$value" =~ ^[0-9]+$ ]] && { [ -z "$lowest" ] || [ "$value" -lt "$lowest" ]; }; then
+            lowest="$value"
+        fi
+        [ -z "$path" ] && break
+        path="${path%/*}"
+    done
+    [ -n "$lowest" ] && echo "$lowest"
+    return 0
+}
+
+# Print an InnoDB buffer pool size for this host: about 25% of RAM in 128M steps,
+# kept between 256M and 4096M. A cgroup memory limit lower than the RAM is used
+# instead of it. Falls back to 256M when RAM cannot be read.
+# Arguments:
+#   $1 - meminfo file (default /proc/meminfo).
+#   $2 - cgroup mount (default /sys/fs/cgroup).
+#   $3 - cgroup membership file (default /proc/self/cgroup).
+mysql_buffer_pool_size_for_ram() {
+    local meminfo="${1:-/proc/meminfo}" total_kb limit_bytes mb
+    total_kb=$(awk '$1 == "MemTotal:" { print $2; exit }' "$meminfo" 2>/dev/null || true)
+    if ! [[ "$total_kb" =~ ^[0-9]+$ ]]; then
+        echo "256M"
+        return
+    fi
+    limit_bytes=$(cgroup_memory_limit_bytes "${2:-}" "${3:-}")
+    if [[ "$limit_bytes" =~ ^[0-9]+$ ]] && [ $((limit_bytes / 1024)) -lt "$total_kb" ]; then
+        total_kb=$((limit_bytes / 1024))
+    fi
+    mb=$((total_kb / 1024 / 4 / 128 * 128))
+    [ "$mb" -lt 256 ] && mb=256
+    [ "$mb" -gt 4096 ] && mb=4096
+    echo "${mb}M"
+}
+
+# Download template files, configure database, and set image tag for PasarGuard installation.
+# Arguments:
+#   $1 - Version string.
+#   $2 - Major version number.
+#   $3 - Database engine type.
 install_pasarguard() {
     local pasarguard_version=$1
     local major_version=$2
@@ -983,6 +1194,9 @@ install_pasarguard() {
 
     mkdir -p "$DATA_DIR"
     mkdir -p "$APP_DIR"
+    # This installation replaces anything an unfinished `restore --fresh` left
+    # here; its retry marker must not turn a later --fresh into a restore over it.
+    rm -f "$APP_DIR/${FRESH_RESTORE_MARKER:-.pasarguard-fresh-restore}"
 
     colorized_echo blue "Fetching .env file"
     # Pre-create .env as 0600 (and tighten any pre-existing copy) so the DB,
@@ -1032,6 +1246,9 @@ install_pasarguard() {
             DB_PORT="3306"
             MYSQL_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
             echo "MYSQL_ROOT_PASSWORD=\"$MYSQL_ROOT_PASSWORD\"" >>"$ENV_FILE"
+            MYSQL_BUFFER_POOL_SIZE=$(mysql_buffer_pool_size_for_ram)
+            echo "MYSQL_BUFFER_POOL_SIZE=\"$MYSQL_BUFFER_POOL_SIZE\"" >>"$ENV_FILE"
+            colorized_echo green "$db_name buffer pool: $MYSQL_BUFFER_POOL_SIZE (change MYSQL_BUFFER_POOL_SIZE in .env)"
         fi
 
         if [[ "$database_type" =~ ^(postgresql|timescaledb)$ ]]; then
@@ -1085,10 +1302,14 @@ install_pasarguard() {
     colorized_echo green "pasarguard installed successfully"
 }
 
+# Start PasarGuard containers via Docker Compose.
 up_pasarguard() {
     compose_up
 }
 
+# Display installation status and state of PasarGuard container services.
+# Returns:
+#   0 if running, 1 if not installed or down.
 status_command() {
 
     # Check if pasarguard is installed
@@ -1125,6 +1346,7 @@ status_command() {
     done
 }
 
+# Automatically generate a secure random password for database authentication.
 prompt_for_db_password() {
     DB_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
     colorized_echo green "A secure database password has been generated automatically."
@@ -1132,6 +1354,7 @@ prompt_for_db_password() {
 
 }
 
+# Automatically generate a secure random password for pgAdmin authentication.
 prompt_for_pgadmin_password() {
     PGADMIN_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20 || true)
     colorized_echo green "A secure PGAdmin password has been generated automatically."
@@ -1142,6 +1365,11 @@ prompt_for_pgadmin_password() {
 
 }
 
+# Inspect host for previous database directories or Docker volumes and prompt for cleanup.
+# Arguments:
+#   $1 - Database engine type.
+# Returns:
+#   0 on completion.
 check_existing_database_volumes() {
     local db_type=$1
     local found_paths=()
@@ -1243,6 +1471,11 @@ check_existing_database_volumes() {
     echo
 }
 
+# Execute the full PasarGuard panel installation process including dependency and SSL setup.
+# Arguments:
+#   $@ - Command-line arguments passed to install command.
+# Returns:
+#   0 on success; exits with code 1 on failure or cancellation.
 install_command() {
     check_running_as_root
     print_script_execution_header "pasarguard" "$SCRIPT_COMMIT_SHA" "install"
@@ -1372,7 +1605,11 @@ install_command() {
     fi
     detect_compose
     install_pasarguard_script
-    # Function to check if a version exists in the GitHub releases
+    # Check if a release version exists in GitHub releases and extract major version.
+    # Arguments:
+    #   $1 - Version tag or alias to check.
+    # Returns:
+    #   0 if valid or accessible, 1 otherwise.
     check_version_exists() {
         local version=$1
         repo_url="https://api.github.com/repos/pasarguard/panel/releases"
@@ -1481,18 +1718,24 @@ install_command() {
     follow_pasarguard_logs
 }
 
+# Stop and remove PasarGuard containers via Docker Compose.
 down_pasarguard() {
     compose_down
 }
 
+# Display output logs from PasarGuard container services.
 show_pasarguard_logs() {
     compose_logs
 }
 
+# Stream and follow live log output from PasarGuard container services.
 follow_pasarguard_logs() {
     compose_logs_follow
 }
 
+# Execute the PasarGuard CLI tool within the running backend container.
+# Arguments:
+#   $@ - Arguments passed directly to pasarguard-cli.
 pasarguard_cli() {
     local backend_service=""
     backend_service=$(detect_pasarguard_backend_service)
@@ -1503,6 +1746,9 @@ pasarguard_cli() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" exec -e CLI_PROG_NAME="pasarguard cli" "$backend_service" pasarguard-cli "$@"
 }
 
+# Launch the PasarGuard interactive Terminal User Interface (TUI).
+# Arguments:
+#   $@ - Arguments passed directly to pasarguard-tui.
 pasarguard_tui() {
     local backend_service=""
     backend_service=$(detect_pasarguard_backend_service)
@@ -1514,6 +1760,9 @@ pasarguard_tui() {
 }
 
 
+# Check if any PasarGuard containers are currently created or running.
+# Returns:
+#   0 if containers exist, 1 otherwise.
 is_pasarguard_up() {
     if [ -z "$($COMPOSE -f $COMPOSE_FILE ps -q -a)" ]; then
         return 1
@@ -1522,6 +1771,9 @@ is_pasarguard_up() {
     fi
 }
 
+# Completely uninstall PasarGuard, stopping services and removing files and images.
+# Returns:
+#   0 on success; exits with code 1 if not installed or aborted.
 uninstall_command() {
     check_running_as_root
     # Check if pasarguard is installed
@@ -1554,6 +1806,7 @@ uninstall_command() {
     fi
 }
 
+# Remove the installed pasarguard executable script from /usr/local/bin.
 uninstall_pasarguard_script() {
     if [ -f "/usr/local/bin/pasarguard" ]; then
         colorized_echo yellow "Removing pasarguard script"
@@ -1561,6 +1814,7 @@ uninstall_pasarguard_script() {
     fi
 }
 
+# Remove the PasarGuard application installation directory.
 uninstall_pasarguard() {
     if [ -d "$APP_DIR" ]; then
         colorized_echo yellow "Removing directory: $APP_DIR"
@@ -1568,6 +1822,7 @@ uninstall_pasarguard() {
     fi
 }
 
+# Remove unused PasarGuard panel Docker images from host.
 uninstall_pasarguard_docker_images() {
     local images
     images=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^pasarguard\/panel(:|$)/ {print $2}' | sort -u)
@@ -1595,6 +1850,7 @@ uninstall_pasarguard_docker_images() {
     done
 }
 
+# Remove persistent PasarGuard data directory from host.
 uninstall_pasarguard_data_files() {
     if [ -d "$DATA_DIR" ]; then
         colorized_echo yellow "Removing directory: $DATA_DIR"
@@ -1602,7 +1858,13 @@ uninstall_pasarguard_data_files() {
     fi
 }
 
+# Restart PasarGuard services by stopping and starting containers.
+# Arguments:
+#   $@ - Command-line options (-n/--no-logs, -h/--help).
+# Returns:
+#   0 on success; exits with code 1 if not installed.
 restart_command() {
+    # Display help for the restart subcommand.
     help() {
         colorized_echo red "Usage: pasarguard restart [options]"
         echo
@@ -1645,7 +1907,14 @@ restart_command() {
     fi
     colorized_echo green "pasarguard successfully restarted!"
 }
+
+# Display logs from PasarGuard container services.
+# Arguments:
+#   $@ - Command-line options (-n/--no-follow, -h/--help).
+# Returns:
+#   0 on success; exits with code 1 if not installed or down.
 logs_command() {
+    # Display help for the logs subcommand.
     help() {
         colorized_echo red "Usage: pasarguard logs [options]"
         echo ""
@@ -1693,6 +1962,9 @@ logs_command() {
     fi
 }
 
+# Stop running PasarGuard services via Docker Compose.
+# Returns:
+#   0 on success; exits with code 1 if not installed or already down.
 down_command() {
 
     # Check if pasarguard is installed
@@ -1711,6 +1983,11 @@ down_command() {
     down_pasarguard
 }
 
+# Invoke the PasarGuard command-line interface tool in the backend container.
+# Arguments:
+#   $@ - Arguments forwarded to pasarguard-cli.
+# Returns:
+#   0 on success; exits with code 1 if not installed or down.
 cli_command() {
     # Check if pasarguard is installed
     if ! is_pasarguard_installed; then
@@ -1728,6 +2005,11 @@ cli_command() {
     pasarguard_cli "$@"
 }
 
+# Launch the PasarGuard terminal user interface in the backend container.
+# Arguments:
+#   $@ - Arguments forwarded to pasarguard-tui.
+# Returns:
+#   0 on success; exits with code 1 if not installed or down.
 tui_command() {
     # Check if pasarguard is installed
     if ! is_pasarguard_installed; then
@@ -1745,7 +2027,13 @@ tui_command() {
     pasarguard_tui "$@"
 }
 
+# Start PasarGuard services if not already running.
+# Arguments:
+#   $@ - Command-line options (-n/--no-logs, -h/--help).
+# Returns:
+#   0 on success; exits with code 1 if not installed or already up.
 up_command() {
+    # Display help for the up subcommand.
     help() {
         colorized_echo red "Usage: pasarguard up [options]"
         echo ""
@@ -1792,6 +2080,9 @@ up_command() {
     fi
 }
 
+# Update the PasarGuard CLI script, pull updated Docker images, and restart services.
+# Returns:
+#   0 on success; exits with code 1 if not installed.
 update_command() {
     check_running_as_root
     # Check if pasarguard is installed
@@ -1815,6 +2106,9 @@ update_command() {
     colorized_echo blue "pasarguard updated successfully"
 }
 
+# Download and update the pasarguard script and shared libraries with rollback safety.
+# Returns:
+#   0 on success; exits with code 1 on failure after restoring backup.
 update_pasarguard_script() {
     FETCH_REPO="PasarGuard/scripts"
     colorized_echo blue "Updating pasarguard script"
@@ -1840,10 +2134,14 @@ update_pasarguard_script() {
     colorized_echo green "pasarguard script updated successfully"
 }
 
+# Pull the latest Docker images specified in docker-compose.yml.
 update_pasarguard() {
     $COMPOSE -f $COMPOSE_FILE -p "$APP_NAME" pull
 }
 
+# Open the docker-compose.yml file in the configured text editor.
+# Returns:
+#   0 on success; exits with code 1 if file is missing.
 edit_command() {
     detect_os
     check_editor
@@ -1855,6 +2153,9 @@ edit_command() {
     fi
 }
 
+# Open the PasarGuard .env configuration file in the configured text editor.
+# Returns:
+#   0 on success; exits with code 1 if file is missing.
 edit_env_command() {
     detect_os
     check_editor
@@ -1866,6 +2167,9 @@ edit_env_command() {
     fi
 }
 
+# Download and execute the PasarGuard node installer on the current server.
+# Returns:
+#   0 on successful installation; exits with code 1 on error.
 install_node_command() {
     colorized_echo blue "=============================="
     colorized_echo magenta "   Install PasarGuard Node   "
@@ -1888,6 +2192,9 @@ install_node_command() {
     fi
 }
 
+# Output the bash auto-completion script definition for the pasarguard CLI.
+# Outputs:
+#   Writes shell completion code to stdout.
 generate_completion() {
     cat <<'EOF'
 _pasarguard_completions()
@@ -1904,6 +2211,9 @@ EOF
     echo "complete -F _pasarguard_completions $APP_NAME"
 }
 
+# Install the bash auto-completion script into /etc/bash_completion.d/.
+# Returns:
+#   0 on success.
 install_completion() {
     local completion_dir="/etc/bash_completion.d"
     local completion_file="$completion_dir/$APP_NAME"
@@ -1913,6 +2223,7 @@ install_completion() {
     colorized_echo green "Bash completion installed to $completion_file"
 }
 
+# Remove the installed bash auto-completion script from /etc/bash_completion.d/.
 uninstall_completion() {
     local completion_dir="/etc/bash_completion.d"
     local completion_file="$completion_dir/$APP_NAME"
@@ -1922,6 +2233,7 @@ uninstall_completion() {
     fi
 }
 
+# Display help and usage information for pasarguard commands and options.
 usage() {
     local script_name="${0##*/}"
     colorized_echo blue "=============================="
@@ -1930,7 +2242,6 @@ usage() {
     colorized_echo cyan "Usage:"
     echo "  ${script_name} [command]"
     echo
-
     colorized_echo cyan "Commands:"
     colorized_echo yellow "  up              $(tput sgr0)– Start services"
     colorized_echo yellow "  down            $(tput sgr0)– Stop services"
@@ -1947,9 +2258,13 @@ usage() {
     colorized_echo yellow "  backup          $(tput sgr0)– Manual backup launch"
     colorized_echo yellow "  backup-service  $(tput sgr0)– pasarguard Backup service to backup to TG, and a new job in crontab"
     colorized_echo yellow "  restore         $(tput sgr0)– Restore database from backup file"
+    echo "                    restore /path/to/backup.zip --check  (validate and show source versions)"
+    echo "                    restore /path/to/backup.zip --fresh  (recover onto an empty server)"
+    echo "                    restore /path/to/backup.zip          (restore an existing installation)"
     colorized_echo yellow "  edit            $(tput sgr0)– Edit docker-compose.yml (via nano or vi editor)"
     colorized_echo yellow "  edit-env        $(tput sgr0)– Edit environment file (via nano or vi editor)"
     colorized_echo yellow "  version-script  $(tput sgr0)– Show script version and commit"
+    colorized_echo yellow "  completion      $(tput sgr0)– Install bash completion"
     colorized_echo yellow "  help            $(tput sgr0)– Show this help message"
 
     echo
@@ -1960,6 +2275,9 @@ usage() {
     echo
 }
 
+# Main CLI dispatcher parsing command arguments and routing to appropriate handler functions.
+# Arguments:
+#   $@ - Command arguments passed to script.
 pasarguard_main() {
     case "$1" in
     up)

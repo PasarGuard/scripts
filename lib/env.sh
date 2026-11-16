@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Update an existing environment variable or append it to the target file if absent.
 replace_or_append_env_var() {
     local key="$1"
     local value="$2"
@@ -22,6 +23,7 @@ replace_or_append_env_var() {
     fi
 }
 
+# Set or uncomment an environment variable in an env file while preserving file structure.
 set_or_uncomment_env_var() {
     local key="$1"
     local value="$2"
@@ -65,6 +67,7 @@ set_or_uncomment_env_var() {
     mv "$tmp_file" "$target_file"
 }
 
+# Comment out an active environment variable definition in the target file.
 comment_out_env_var() {
     local key="$1"
     local target_file="${2:-$ENV_FILE}"
@@ -94,6 +97,7 @@ comment_out_env_var() {
     mv "$tmp_file" "$target_file"
 }
 
+# Remove all matching variable assignment lines from the target environment file.
 delete_env_var() {
     local key="$1"
     local target_file="${2:-$ENV_FILE}"

@@ -26,7 +26,7 @@ services:
       - --collation_server=utf8mb4_unicode_ci # Defines collation for Unicode
       - --host-cache-size=0 # Disables host cache to prevent DNS issues
       - --innodb-open-files=1024 # Sets the limit for InnoDB open files
-      - --innodb-buffer-pool-size=256M # Allocates buffer pool size for InnoDB
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_SIZE:-256M} # InnoDB cache; the installer sets about 25% of RAM
       - --binlog_expire_logs_seconds=1209600 # Sets binary log expiration to 14 days (2 weeks)
       - --innodb-doublewrite=0 # Disables doublewrite buffer (reduces disk I/O; may increase data loss risk)
       - --general_log=0 # Disables general query log to reduce disk usage

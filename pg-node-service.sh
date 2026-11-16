@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Print a timestamped log message to stderr.
+# Arguments:
+#   $* - Message text to log.
+# Outputs:
+#   Writes formatted timestamped log string to stderr.
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
+# Parse environment variables from ENV_FILE and export them into the current environment.
+# Returns:
+#   0 on success.
 load_env_file() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"
@@ -165,12 +173,23 @@ if ! command -v openssl >/dev/null 2>&1; then
 fi
 
 # Validate certificate
+cert_status=0
+check_certificate "$SSL_CERT_FILE" || cert_status=$?
+if [[ "$cert_status" -eq 1 ]]; then
+  if [[ "${ALLOW_INSECURE_TLS:-false}" != "true" ]]; then
+    log "Error: Certificate validation failed for $SSL_CERT_FILE. Refusing to start (set ALLOW_INSECURE_TLS=true to override)."
+    exit 1
+  else
+    log "Warning: Certificate validation failed for $SSL_CERT_FILE, but ALLOW_INSECURE_TLS=true is set. Continuing..."
+  fi
+fi
 describe_certificate "$SSL_CERT_FILE"
 
 log "TLS enabled on port $API_PORT with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE"
 fi
 log "API key protection enabled"
 
+# Escape JSON special characters for HTTP response formatting.
 json_escape() {
   local s=$1
   s=${s//\\/\\\\}
@@ -180,6 +199,7 @@ json_escape() {
   echo -n "$s"
 }
 
+# Return standard HTTP status reason phrase for a status code.
 status_text() {
   case "$1" in
     200) echo -n "OK" ;;
@@ -190,6 +210,12 @@ status_text() {
   esac
 }
 
+# Send an HTTP response with status line, standard headers, and JSON body.
+# Arguments:
+#   $1 - HTTP status code (e.g. 200, 400, 404, 500).
+#   $2 - Response body content.
+# Outputs:
+#   Writes the full HTTP response stream to stdout.
 respond() {
   local code=$1
   local body=$2
@@ -208,6 +234,9 @@ respond() {
   fi
 }
 
+# Handle HTTP request to update the PasarGuard node CLI binary and configuration.
+# Outputs:
+#   Sends HTTP response via respond.
 handle_node_update(){
     log "Executing $APP_NAME update"
    if ! $APP_NAME update --no-update-service >/dev/null 2>&1; then 
@@ -218,6 +247,11 @@ handle_node_update(){
     respond 200 "{\"detail\":\"node updated successfully\"}"
 }
 
+# Handle HTTP request to update the PasarGuard node Xray core binary.
+# Arguments:
+#   $1 - Raw JSON request body containing core_version.
+# Outputs:
+#   Sends HTTP response via respond.
 handle_node_core_update(){
     local body="${1:-}"
     local core_version=""
@@ -257,6 +291,11 @@ handle_node_core_update(){
     fi
 }
 
+# Handle HTTP request to download and update geofiles for a specified region.
+# Arguments:
+#   $1 - Raw JSON request body containing target region.
+# Outputs:
+#   Sends HTTP response via respond.
 handle_geofiles_update(){
     local body="${1:-}"
     local region="" flag=""
@@ -300,6 +339,9 @@ handle_geofiles_update(){
     fi
 }
 
+# Process a single incoming HTTP connection over stdin/stdout.
+# Returns:
+#   0 on processed connection, 1 on closed connection or invalid request.
 handle_connection() {
   local request_line method path version
   

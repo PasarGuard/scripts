@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+# Mask sensitive Telegram bot token for display, showing only the last 6 chars.
 mask_telegram_bot_key() {
     local secret="$1"
     local length=${#secret}
@@ -17,6 +18,7 @@ mask_telegram_bot_key() {
     printf '****%s\n' "${secret: -6}"
 }
 
+# Remove existing PasarGuard backup cron jobs from a crontab file.
 filter_backup_cron_entries() {
     local source_file="$1"
     local target_file="$2"
@@ -108,6 +110,7 @@ format_backup_interval() {
     fi
 }
 
+# Determine whether a database hostname points to localhost/loopback.
 is_local_db_host() {
     local host="${1:-}"
 
@@ -175,7 +178,7 @@ postgres_backup_looks_restorable() {
     while IFS= read -r manifest_line || [ -n "$manifest_line" ]; do
         [ -n "$manifest_line" ] || return 1
         field_count=$(awk -F '\t' '{ print NF }' <<<"$manifest_line")
-        [ "$field_count" -eq 5 ] || return 1
+        [ "$field_count" -ge 4 ] && [ "$field_count" -le 5 ] || return 1
 
         dbname="${manifest_line%%$'\t'*}"
         has_timescaledb=$(cut -f3 <<<"$manifest_line")
@@ -196,6 +199,7 @@ postgres_backup_looks_restorable() {
     [ "$manifest_count" -gt 0 ] && [ "$dump_count" -eq "$manifest_count" ] && [ "$expected_found" = true ]
 }
 
+# Validate that an SQLite snapshot file is non-empty and passes SQLite quick_check integrity.
 sqlite_snapshot_looks_restorable() {
     local snapshot_file="$1"
     [ -s "$snapshot_file" ] || return 1
@@ -206,6 +210,7 @@ sqlite_snapshot_looks_restorable() {
     [ "$integrity" = "ok" ]
 }
 
+# Dispatcher to validate database backup restorable integrity for any supported engine.
 database_backup_looks_restorable() {
     local db_type="$1"
     local temp_dir="$2"
@@ -229,6 +234,7 @@ database_backup_looks_restorable() {
     esac
 }
 
+# Upload completed backup archive(s) to configured Telegram chat, supporting multipart archives.
 send_backup_to_telegram() {
     local requested_timestamp="${1:-}"
 
@@ -447,6 +453,7 @@ send_backup_to_telegram() {
     fi
 }
 
+# Send error notification and execution log to Telegram chat upon backup failure.
 send_backup_error_to_telegram() {
     local error_messages=$1
     local log_file=$2
@@ -500,6 +507,7 @@ send_backup_error_to_telegram() {
     fi
 }
 
+# Interactive configuration wizard for scheduled automated Telegram backups.
 backup_service() {
     local telegram_bot_key=""
     local telegram_chat_id=""
@@ -696,6 +704,7 @@ backup_service() {
     colorized_echo green "====================================="
 }
 
+# Add or update the PasarGuard backup service entry in system crontab.
 add_cron_job() {
     local schedule="$1"
     local command="$2"
@@ -715,6 +724,7 @@ add_cron_job() {
     rm -f "$temp_cron"
 }
 
+# Display current configuration details of the automated backup service.
 view_backup_service() {
     if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         colorized_echo red "Backup service is not configured."
@@ -753,6 +763,7 @@ view_backup_service() {
     read -p "Press Enter to continue..."
 }
 
+# Interactive editor for existing automated backup service settings.
 edit_backup_service() {
     if ! grep -q "BACKUP_SERVICE_ENABLED=true" "$ENV_FILE"; then
         colorized_echo red "Backup service is not configured."
@@ -914,6 +925,7 @@ edit_backup_service() {
     colorized_echo green "Backup service configuration updated successfully."
 }
 
+# Disable and completely remove automated backup service configuration and cron task.
 remove_backup_service() {
     colorized_echo red "in process..."
 
@@ -1111,6 +1123,119 @@ write_timescaledb_single_dump_version() {
     printf '%s\n' "$source_version" >"$temp_dir/db_backup.timescaledb-version"
 }
 
+# Record the images actually used by the source containers, including stopped
+# containers. A tag such as latest/lts is not a reproducible recovery image.
+# This is data, never a shell file to source. Missing pins keep ordinary backups
+# usable, but fresh-server recovery must refuse to guess an image version.
+# Arguments: stage, engine, database container, log, SQLite database path, and
+# the database user, password and name used to read the schema revision.
+write_backup_runtime() {
+    local stage="$1" engine="$2" database_container="$3" log="$4"
+    local sqlite_file="$5" db_user="$6" db_password="$7" db_name="$8"
+    local runtime="$stage/backup-runtime.tsv"
+    local server_version="unknown" dump_tool_version="unknown" revision="unknown" dump=""
+    local services="" service="" cid="" image_id="" digest="" pins=0
+    local compose="${COMPOSE:-docker compose}"
+
+    case "${APP_NAME}${APP_DIR}${DATA_DIR}" in
+        *$'\t'* | *$'\n'*) return 1 ;;
+    esac
+    if [ -f "$stage/db_backup.sql" ]; then
+        dump="$stage/db_backup.sql"
+    elif [ -f "$stage/pg_dump/db-001.sql" ]; then
+        dump="$stage/pg_dump/db-001.sql"
+    fi
+    if [ "$engine" = sqlite ]; then
+        # The panel's own SQLite library version is not visible from here; record
+        # the host sqlite3 that made the snapshot instead.
+        dump_tool_version=$(sqlite3 --version 2>>"$log" | awk '{print "sqlite3 " $1}') || dump_tool_version="unknown"
+        # The protected snapshot is immutable. A failed metadata query against
+        # a WAL-mode database must not create new WAL/SHM files in the archive.
+        local snapshot_uri="$stage/$(basename "$sqlite_file")"
+        snapshot_uri="${snapshot_uri//%/%25}"
+        snapshot_uri="${snapshot_uri//\?/%3F}"
+        snapshot_uri="${snapshot_uri//#/%23}"
+        revision=$(sqlite3 "file:${snapshot_uri}?immutable=1" 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+    elif [ -n "$dump" ]; then
+        server_version=$(sed -n -E 's/^-- (Server version[[:space:]]+|Dumped from database version )//p' "$dump" | head -n 1)
+        # Headers: "-- MySQL dump 10.13  Distrib 8.0.43, for ...", MariaDB up to 11
+        # the same with "Distrib", MariaDB 12 "-- MariaDB dump 10.19-12.3.2-MariaDB, for ...".
+        dump_tool_version=$(sed -n -E 's/^-- Dumped by pg_dump version //p
+            s/^-- (MySQL|MariaDB) dump .*Distrib[[:space:]]+([^,]+),.*/\2/p
+            s/^-- MariaDB dump [0-9.]+-([^,[:space:]]+),.*/\1/p' "$dump" | head -n 1)
+        if [[ "$server_version" == *MariaDB* ]]; then engine="mariadb"; fi
+        if [ -n "$database_container" ] && [ -n "$db_user" ] && [ -n "$db_name" ]; then
+            case "$engine" in
+                mysql|mariadb)
+                    local client="mysql"
+                    [ "$engine" != mariadb ] || client="mariadb"
+                    revision=$(docker exec -e MYSQL_PWD="$db_password" "$database_container" "$client" \
+                        -u "$db_user" "$db_name" -N -s -e 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+                    ;;
+                postgresql|timescaledb)
+                    revision=$(docker exec -e PGPASSWORD="$db_password" "$database_container" \
+                        psql -X -U "$db_user" -d "$db_name" -At -c 'SELECT version_num FROM alembic_version;' 2>>"$log") || revision="unknown"
+                    ;;
+            esac
+        fi
+    fi
+    server_version="${server_version//$'\t'/ }"
+    server_version="${server_version//$'\n'/ }"
+    revision="${revision//$'\n'/,}"
+    revision="${revision//$'\t'/ }"
+    dump_tool_version="${dump_tool_version//$'\n'/ }"
+    dump_tool_version="${dump_tool_version//$'\t'/ }"
+    {
+        printf 'format\t1\ncreated_utc\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'database\t%s\nserver_version\t%s\nschema_revision\t%s\n' "$engine" "${server_version:-unknown}" "${revision:-unknown}"
+        printf 'dump_tool_version\t%s\n' "${dump_tool_version:-unknown}"
+        printf 'project\t%s\napp_dir\t%s\ndata_dir\t%s\n' "$APP_NAME" "$APP_DIR" "$DATA_DIR"
+    } >"$runtime" || return 1
+    services=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" config --services 2>>"$log") || services=""
+    while IFS= read -r service; do
+        [ -n "$service" ] || continue
+        # Compose service names: letters, digits, ".", "_" and "-".
+        [[ "$service" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
+        cid=$($compose -f "$COMPOSE_FILE" -p "$APP_NAME" ps -a -q -- "$service" 2>>"$log" | head -n 1) || cid=""
+        image_id=""
+        digest=""
+        if [ -n "$cid" ]; then
+            image_id=$(docker inspect --format '{{.Image}}' "$cid" 2>>"$log") || image_id=""
+            if [ -n "$image_id" ]; then
+                digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image_id" 2>>"$log" | head -n 1) || digest=""
+            fi
+        fi
+        [[ "$digest" =~ ^[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}$ ]] || digest="unavailable"
+        [[ "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || image_id="unavailable"
+        [ "$digest" = unavailable ] || pins=$((pins + 1))
+        printf 'image\t%s\t%s\t%s\n' "$service" "$digest" "$image_id" >>"$runtime" || return 1
+    done <<<"$services"
+    if [ "$pins" -eq 0 ]; then
+        colorized_echo yellow "Recovery image digests could not be recorded. This backup can be restored to an existing installation; --fresh needs the original images."
+    fi
+}
+
+# Cover the archive payload, including settings and version metadata.
+# Checksums detect corruption; they do not authenticate an untrusted archive.
+# A file whose name holds a backslash, CR or LF cannot be written as one plain
+# inventory line; it is reported and left to the archive's own CRC instead of
+# failing the whole backup.
+write_backup_checksums() (
+    cd "$1" || exit 1
+    local payload="" checksum=""
+    while IFS= read -r -d '' payload; do
+        case "$payload" in
+            *$'\n'* | *$'\r'* | *\\*)
+                printf 'Warning: file not in the checksum inventory (unsupported characters in its name): %q\n' "$payload" >&2
+                continue
+                ;;
+        esac
+        checksum=$(sha256sum -- "$payload") || exit 1
+        printf '%s\n' "$checksum"
+    done < <(find . -type f ! -path './backup-files.sha256' -print0 | sort -z)
+) >"$1/backup-files.sha256"
+
+# Execute a complete PasarGuard system backup including database dumps, configuration, and data.
 backup_command() {
     colorized_echo blue "Starting backup process..."
 
@@ -1160,6 +1285,7 @@ backup_command() {
         return 1
     fi
 
+    # Acquire an exclusive directory-based lock to ensure only one backup runs at a time.
     acquire_backup_lock() {
         local lock_pid=""
 
@@ -1207,6 +1333,7 @@ backup_command() {
         ;;
     esac
 
+    # Clean up temporary staging directories, snapshot files, and release the backup lock.
     cleanup_backup_command() {
         rm -rf "$temp_dir"
         if [ -n "$sqlite_snapshot_dir" ]; then
@@ -1348,6 +1475,7 @@ backup_command() {
                 db_name="${db_name%%\?*}"
                 db_name="${db_name%%#*}"
 
+                # Decode percent-encoded characters and plus signs into standard text.
                 urldecode() { local url_encoded="${1//+/ }"; printf '%b' "${url_encoded//%/\\x}"; }
                 db_user=$(urldecode "$db_user")
                 db_password=$(urldecode "$db_password")
@@ -1726,7 +1854,8 @@ backup_command() {
             ;;
         esac
     else
-        colorized_echo yellow "Warning: No database type detected. Skipping database backup."
+        colorized_echo red "No database type detected. Check SQLALCHEMY_DATABASE_URL in .env; no backup will be published."
+        error_messages+=("No database type detected; a configuration-only archive cannot recover this installation.")
         echo "Warning: No database type detected." >>"$log_file"
         echo "SQLALCHEMY_DATABASE_URL: ${safe_sqlalchemy_url}" >>"$log_file"
     fi
@@ -1744,7 +1873,14 @@ backup_command() {
             --exclude 'db_backup.sqlite'
             --exclude 'db_backup.timescaledb-version'
             --exclude 'pg_dump'
-            --exclude 'timescaledb-compatible'
+            --exclude 'backup-runtime.tsv'
+            --exclude 'backup-files.sha256'
+            --exclude '.pasarguard-recovery-compose.json'
+            --exclude '.pasarguard-destination-compose.yml'
+            --exclude '.pasarguard-fresh-restore'
+            --exclude 'pasarguard_ts_compat.*'
+            --exclude '*_combined.zip'
+            --exclude 'pasarguard_env_cleaned'
             --exclude 'pasarguard_restore_error.log'
         )
         if [ "$db_type" = "sqlite" ] && [ -n "$sqlite_file" ]; then
@@ -1772,7 +1908,7 @@ backup_command() {
     colorized_echo blue "Copying data directory..."
     # Ensure destination directory exists and is empty (already cleaned above, but be explicit)
     if [ -d "$DATA_DIR" ]; then
-        local rsync_args=(-av --exclude 'xray-core' --exclude 'mysql' --exclude 'mariadb' --exclude 'postgresql' --exclude 'timescaledb')
+        local rsync_args=(-av "${PASARGUARD_DATA_DIR_EXCLUDES[@]}")
         local normalized_data_dir=""
         normalized_data_dir=$(normalize_posix_path "$DATA_DIR")
 
@@ -1837,6 +1973,14 @@ backup_command() {
         fi
     fi
 
+    if [ ${#error_messages[@]} -eq 0 ]; then
+        if ! write_backup_runtime "$temp_dir" "$db_type" "$container_name" "$log_file" \
+            "$sqlite_file" "$db_user" "$db_password" "$db_name" || \
+            ! write_backup_checksums "$temp_dir"; then
+            error_messages+=("Failed to record recovery versions or payload checksums.")
+        fi
+    fi
+
     colorized_echo blue "Creating backup archive..."
     # Verify temp_dir exists and has content before creating archive
     if [ ${#error_messages[@]} -gt 0 ]; then
@@ -1844,7 +1988,7 @@ backup_command() {
     elif [ ! -d "$temp_dir" ] || [ -z "$(ls -A "$temp_dir" 2>/dev/null)" ]; then
         error_messages+=("Temporary directory is empty or missing. Cannot create archive.")
         echo "Temporary directory is empty or missing: $temp_dir" >>"$log_file"
-    elif ! (cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
+    elif ! (umask 077; cd "$temp_dir" && zip -rq "$backup_file" .) 2>>"$log_file"; then
         error_messages+=("Failed to create backup archive.")
         echo "Failed to create backup archive." >>"$log_file"
     else
@@ -1853,8 +1997,8 @@ backup_command() {
 
         if [ "$archive_size_bytes" -gt "$split_threshold_bytes" ]; then
             colorized_echo blue "Splitting backup archive into Telegram-sized parts..."
-            if ! split -d -a 2 --numeric-suffixes=1 -b "$split_size_bytes" --additional-suffix=".zip" \
-                "$backup_file" "$backup_dir/backup_${timestamp}.part" 2>>"$log_file"; then
+            if ! (umask 077; split -d -a 2 --numeric-suffixes=1 -b "$split_size_bytes" --additional-suffix=".zip" \
+                "$backup_file" "$backup_dir/backup_${timestamp}.part") 2>>"$log_file"; then
                 error_messages+=("Failed to split backup archive.")
                 echo "Failed to split backup archive." >>"$log_file"
             else
