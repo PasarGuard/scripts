@@ -262,19 +262,30 @@ configure_firewall_for_port() {
     colorized_echo yellow "$hint"
 }
 
-# Download and install the pg-node CLI script to /usr/local/bin.
+# Install this pg-node CLI version to /usr/local/bin, including branch installs.
 install_node_script() {
     print_script_execution_header "pg-node" "$SCRIPT_COMMIT_SHA" "install"
     colorized_echo blue "Installing node script"
     TARGET_PATH="/usr/local/bin/$APP_NAME"
     TEMP_FILE=$(create_temp_file "pg-node-script" ".sh")
     
-    # Download script to temp file first
-    colorized_echo cyan "  Downloading script from GitHub..."
-    if ! github_download_file "$(github_raw_url "$FETCH_REPO" "pg-node.sh")" "$TEMP_FILE"; then
-        colorized_echo red "✗ Failed to download script from $(github_raw_url "$FETCH_REPO" "pg-node.sh")"
+    # The ACME hook immediately invokes the installed CLI. Fetching main here
+    # can replace a branch installer with an older CLI that treats renew-cert
+    # as self-signed renewal and ignores --deploy-acme.
+    colorized_echo cyan "  Copying the running installer..."
+    local script_source="${BASH_SOURCE[0]:-}"
+    if [ -f "$script_source" ]; then
+        if ! cp "$script_source" "$TEMP_FILE"; then
+            rm -f "$TEMP_FILE"
+            return 1
+        fi
+    elif [ -n "${BASH_EXECUTION_STRING:-}" ]; then
+        # Support the documented bash -c "$(curl ...)" installation form.
+        printf '%s\n' "$BASH_EXECUTION_STRING" >"$TEMP_FILE" || return 1
+    else
+        colorized_echo red "✗ Cannot locate the running installer"
         rm -f "$TEMP_FILE"
-        exit 1
+        return 1
     fi
     
     # Replace APP_NAME in the script - the script has APP_NAME="" on line 5
@@ -283,7 +294,10 @@ install_node_script() {
         sed -i "s|^APP_NAME=.*|APP_NAME=\"$APP_NAME\"|" "$TEMP_FILE"
     fi
 
-    install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh
+    if ! install_shared_libs_from_repo "$FETCH_REPO" common.sh system.sh docker.sh github.sh; then
+        rm -f "$TEMP_FILE"
+        return 1
+    fi
     
     # Remove old file if it exists
     if [ -f "$TARGET_PATH" ]; then
