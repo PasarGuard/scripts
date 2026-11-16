@@ -38,8 +38,16 @@ expect_fail validate_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key" wrong.examp
 expect_fail validate_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key" 192.0.2.2
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "$WORK_DIR/wrong-key"
 expect_fail validate_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/wrong-key"
-openssl x509 -in "$WORK_DIR/cert" -signkey "$WORK_DIR/key" -days -1 -out "$WORK_DIR/expired" >/dev/null 2>&1
-expect_fail validate_node_cert_pair "$WORK_DIR/expired" "$WORK_DIR/key"
+# Advance validation's clock past notAfter; newer OpenSSL rejects -days -1.
+(
+    expiry=$(openssl x509 -in "$WORK_DIR/cert" -enddate -noout)
+    future=$(date -d "${expiry#*=}" +%s)
+    date() {
+        if [ "$*" = +%s ]; then printf '%s\n' "$((future + 1))"
+        else command date "$@"; fi
+    }
+    expect_fail validate_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key"
+)
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj '/CN=node.example.com' \
     -keyout "$WORK_DIR/no-san-key" -out "$WORK_DIR/no-san" >/dev/null 2>&1
 expect_fail validate_node_cert_pair "$WORK_DIR/no-san" "$WORK_DIR/no-san-key" node.example.com
@@ -49,6 +57,45 @@ cmp "$WORK_DIR/cert" "$SSL_CERT_FILE"
 [ "$(stat -c %a "$SSL_KEY_FILE")" = 600 ]
 expect_fail deploy_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/wrong-key"
 cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
+# Concurrent deployments cannot interleave their key and certificate moves.
+move_log="$WORK_DIR/moves"
+(
+    mv() {
+        if [ "${*: -1}" = "$SSL_KEY_FILE" ]; then
+            echo key >>"$move_log"
+            sleep 0.1
+        elif [ "${*: -1}" = "$SSL_CERT_FILE" ]; then
+            echo cert >>"$move_log"
+        fi
+        command mv "$@"
+    }
+    deploy_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key" &
+    first=$!
+    deploy_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key" &
+    second=$!
+    wait "$first"
+    wait "$second"
+)
+[ "$(cat "$move_log")" = "$(printf 'key\ncert\nkey\ncert')" ]
+# Failure closes the descriptor and removes temporary files.
+(
+    cp() { return 1; }
+    expect_fail deploy_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key"
+)
+flock -n "$DATA_DIR/certs/.deployment.lock" true
+# Synchronous reload subprocesses inherit ownership without deadlocking.
+with_node_cert_lock bash -c 'flock -n "$PG_NODE_CERT_LOCK_FD" && ! flock -n "$DATA_DIR/certs/.deployment.lock" true'
+[ -z "$(find "$DATA_DIR/certs" -name '*.stage.*' -print)" ]
+# Selected certificates outside the data mount are relocated with matching paths.
+(
+    choose_node_certificate() { TLS_ENABLED=true; }
+    SSL_CERT_FILE="$WORK_DIR/cert"; SSL_KEY_FILE="$WORK_DIR/key"
+    with_node_cert_lock prepare_install_node_certificate
+    [ "$SSL_CERT_FILE" = "$DATA_DIR/certs/ssl_cert.pem" ]
+    [ "$SSL_KEY_FILE" = "$DATA_DIR/certs/ssl_key.pem" ]
+    cmp "$WORK_DIR/cert" "$SSL_CERT_FILE"
+    cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
+)
 # Self-signed output exposes the leaf certificate pin, not a PEM-file checksum.
 save_cert_source self_signed
 cert_output=$(show_node_certificate)
@@ -62,6 +109,11 @@ SSL_CERT_FILE="$active_cert"
 # Mock ACME: ECC fails, RSA succeeds; confirm installation tries both and preserves old files on failure.
 acme_calls="$WORK_DIR/acme-calls"
 mock_acme() {
+    # ACME staging is owned by the same lock as certificate deployment.
+    if flock -n "$DATA_DIR/certs/.deployment.lock" true; then
+        echo 'FAIL: ACME ran without the deployment lock' >&2
+        return 1
+    fi
     printf '%s\n' "$*" >>"$acme_calls"
     [[ " $* " != *' --ecc '* ]] || return 1
     local key='' cert=''
@@ -69,6 +121,8 @@ mock_acme() {
         case "$1" in --key-file) key="$2"; shift;; --fullchain-file) cert="$2"; shift;; esac
         shift
     done
+    [ "$key" != no ] || key=''
+    [ "$cert" != no ] || cert=''
     [ -z "$key" ] || cp "$WORK_DIR/key" "$key"
     [ -z "$cert" ] || cp "$WORK_DIR/cert" "$cert"
 }
@@ -88,13 +142,23 @@ renew_cert_command
 save_cert_source custom
 restart_called=false
 detect_compose() { :; }
-restart_node_cert_services() { restart_called=true; }
+restart_node_cert_services() {
+    if flock -n "$DATA_DIR/certs/.deployment.lock" true; then
+        echo 'FAIL: deployment lock released before restart' >&2
+        return 1
+    fi
+    restart_called=true
+}
 renew_cert_command
 [ "$restart_called" = true ]
 cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
 save_cert_source acme_ip 192.0.2.1 '' 80
+# ACME's cron must not write shared staging before the locked reload hook.
+mock_acme() { printf '%s\n' "$*" >>"$acme_calls"; }
+register_node_acme_reload
+grep -q -- '--key-file no --fullchain-file no' "$acme_calls"
 restart_called=false
-renew_cert_command --deploy-acme
+CERT_FULLCHAIN_PATH="$WORK_DIR/cert" CERT_KEY_PATH="$WORK_DIR/key" renew_cert_command --deploy-acme
 [ "$restart_called" = true ]
 # Restart both actual deployment targets; propagate individual restart failures.
 unset -f restart_node_cert_services

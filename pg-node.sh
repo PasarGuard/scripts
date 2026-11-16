@@ -756,7 +756,7 @@ install_node() {
     mkdir -p "$APP_DIR"
     colorized_echo green "  ✓ Directories created"
     colorized_echo cyan ""
-    choose_node_certificate || exit 1
+    with_node_cert_lock prepare_install_node_certificate || exit 1
     if [ -n "${INSTALL_API_KEY:-}" ]; then
         API_KEY="$INSTALL_API_KEY"
     elif [ "$AUTO_CONFIRM" = true ]; then
@@ -2394,17 +2394,46 @@ validate_node_cert_pair() (
     done
 )
 
+# Nested certificate operations (including synchronous ACME reload hooks) share
+# the same open lock descriptor. Never unlink the lock file: waiters use its inode.
+with_node_cert_lock() {
+    local lock_file="$DATA_DIR/certs/.deployment.lock" status=0
+    mkdir -p "$DATA_DIR/certs" || return 1
+    if [[ "${PG_NODE_CERT_LOCK_FD:-}" =~ ^[0-9]+$ ]] &&
+        [ "$(readlink "/proc/self/fd/$PG_NODE_CERT_LOCK_FD")" = "$lock_file" ] &&
+        flock -n "$PG_NODE_CERT_LOCK_FD"; then
+        "$@"
+        return $?
+    fi
+    local PG_NODE_CERT_LOCK_FD
+    exec {PG_NODE_CERT_LOCK_FD}>"$lock_file" || return 1
+    if flock -x "$PG_NODE_CERT_LOCK_FD"; then
+        export PG_NODE_CERT_LOCK_FD
+        "$@" || status=$?
+    else
+        status=1
+    fi
+    exec {PG_NODE_CERT_LOCK_FD}>&-
+    return "$status"
+}
+
 # Stage and validate before touching either active file. Keep backups for rollback.
 deploy_node_cert_pair() {
+    with_node_cert_lock deploy_node_cert_pair_locked "$@"
+}
+
+deploy_node_cert_pair_locked() (
     local cert="$1" key="$2" identity="${3:-}" ipv6="${4:-}"
     validate_node_cert_pair "$cert" "$key" "$identity" "$ipv6" || return 1
     mkdir -p "$(dirname "$SSL_CERT_FILE")" "$(dirname "$SSL_KEY_FILE")" || return 1
     chmod 700 "$(dirname "$SSL_KEY_FILE")" || return 1
-    local stage_cert stage_key
+    local stage_cert="" stage_key=""
+    trap 'rm -f -- "$stage_cert" "$stage_key"' EXIT
     stage_cert=$(mktemp "${SSL_CERT_FILE}.stage.XXXXXX") || return 1
     stage_key=$(mktemp "${SSL_KEY_FILE}.stage.XXXXXX") || return 1
     cp "$cert" "$stage_cert" && cp "$key" "$stage_key" || return 1
     chmod 644 "$stage_cert" && chmod 600 "$stage_key" || return 1
+    validate_node_cert_pair "$stage_cert" "$stage_key" "$identity" "$ipv6" || return 1
     if [ -f "$SSL_CERT_FILE" ]; then cp -p "$SSL_CERT_FILE" "${SSL_CERT_FILE}.previous" || return 1; fi
     if [ -f "$SSL_KEY_FILE" ]; then cp -p "$SSL_KEY_FILE" "${SSL_KEY_FILE}.previous" || return 1; fi
     if ! mv -f "$stage_key" "$SSL_KEY_FILE" || ! mv -f "$stage_cert" "$SSL_CERT_FILE"; then
@@ -2413,7 +2442,7 @@ deploy_node_cert_pair() {
         cert_error "Deployment failed; restored previous certificate files"
         return 1
     fi
-}
+)
 
 get_node_acme() {
     if [ -x "${HOME}/.acme.sh/acme.sh" ]; then printf '%s\n' "${HOME}/.acme.sh/acme.sh"
@@ -2456,6 +2485,19 @@ validate_ssl_selection() {
     if [ "$count" -eq 0 ] && { [ "$AUTO_CONFIRM" = true ] || [ ! -t 0 ]; }; then
         cert_error "Unattended IP issuance requires --ssl-ip IPV4. Old unattended commands must add --self-signed to keep self-signed behavior."
         return 1
+    fi
+}
+
+# Retained paths can point outside the instance's bind mount. Copy the selected
+# active pair into that mount before writing its paths to .env.
+prepare_install_node_certificate() {
+    choose_node_certificate || return 1
+    if [ "$TLS_ENABLED" = true ] &&
+        { [[ "$SSL_CERT_FILE" != "$DATA_DIR/"* ]] || [[ "$SSL_KEY_FILE" != "$DATA_DIR/"* ]]; }; then
+        local cert="$SSL_CERT_FILE" key="$SSL_KEY_FILE"
+        SSL_CERT_FILE="$DATA_DIR/certs/ssl_cert.pem"
+        SSL_KEY_FILE="$DATA_DIR/certs/ssl_key.pem"
+        deploy_node_cert_pair "$cert" "$key" || return 1
     fi
 }
 
@@ -2529,6 +2571,10 @@ PYIP
 }
 
 issue_node_acme() {
+    with_node_cert_lock issue_node_acme_locked "$@"
+}
+
+issue_node_acme_locked() {
     local source="$1" identifier="$2" ipv6="$3" port="$4" acme
     ensure_node_acme || return 1
     get_occupied_ports
@@ -2544,16 +2590,34 @@ issue_node_acme() {
 }
 
 stage_node_acme() {
+    with_node_cert_lock stage_node_acme_locked "$@"
+}
+
+stage_node_acme_locked() {
     local acme="$1" identifier="$2" reload="${3:-:}" stage="$DATA_DIR/certs/.acme-staging"
     mkdir -p "$stage" && chmod 700 "$stage" || return 1
     local ecc
     for ecc in '--ecc' ''; do
-        # Remove only staging files so a failed install cannot look successful.
-        rm -f "$stage/fullchain.pem" "$stage/privkey.pem"
-        local args=(--installcert -d "$identifier" --key-file "$stage/privkey.pem" --fullchain-file "$stage/fullchain.pem" --reloadcmd "$reload")
+        local key_target=no cert_target=no
+        if [ "$reload" = : ]; then
+            # Remove only staging files so a failed install cannot look successful.
+            rm -f "$stage/fullchain.pem" "$stage/privkey.pem"
+            key_target="$stage/privkey.pem"; cert_target="$stage/fullchain.pem"
+        fi
+        # For automatic renewals ACME invokes the hook without writing staging.
+        # The hook copies ACME's exported source paths while holding our lock.
+        local args=(--installcert -d "$identifier" --key-file "$key_target" --fullchain-file "$cert_target" --reloadcmd "$reload")
         [ -z "$ecc" ] || args+=("$ecc")
-        if "$acme" "${args[@]}" && [ -s "$stage/fullchain.pem" ] && [ -s "$stage/privkey.pem" ]; then
-            chmod 600 "$stage/privkey.pem" || return 1
+        if "$acme" "${args[@]}" &&
+            { [ "$reload" != : ] || { [ -s "$stage/fullchain.pem" ] && [ -s "$stage/privkey.pem" ]; }; }; then
+            if [ "$reload" = : ]; then
+                chmod 600 "$stage/privkey.pem" || return 1
+                # Do not leave staging as an unattended ACME write target while
+                # installation is still preparing the permanent reload hook.
+                local reset_args=(--installcert -d "$identifier" --key-file no --fullchain-file no --reloadcmd :)
+                [ -z "$ecc" ] || reset_args+=("$ecc")
+                "$acme" "${reset_args[@]}" || return 1
+            fi
             printf '%s' "$ecc" >"$stage/key-type"
             return 0
         fi
@@ -2562,6 +2626,10 @@ stage_node_acme() {
 }
 
 register_node_acme_reload() {
+    with_node_cert_lock register_node_acme_reload_locked "$@"
+}
+
+register_node_acme_reload_locked() {
     [ -f "$DATA_DIR/certs/source.json" ] || return 0
     case "$(cert_metadata source)" in acme_ip|acme_domain) ;; *) return 0;; esac
     local acme hook
@@ -2604,6 +2672,10 @@ restart_node_cert_services() {
 }
 
 renew_cert_command() {
+    with_node_cert_lock renew_cert_command_locked "$@"
+}
+
+renew_cert_command_locked() {
     check_running_as_root
     ensure_env_exists
     load_active_cert_paths
@@ -2626,6 +2698,14 @@ renew_cert_command() {
                 if [ "$(cat "$DATA_DIR/certs/.acme-staging/key-type" 2>/dev/null)" = --ecc ]; then args+=(--ecc); fi
                 "$acme" "${args[@]}" || return 1
                 return 0
+            fi
+            if [ -n "${CERT_FULLCHAIN_PATH:-}${CERT_KEY_PATH:-}" ]; then
+                [ -n "${CERT_FULLCHAIN_PATH:-}" ] && [ -n "${CERT_KEY_PATH:-}" ] || return 1
+                local stage="$DATA_DIR/certs/.acme-staging"
+                mkdir -p "$stage" && chmod 700 "$stage" || return 1
+                cp "$CERT_FULLCHAIN_PATH" "$stage/fullchain.pem" &&
+                    cp "$CERT_KEY_PATH" "$stage/privkey.pem" &&
+                    chmod 600 "$stage/privkey.pem" || return 1
             fi
             deploy_node_cert_pair "$DATA_DIR/certs/.acme-staging/fullchain.pem" "$DATA_DIR/certs/.acme-staging/privkey.pem" "$identifier" "$ipv6" || return 1
             ;;
