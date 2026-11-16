@@ -2710,6 +2710,12 @@ renew_cert_command_locked() {
             deploy_node_cert_pair "$DATA_DIR/certs/.acme-staging/fullchain.pem" "$DATA_DIR/certs/.acme-staging/privkey.pem" "$identifier" "$ipv6" || return 1
             ;;
         self_signed)
+            # Reuse the active certificate's names, including on unattended renewals.
+            local INSTALL_SAN_ENTRIES
+            INSTALL_SAN_ENTRIES=$(set -o pipefail; openssl x509 -in "$SSL_CERT_FILE" -noout -ext subjectAltName |
+                tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:/DNS:/p; s/^[[:space:]]*IP Address:/IP:/p' |
+                paste -sd, -) || { cert_error "Could not read existing certificate SANs"; return 1; }
+            [ -n "$INSTALL_SAN_ENTRIES" ] || { cert_error "Existing certificate requires DNS or IP SANs for renewal"; return 1; }
             INSTALL_SELF_SIGNED=true
             choose_node_certificate || return 1 ;;
         custom|legacy)

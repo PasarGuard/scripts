@@ -30,7 +30,7 @@ expect_fail validate_ssl_selection
 unset INSTALL_CERT_PATH
 # Generate a real valid pair; preserve full chain bytes and permissions on deployment.
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj '/CN=unused' \
-    -addext 'subjectAltName=IP:192.0.2.1,IP:2001:db8::1,DNS:node.example.com' \
+    -addext 'subjectAltName=IP:192.0.2.1,IP:2001:db8::1,DNS:node.example.com,DNS:*.example.net' \
     -keyout "$WORK_DIR/key" -out "$WORK_DIR/cert" >/dev/null 2>&1
 validate_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key" 192.0.2.1 2001:db8::1
 validate_node_cert_pair "$WORK_DIR/cert" "$WORK_DIR/key" node.example.com
@@ -152,6 +152,46 @@ restart_node_cert_services() {
 renew_cert_command
 [ "$restart_called" = true ]
 cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
+# Renewal preserves installed DNS, wildcard, IPv4 and IPv6 SANs without prompting.
+(
+    ENV_FILE="$WORK_DIR/renew.env"
+    SSL_CERT_FILE="$WORK_DIR/renew.pem" SSL_KEY_FILE="$WORK_DIR/renew.key"
+    printf 'SSL_CERT_FILE=%s\nSSL_KEY_FILE=%s\n' "$SSL_CERT_FILE" "$SSL_KEY_FILE" >"$ENV_FILE"
+    NODE_IP=198.51.100.2 NODE_IP_V4=198.51.100.2 NODE_IP_V6=''
+    read() {
+        if [[ "$*" == *'Enter additional SAN entries'* ]]; then
+            touch "$WORK_DIR/san-prompt"
+            return 1
+        fi
+        builtin read "$@"
+    }
+    for mode in self_signed legacy; do
+        cp "$WORK_DIR/cert" "$SSL_CERT_FILE"
+        cp "$WORK_DIR/key" "$SSL_KEY_FILE"
+        if [ "$mode" = legacy ]; then
+            rm -f "$DATA_DIR/certs/source.json"
+            AUTO_CONFIRM=true
+        else
+            save_cert_source self_signed
+            AUTO_CONFIRM=false
+        fi
+        restart_called=false
+        renew_cert_command </dev/null
+        [ "$restart_called" = true ]
+        [ ! -f "$WORK_DIR/san-prompt" ]
+        validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" node.example.com
+        validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" wildcard.example.net
+        validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" 192.0.2.1 2001:db8::1
+    done
+    # Unreadable or SAN-less certificates must not be replaced with default SANs.
+    for invalid in no-san no-certificate; do
+        SSL_CERT_FILE="$WORK_DIR/$invalid"
+        printf 'SSL_CERT_FILE=%s\nSSL_KEY_FILE=%s\n' "$SSL_CERT_FILE" "$SSL_KEY_FILE" >"$ENV_FILE"
+        restart_called=false
+        expect_fail renew_cert_command </dev/null
+        [ "$restart_called" = false ]
+    done
+)
 save_cert_source acme_ip 192.0.2.1 '' 80
 # ACME's cron must not write shared staging before the locked reload hook.
 mock_acme() { printf '%s\n' "$*" >>"$acme_calls"; }
