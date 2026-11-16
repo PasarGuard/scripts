@@ -46,7 +46,7 @@ fi
 
 # tls_verify_level: client-cert verification on only for CA-signed certs.
 check_certificate() { return 0; }
-assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=1" "tls_verify_level: CA-signed -> verify=1"
+assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=0" "tls_verify_level: CA-signed keeps API-key authentication"
 check_certificate() { return 2; }
 assert_eq "$(tls_verify_level /tmp/cert.pem)" "verify=0" "tls_verify_level: self-signed -> verify=0"
 check_certificate() { return 1; }

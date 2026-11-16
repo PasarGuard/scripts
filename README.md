@@ -108,3 +108,22 @@
 
 Use `help` to view all commands:
 `pg-node help`
+
+### Node certificate management
+
+New `pg-node install` runs default to Let's Encrypt IP certificates. Unattended
+installation requires `--ssl-ip YOUR_PUBLIC_IPV4`; optionally add `--ssl-ipv6`.
+Use `--ssl-domain DOMAIN`, paired `--cert-path`/`--key-path`, or explicit
+`--self-signed` to choose another source. `--ssl-http-port` (`--ssl-port`) changes
+the local HTTP-01 listener; public port 80 must still reach it.
+
+`--no-ssl` is exclusively for private backends behind an external TLS web server.
+The panel must use the web server's TLS endpoints for both node and maintenance
+requests. API-key authentication stays required. Certificate source metadata is
+stored under the instance data directory; `renew-cert` follows that source and
+`show-cert` displays its identity, expiry, fingerprint and legacy PEM.
+
+Old unattended commands relying on implicit self-signed certificates must add
+`--self-signed`. Routine updates preserve certificate paths and files. See
+[the node TLS deployment guide](https://github.com/PasarGuard/node/blob/main/docs/node-tls.md)
+for nginx examples, verification fields, renewal, private bindings and rollback.

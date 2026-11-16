@@ -77,15 +77,25 @@ describe_certificate() {
   return 0
 }
 
-# Decide the socat client-certificate verification level: require a client cert
-# only for CA-signed certificates.
-tls_verify_level() {
-  local cert_file="$1"
-  if check_certificate "$cert_file" >/dev/null 2>&1; then
-    echo "verify=1"
-  else
-    echo "verify=0"
-  fi
+# Server issuer classification must never enable mutual TLS. API keys authenticate clients.
+tls_verify_level() { echo "verify=0"; }
+
+private_backend_host() {
+  command -v python3 >/dev/null 2>&1 || { log "python3 is required to validate private NODE_HOST"; return 1; }
+  python3 - "$1" <<'PYHOST'
+import ipaddress, sys
+try:
+    value = sys.argv[1].strip()
+    if '%' in value: raise ValueError('zones are not allowed')
+    addr = ipaddress.ip_address(value)
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped: addr = addr.ipv4_mapped
+    allowed = ('127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16') if addr.version == 4 else ('::1/128', 'fc00::/7')
+    if not any(addr in ipaddress.ip_network(n) for n in allowed): raise ValueError('address is not a private backend')
+    print(addr)
+except ValueError as err:
+    print('Invalid plaintext NODE_HOST: ' + str(err), file=sys.stderr)
+    sys.exit(1)
+PYHOST
 }
 
 # Byte length of a string. ${#s} counts characters, so a multibyte UTF-8 body
@@ -126,6 +136,17 @@ if [[ -z "$API_KEY" ]]; then
   exit 1
 fi
 
+case "${TLS_ENABLED-true}" in
+  true|TRUE|True|1|t|T) TLS_ENABLED=true ;;
+  false|FALSE|False|0|f|F) TLS_ENABLED=false ;;
+  *) log "Invalid TLS_ENABLED: expected a boolean"; exit 1 ;;
+esac
+if [[ "$TLS_ENABLED" == false ]]; then
+  NODE_HOST=$(private_backend_host "${NODE_HOST-127.0.0.1}") || exit 1
+  command -v socat >/dev/null 2>&1 || { log "socat is required for external TLS backend mode"; exit 1; }
+else
+  NODE_HOST="${NODE_HOST-0.0.0.0}"
+  [[ "${NODE_HOST,,}" != localhost ]] || NODE_HOST=127.0.0.1
 if [[ -z "${SSL_CERT_FILE:-}" || -z "${SSL_KEY_FILE:-}" ]]; then
   log "TLS required: set SSL_CERT_FILE and SSL_KEY_FILE in the env file"
   exit 1
@@ -147,6 +168,7 @@ fi
 describe_certificate "$SSL_CERT_FILE"
 
 log "TLS enabled on port $API_PORT with cert=$SSL_CERT_FILE key=$SSL_KEY_FILE"
+fi
 log "API key protection enabled"
 
 json_escape() {
@@ -390,7 +412,7 @@ handle_connection() {
 
 # Check if we should use socat (recommended) or openssl s_server
 if command -v socat >/dev/null 2>&1; then
-  log "Starting HTTPS server with socat on port $API_PORT..."
+  log "Starting service with socat on $NODE_HOST:$API_PORT (TLS_ENABLED=$TLS_ENABLED)..."
   
   # For socat, we need to handle the case where we're called as a subprocess
   if [[ "${1:-}" == "--handle-connection" ]]; then
@@ -401,21 +423,22 @@ if command -v socat >/dev/null 2>&1; then
     exit 0
   fi
   
-  # Determine verify level based on certificate type
-  verify_level=$(tls_verify_level "$SSL_CERT_FILE")
-  if [[ "$verify_level" == "verify=1" ]]; then
-    log "Enabling client certificate verification (CA-signed certificate detected)"
+  family=4
+  bind_host="$NODE_HOST"
+  if [[ "$NODE_HOST" == *:* ]]; then family=6; bind_host="[$NODE_HOST]"; fi
+  if [[ "$TLS_ENABLED" == false ]]; then
+    listen="TCP${family}-LISTEN:${API_PORT},bind=${bind_host},reuseaddr,fork"
   else
-    log "Disabling client certificate verification (self-signed or invalid certificate)"
+    listen="OPENSSL-LISTEN:${API_PORT},pf=ip${family},bind=${bind_host},cert=${SSL_CERT_FILE},key=${SSL_KEY_FILE},verify=0,reuseaddr,fork"
   fi
-  
-  exec socat \
-    "OPENSSL-LISTEN:${API_PORT},cert=${SSL_CERT_FILE},key=${SSL_KEY_FILE},${verify_level},reuseaddr,fork" \
-    EXEC:"'$0' --handle-connection"
+  exec socat "$listen" EXEC:"'$0' --handle-connection"
+
 else
   log "socat not available, using openssl s_server"
   log "Install socat with your system package manager for better performance"
   
+  openssl_bind="${NODE_HOST}:${API_PORT}"
+  [[ "$NODE_HOST" != *:* ]] || openssl_bind="[${NODE_HOST}]:${API_PORT}"
   # Main server loop with openssl s_server
   log "Bash REST API listening on https://localhost:${API_PORT}"
   
@@ -424,7 +447,7 @@ else
     if coproc OPENSSL { 
       openssl s_server \
         -quiet \
-        -accept "$API_PORT" \
+        -accept "$openssl_bind" \
         -cert "$SSL_CERT_FILE" \
         -key "$SSL_KEY_FILE" \
         -ign_eof \
