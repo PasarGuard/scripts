@@ -2522,6 +2522,8 @@ choose_node_certificate() {
         echo "2) Let's Encrypt domain certificate"
         echo "3) Custom certificate and key paths"
         echo "4) Self-signed certificate"
+        echo "   For local IPs, use a self-signed or private CA certificate containing the local IPs."
+        echo "   This option generates a self-signed certificate; import a private CA certificate with option 3."
         echo "5) External web server terminates TLS (advanced)"
         local selection
         read -r -p "Certificate [1]: " selection
@@ -2674,6 +2676,7 @@ show_node_certificate() {
         *) colorized_echo yellow "For self-signed certificates, set certificate_sha256=$pin and server_ca=\"\". Check the panel address matches a SAN." ;;
     esac
     colorized_echo cyan 'PEM for older panels:'
+    colorized_echo yellow 'If multiple PEM certificate blocks appear below, copy only the first block (the node certificate) into the panel certificate field, including its BEGIN CERTIFICATE and END CERTIFICATE lines.'
     cat "$SSL_CERT_FILE"
 }
 
@@ -2711,6 +2714,7 @@ renew_cert_command_locked() {
                 local args=(--renew -d "$identifier" --force)
                 if [ "$(cat "$DATA_DIR/certs/.acme-staging/key-type" 2>/dev/null)" = --ecc ]; then args+=(--ecc); fi
                 "$acme" "${args[@]}" || return 1
+                show_node_certificate || return 1
                 return 0
             fi
             if [ -n "${CERT_FULLCHAIN_PATH:-}${CERT_KEY_PATH:-}" ]; then
@@ -2740,7 +2744,11 @@ renew_cert_command_locked() {
         *) cert_error "Unknown certificate source: $source"; return 1 ;;
     esac
     restart_node_cert_services || { cert_error "Certificate deployed but listener restart failed"; return 1; }
-    show_node_certificate
+    if [ "${1:-}" = --deploy-acme ]; then
+        colorized_echo green "ACME certificate deployed; node listeners restarted."
+    else
+        show_node_certificate
+    fi
 }
 
 # Main CLI dispatch handler for pg-node.

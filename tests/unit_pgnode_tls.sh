@@ -198,8 +198,13 @@ mock_acme() { printf '%s\n' "$*" >>"$acme_calls"; }
 register_node_acme_reload
 grep -q -- '--key-file no --fullchain-file no' "$acme_calls"
 restart_called=false
-CERT_FULLCHAIN_PATH="$WORK_DIR/cert" CERT_KEY_PATH="$WORK_DIR/key" renew_cert_command --deploy-acme
+CERT_FULLCHAIN_PATH="$WORK_DIR/cert" CERT_KEY_PATH="$WORK_DIR/key" renew_cert_command --deploy-acme >"$WORK_DIR/deploy-output"
 [ "$restart_called" = true ]
+# The internal hook does not duplicate the installer's certificate output.
+! grep -q -- 'BEGIN CERTIFICATE' "$WORK_DIR/deploy-output"
+# Explicit renewal still prints the resulting certificate once.
+renew_cert_command >"$WORK_DIR/renew-output"
+[ "$(grep -c -- 'BEGIN CERTIFICATE' "$WORK_DIR/renew-output")" = 1 ]
 # Restart both actual deployment targets; propagate individual restart failures.
 unset -f restart_node_cert_services
 # Restore just this function from the checkout without executing the installer.
