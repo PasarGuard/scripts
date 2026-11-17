@@ -132,8 +132,7 @@ sudo pg-node renew-cert
 ```
 ACME sources renew through acme.sh. Self-signed sources regenerate only when you
 explicitly run `renew-cert`, preserving the 3,650-day lifetime and installed SANs.
-The command prints the new fingerprint: update the saved panel pin. Established
-connections continue, but new pinned connections fail until the pin matches.
+The command prints the new certificate fingerprint.
 Custom and legacy sources validate the operator-maintained files. External TLS
 certificates and graceful frontend reloads remain managed on the web server.
 

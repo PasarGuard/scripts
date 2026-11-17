@@ -101,7 +101,8 @@ save_cert_source self_signed
 cert_output=$(show_node_certificate)
 expected_pin=$(openssl x509 -in "$WORK_DIR/cert" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
 [[ "$cert_output" == *"SHA-256 certificate pin (leaf DER): $expected_pin"* ]]
-[[ "$cert_output" == *"certificate_sha256=$expected_pin and server_ca=\"\""* ]]
+[[ "$cert_output" != *certificate_sha256* ]]
+[[ "$cert_output" != *server_ca* ]]
 active_cert="$SSL_CERT_FILE"
 SSL_CERT_FILE="$WORK_DIR/no-certificate"
 expect_fail show_node_certificate

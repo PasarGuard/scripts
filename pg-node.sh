@@ -2703,10 +2703,6 @@ show_node_certificate() {
     }
     [[ "$pin" =~ ^[0-9a-f]{64}$ ]] || { cert_error "Invalid certificate SHA-256 pin"; return 1; }
     colorized_echo cyan "SHA-256 certificate pin (leaf DER): $pin"
-    case "$source" in
-        acme_*) colorized_echo green 'Recommended panel fields: server_ca="", certificate_sha256=null (system trust)' ;;
-        *) colorized_echo yellow "For self-signed certificates, set certificate_sha256=$pin and server_ca=\"\". Check the panel address matches a SAN." ;;
-    esac
     colorized_echo cyan 'PEM for older panels:'
     colorized_echo yellow 'If multiple PEM certificate blocks appear below, copy only the first block (the node certificate) into the panel certificate field, including its BEGIN CERTIFICATE and END CERTIFICATE lines.'
     cat "$SSL_CERT_FILE"
@@ -3037,7 +3033,6 @@ renew_cert_command_locked() {
             [ -n "$INSTALL_SAN_ENTRIES" ] || { cert_error "Existing certificate requires DNS or IP SANs for renewal"; return 1; }
             INSTALL_SELF_SIGNED=true
             choose_node_certificate || return 1
-            colorized_echo yellow "Update the panel pin to $(node_cert_fingerprint "$SSL_CERT_FILE"). Established connections continue; new pinned connections fail until the saved pin matches."
             ;;
         custom|legacy)
             write_node_cert_status attempting || return 1
