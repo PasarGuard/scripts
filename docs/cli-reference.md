@@ -265,9 +265,11 @@ sudo pg-node core-update --version latest
 ```
 
 #### `geofiles`
-Downloads and updates `geoip.dat` and `geosite.dat` routing assets from official distributions.
+Downloads and updates `geoip.dat` and `geosite.dat` routing assets for a region, then restarts the node.
+- Region: `iran` (default), `russia` or `china`. Short names `ir`, `ru`, `cn` and the flags `--iran`, `--russia`, `--china` also work; case does not matter.
+- `help`: list the regions and their sources.
 ```bash
-sudo pg-node geofiles
+sudo pg-node geofiles russia
 ```
 
 #### `renew-cert`
