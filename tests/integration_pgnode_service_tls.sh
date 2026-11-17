@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$ROOT_DIR/pg-node-service.sh" <<'PY'
-import http.client, os, pathlib, shutil, signal, socket, ssl, subprocess, sys, tempfile, time
+import hashlib, http.client, os, pathlib, re, shutil, signal, socket, ssl, subprocess, sys, tempfile, time
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     script = root / 'service.sh'
@@ -50,6 +50,16 @@ with tempfile.TemporaryDirectory() as tmp:
                         time.sleep(.03)
                 assert request('wrong') == 401
                 assert request('test-key') == 200
+                if enabled == 'true':
+                    # Exercise the manager's real fresh-handshake verifier, with
+                    # both the matching leaf pin and an unexpected replacement.
+                    manager = pathlib.Path(sys.argv[1]).with_name('pg-node.sh').read_text()
+                    verifier = re.search(r'^verify_node_cert_endpoint\(\) \(.*?^\)', manager, re.M | re.S).group()
+                    pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert((root/'leaf.pem').read_text())).hexdigest()
+                    for expected, code in ((pin, 0), ('0'*64, 1)):
+                        result = subprocess.run(['bash', '-c', verifier + '\nverify_node_cert_endpoint "$@"', '_',
+                            '127.0.0.1', str(port), expected, 'localhost'], capture_output=True, timeout=15)
+                        assert result.returncode == code, result.stderr.decode()
             finally:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)

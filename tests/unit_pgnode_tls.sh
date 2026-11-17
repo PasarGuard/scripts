@@ -127,30 +127,33 @@ mock_acme() {
     [ -z "$cert" ] || cp "$WORK_DIR/cert" "$cert"
 }
 ensure_node_acme() { :; }
+validate_node_acme_chain() { :; }
 get_node_acme() { echo mock_acme; }
 issue_node_acme acme_ip 192.0.2.1 2001:db8::1 8080
-grep -q -- '--certificate-profile shortlived --days 6' "$acme_calls"
+grep -q -- '--certificate-profile shortlived --days 4' "$acme_calls"
 grep -q -- '--httpport 8080' "$acme_calls"
 grep -q -- '--ecc' "$acme_calls"
 mock_acme() { return 1; }
 expect_fail issue_node_acme acme_ip 192.0.2.1 '' 80
 cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
-# Renewal never changes source implicitly; hook must restart both node and maintenance.
+# Renewal never changes source implicitly; hook must reload both node and maintenance.
 printf 'SSL_CERT_FILE=%s\nSSL_KEY_FILE=%s\n' "$SSL_CERT_FILE" "$SSL_KEY_FILE" >"$ENV_FILE"
 save_cert_source external_tls
 renew_cert_command
 save_cert_source custom
-restart_called=false
+verify_node_cert_services() { return 0; }
+install_node_cert_scheduler() { :; }
+reload_called=false
 detect_compose() { :; }
-restart_node_cert_services() {
+reload_node_cert_services() {
     if flock -n "$DATA_DIR/certs/.deployment.lock" true; then
-        echo 'FAIL: deployment lock released before restart' >&2
+        echo 'FAIL: deployment lock released before reload' >&2
         return 1
     fi
-    restart_called=true
+    reload_called=true
 }
 renew_cert_command
-[ "$restart_called" = true ]
+[ "$reload_called" = true ]
 cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
 # Renewal preserves installed DNS, wildcard, IPv4 and IPv6 SANs without prompting.
 (
@@ -175,9 +178,12 @@ cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
             save_cert_source self_signed
             AUTO_CONFIRM=false
         fi
-        restart_called=false
+        reload_called=false
         renew_cert_command </dev/null
-        [ "$restart_called" = true ]
+        [ "$reload_called" = true ]
+        start=$(openssl x509 -in "$SSL_CERT_FILE" -noout -startdate)
+        end=$(openssl x509 -in "$SSL_CERT_FILE" -noout -enddate)
+        [ "$(( $(date -d "${end#*=}" +%s) - $(date -d "${start#*=}" +%s) ))" -eq "$((3650*86400))" ]
         [ ! -f "$WORK_DIR/san-prompt" ]
         validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" node.example.com
         validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" wildcard.example.net
@@ -187,40 +193,45 @@ cmp "$WORK_DIR/key" "$SSL_KEY_FILE"
     for invalid in no-san no-certificate; do
         SSL_CERT_FILE="$WORK_DIR/$invalid"
         printf 'SSL_CERT_FILE=%s\nSSL_KEY_FILE=%s\n' "$SSL_CERT_FILE" "$SSL_KEY_FILE" >"$ENV_FILE"
-        restart_called=false
+        reload_called=false
         expect_fail renew_cert_command </dev/null
-        [ "$restart_called" = false ]
+        [ "$reload_called" = false ]
     done
 )
 save_cert_source acme_ip 192.0.2.1 '' 80
 # ACME's cron must not write shared staging before the locked reload hook.
-mock_acme() { printf '%s\n' "$*" >>"$acme_calls"; }
+mock_acme() {
+    printf '%s\n' "$*" >>"$acme_calls"
+    if [[ " $* " == *' --renew '* ]]; then
+        CERT_FULLCHAIN_PATH="$WORK_DIR/cert" CERT_KEY_PATH="$WORK_DIR/key" renew_cert_command --deploy-acme
+    fi
+}
 register_node_acme_reload
 grep -q -- '--key-file no --fullchain-file no' "$acme_calls"
-restart_called=false
+reload_called=false
 CERT_FULLCHAIN_PATH="$WORK_DIR/cert" CERT_KEY_PATH="$WORK_DIR/key" renew_cert_command --deploy-acme >"$WORK_DIR/deploy-output"
-[ "$restart_called" = true ]
+[ "$reload_called" = true ]
 # The internal hook does not duplicate the installer's certificate output.
 ! grep -q -- 'BEGIN CERTIFICATE' "$WORK_DIR/deploy-output"
 # Explicit renewal still prints the resulting certificate once.
 renew_cert_command >"$WORK_DIR/renew-output"
-[ "$(grep -c -- 'BEGIN CERTIFICATE' "$WORK_DIR/renew-output")" = 1 ]
-# Restart both actual deployment targets; propagate individual restart failures.
-unset -f restart_node_cert_services
+[ "$(grep -c -- '^-----BEGIN CERTIFICATE-----' "$WORK_DIR/renew-output")" = 1 ] || { cat "$WORK_DIR/renew-output"; exit 1; }
+# Signal both actual deployment targets; propagate individual failures.
+unset -f reload_node_cert_services
 # Restore just this function from the checkout without executing the installer.
-eval "$(sed -n '/^restart_node_cert_services() {/,/^}/p' "$ROOT_DIR/pg-node.sh")"
+eval "$(sed -n '/^reload_node_cert_services() {/,/^}/p' "$ROOT_DIR/pg-node.sh")"
 COMPOSE=mock_compose
 compose_called=false
 maintenance_called=false
-mock_compose() { compose_called=true; [[ "$*" == *"-p $APP_NAME restart" ]]; }
+mock_compose() { compose_called=true; [[ "$*" == *"-p $APP_NAME kill --signal SIGHUP node" ]]; }
 service_installed() { SERVICE_NAME="$APP_NAME-service"; return 0; }
-systemctl() { maintenance_called=true; [ "$*" = "restart $APP_NAME-service" ]; }
-restart_node_cert_services
+systemctl() { maintenance_called=true; [ "$*" = "kill --kill-whom=main --signal=SIGHUP $APP_NAME-service" ]; }
+reload_node_cert_services
 [ "$compose_called" = true ] && [ "$maintenance_called" = true ]
 systemctl() { return 1; }
-expect_fail restart_node_cert_services
+expect_fail reload_node_cert_services
 mock_compose() { return 1; }
-expect_fail restart_node_cert_services
+expect_fail reload_node_cert_services
 # Upgrade loading honors managed paths unchanged.
 SSL_CERT_FILE=/wrong; SSL_KEY_FILE=/wrong
 load_active_cert_paths

@@ -53,7 +53,7 @@ bootstrap_pg_node_shared_libs() {
 # outdated copy can never be sourced (the files are small). Best-effort: if the
 # refresh fails (e.g. no network) any existing copy is kept and the presence
 # check below still guards against a genuinely missing library.
-if [ "$running_from_checkout" = false ]; then
+if [ "$running_from_checkout" = false ] && [[ " $* " != *" certificate-"* && " $* " != *" renew-cert "* ]]; then
     bootstrap_pg_node_shared_libs || true
 fi
 
@@ -128,8 +128,12 @@ done
 set -- "${ARGS[@]}"
 COMMAND="${1:-}"
 # Fetch IP address from ifconfig.io API
-NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
-NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
+NODE_IP_V4='' NODE_IP_V6=''
+case "$COMMAND" in
+    certificate-*|renew-cert|show-cert) ;;
+    *) NODE_IP_V4=$(curl -s -4 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "")
+       NODE_IP_V6=$(curl -s -6 --fail --max-time 5 ifconfig.io 2>/dev/null || echo "");;
+esac
 NODE_IP="${NODE_IP_V4:-}"
 if [ -z "$NODE_IP" ]; then
     NODE_IP="${NODE_IP_V6:-}"
@@ -1322,6 +1326,13 @@ install_command() {
     colorized_echo blue "================================"
     colorized_echo magenta " node is set up with the following IP: $NODE_IP and Port: $SERVICE_PORT."
     register_node_acme_reload || return 1
+    if [ "${TLS_ENABLED:-true}" = false ]; then
+        write_node_cert_status external_tls
+    elif verify_node_cert_services; then
+        write_node_cert_status deployed
+    else
+        write_node_cert_status unverified 'Initial TLS endpoint verification failed; inspect service logs'
+    fi
     show_node_certificate
     colorized_echo blue "================================"
     colorized_echo magenta "Next, use the API Key (UUID v4) in pasarguard Panel: "
@@ -1351,6 +1362,7 @@ uninstall_command() {
     if service_installed; then
         uninstall_service_command
     fi
+    remove_node_cert_scheduler || return 1
     uninstall_completion
     uninstall_node_script
     uninstall_node
@@ -2100,7 +2112,7 @@ _node_completions()
     local cur cmds
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
-    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert show-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
+    cmds="up down restart status logs install update uninstall install-script uninstall-script core-update geofiles renew-cert certificate-status certificate-renewal-enable show-cert version-script script-version edit edit-env completion service-install service-uninstall service-restart service-status service-logs service-update service-start service-stop"
     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
     return 0
 }
@@ -2129,6 +2141,8 @@ commands=(
   core-update
   geofiles
   renew-cert
+  certificate-status
+  certificate-renewal-enable
   show-cert
   version-script
   script-version
@@ -2248,6 +2262,8 @@ usage() {
     colorized_echo yellow "  --service-port PORT     $(tput sgr0)✓  Set service port"
     colorized_echo yellow "  --cert-path PATH        $(tput sgr0)✓  Set public certificate path"
     colorized_echo yellow "  --key-path PATH         $(tput sgr0)✓  Set private key path"
+    echo "  certificate-renewal-enable   Enable managed ACME scheduler after upgrading both services"
+    echo "  certificate-status [--json]  Show local renewal and deployment status"
     echo "  show-cert               Display identity, expiry, SHA-256 fingerprint and legacy PEM"
     echo "  --ssl-ip IPV4           Let's Encrypt IP certificate (default; required unattended)"
     echo "  --ssl-ipv6 IPV6         Add IPv6 SAN (requires --ssl-ip)"
@@ -2395,6 +2411,13 @@ validate_node_cert_pair() (
     end=$(openssl x509 -in "$cert" -enddate -noout); end=$(date -d "${end#*=}" +%s) || return 1
     now=$(date +%s)
     [ "$start" -le "$now" ] && [ "$end" -gt "$now" ] || { cert_error "Certificate is expired or not yet valid"; return 1; }
+    # Parse every PEM block, rejecting a malformed/truncated full chain.
+    local begins ends
+    begins=$(grep -c '^-----BEGIN CERTIFICATE-----' "$cert")
+    ends=$(grep -c '^-----END CERTIFICATE-----' "$cert")
+    [ "$begins" -eq "$ends" ] && openssl crl2pkcs7 -nocrl -certfile "$cert" -outform DER >/dev/null 2>&1 || {
+        cert_error 'Invalid certificate chain'; return 1;
+    }
     # SAN is mandatory; never rely on Common Name fallback.
     openssl x509 -in "$cert" -noout -ext subjectAltName | grep -qE 'DNS:|IP Address:' || { cert_error "Certificate requires SANs"; return 1; }
     local id flag
@@ -2458,6 +2481,12 @@ deploy_node_cert_pair_locked() (
     fi
 )
 
+validate_node_acme_chain() {
+    openssl verify -purpose sslserver -untrusted "$1" "$1" >/dev/null 2>&1 || {
+        cert_error 'ACME full chain does not verify against configured system trust'; return 1;
+    }
+}
+
 get_node_acme() {
     if [ -x "${HOME}/.acme.sh/acme.sh" ]; then printf '%s\n' "${HOME}/.acme.sh/acme.sh"
     elif [ -x /root/.acme.sh/acme.sh ]; then printf '%s\n' /root/.acme.sh/acme.sh
@@ -2474,12 +2503,12 @@ ensure_node_acme() {
     fi
     if ! get_node_acme >/dev/null; then
         installer=$(mktemp) || return 1
-        curl -fsSL https://get.acme.sh -o "$installer" && sh "$installer" || return 1
+        curl -fsSL https://get.acme.sh -o "$installer" && sh "$installer" -- --nocron || return 1
         rm -f "$installer"
     fi
     local acme
     acme=$(get_node_acme) || return 1
-    "$acme" --install-cronjob || return 1
+    mkdir -p "$DATA_DIR/certs/acme" && chmod 700 "$DATA_DIR/certs/acme" || return 1
 }
 
 validate_ssl_selection() {
@@ -2599,9 +2628,10 @@ issue_node_acme_locked() {
     acme=$(get_node_acme) || return 1
     local args=(--issue -d "$identifier" --standalone --server letsencrypt --httpport "$port" --force)
     [ -z "$ipv6" ] || args+=(-d "$ipv6")
-    [ "$source" != acme_ip ] || args+=(--certificate-profile shortlived --days 6)
-    "$acme" "${args[@]}" || { cert_error "ACME issuance failed; existing certificates were preserved. Retry explicitly."; return 1; }
+    [ "$source" != acme_ip ] || args+=(--certificate-profile shortlived --days 4)
+    run_node_acme "$acme" "${args[@]}" || { cert_error "ACME issuance failed; existing certificates were preserved. Retry explicitly."; return 1; }
     stage_node_acme "$acme" "$identifier" || return 1
+    validate_node_acme_chain "$DATA_DIR/certs/.acme-staging/fullchain.pem" || return 1
     deploy_node_cert_pair "$DATA_DIR/certs/.acme-staging/fullchain.pem" "$DATA_DIR/certs/.acme-staging/privkey.pem" "$identifier" "$ipv6"
 }
 
@@ -2624,7 +2654,7 @@ stage_node_acme_locked() {
         # The hook copies ACME's exported source paths while holding our lock.
         local args=(--installcert -d "$identifier" --key-file "$key_target" --fullchain-file "$cert_target" --reloadcmd "$reload")
         [ -z "$ecc" ] || args+=("$ecc")
-        if "$acme" "${args[@]}" &&
+        if run_node_acme "$acme" "${args[@]}" &&
             { [ "$reload" != : ] || { [ -s "$stage/fullchain.pem" ] && [ -s "$stage/privkey.pem" ]; }; }; then
             if [ "$reload" = : ]; then
                 chmod 600 "$stage/privkey.pem" || return 1
@@ -2632,7 +2662,7 @@ stage_node_acme_locked() {
                 # installation is still preparing the permanent reload hook.
                 local reset_args=(--installcert -d "$identifier" --key-file no --fullchain-file no --reloadcmd :)
                 [ -z "$ecc" ] || reset_args+=("$ecc")
-                "$acme" "${reset_args[@]}" || return 1
+                run_node_acme "$acme" "${reset_args[@]}" || return 1
             fi
             printf '%s' "$ecc" >"$stage/key-type"
             return 0
@@ -2650,9 +2680,11 @@ register_node_acme_reload_locked() {
     case "$(cert_metadata source)" in acme_ip|acme_domain) ;; *) return 0;; esac
     local acme hook
     acme=$(get_node_acme) || return 1
+    migrate_node_acme_storage "$acme" "$(cert_metadata identifier)" || return 1
     # printf %q protects paths with spaces and custom instance names in shell hooks.
     printf -v hook 'env %q %q %q renew-cert --deploy-acme' "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME"
-    stage_node_acme "$acme" "$(cert_metadata identifier)" "$hook"
+    stage_node_acme "$acme" "$(cert_metadata identifier)" "$hook" || return 1
+    install_node_cert_scheduler
 }
 
 show_node_certificate() {
@@ -2680,12 +2712,261 @@ show_node_certificate() {
     cat "$SSL_CERT_FILE"
 }
 
-restart_node_cert_services() {
+# ACME certificate storage is private to this deployment, outside the shared
+# client's cron scan. Account/CA configuration remains managed by acme.sh.
+run_node_acme() {
+    local acme="$1"; shift
+    "$acme" --cert-home "$DATA_DIR/certs/acme" "$@"
+}
+
+# Move only this certificate out of the shared scheduler. The original client
+# command disables its old renewal entry after a complete copy has succeeded.
+migrate_node_acme_storage() {
+    local acme="$1" identifier="$2" base old suffix
+    base=$(dirname "$(readlink -f "$acme")")
+    mkdir -p "$DATA_DIR/certs/acme" || return 1
+    for suffix in _ecc ''; do
+        old="$base/$identifier$suffix"
+        if [ -f "$old/$identifier.conf" ]; then
+            if [ ! -d "$DATA_DIR/certs/acme/$identifier$suffix" ]; then
+                cp -a "$old" "$DATA_DIR/certs/acme/" || return 1
+            fi
+            local args=(--remove -d "$identifier")
+            [ -z "$suffix" ] || args+=(--ecc)
+            "$acme" "${args[@]}" || return 1
+        fi
+    done
+}
+
+node_cert_fingerprint() (
+    set -o pipefail
+    openssl x509 -in "$1" -outform DER 2>/dev/null | openssl dgst -sha256 | awk '{print tolower($NF)}'
+)
+
+node_cert_status_value() {
+    [ -f "$DATA_DIR/certs/renewal-status.json" ] || return 0
+    jq -r --arg key "$1" '.[$key] // empty' "$DATA_DIR/certs/renewal-status.json"
+}
+
+# Status describes verified listeners separately from the files on disk. A
+# failed partial reload must never claim the replacement is active everywhere.
+write_node_cert_status() (
+    local state="$1" error="${2:-}" next="${3:-0}" failures="${4:-}" stage old='{}'
+    local file="$DATA_DIR/certs/renewal-status.json" pin='' expiry='' source=legacy now
+    now=$(date +%s)
+    [ ! -f "$file" ] || old=$(cat "$file")
+    failures="${failures:-$(printf '%s' "$old" | jq -r '.failures // 0')}"
+    [ ! -f "$DATA_DIR/certs/source.json" ] || source=$(cert_metadata source)
+    pin=$(node_cert_fingerprint "$SSL_CERT_FILE") || pin=''
+    expiry=$(openssl x509 -in "$SSL_CERT_FILE" -enddate -noout 2>/dev/null) || expiry=''
+    expiry="${expiry#*=}"
+    stage=$(mktemp "$DATA_DIR/certs/.status.XXXXXX") || return 1
+    trap 'rm -f "$stage"' EXIT
+    jq -n --argjson old "$old" --arg source "$source" --arg state "$state" \
+        --arg error "$error" --arg pin "$pin" --arg expiry "$expiry" \
+        --argjson now "$now" --argjson next "$next" --argjson failures "$failures" \
+        '$old + {source:$source, deployment_state:$state, error:$error,
+          file_fingerprint:$pin, file_expiry:$expiry, next_attempt:$next, failures:$failures}
+        | if $state == "attempting" then .last_attempt=$now else . end
+        | if $state == "deployed" then .active_fingerprint=$pin | .expiry=$expiry |
+          .last_success=$now | .failures=0 | .error="" else . end' >"$stage" || return 1
+    chmod 600 "$stage" && mv -f "$stage" "$file"
+)
+
+certificate_status_command() {
+    [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --json ]; } || { cert_error 'Usage: certificate-status [--json]'; return 1; }
+    load_active_cert_paths
+    local source=legacy status='{}' expiry='' valid=false
+    [ ! -f "$DATA_DIR/certs/source.json" ] || source=$(cert_metadata source)
+    [ ! -f "$DATA_DIR/certs/renewal-status.json" ] || status=$(cat "$DATA_DIR/certs/renewal-status.json")
+    expiry=$(openssl x509 -in "$SSL_CERT_FILE" -enddate -noout 2>/dev/null) || expiry=''
+    # Date validity is live; a persisted success does not make expired files valid.
+    if validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" >/dev/null 2>&1; then valid=true; fi
+    status=$(jq -n --argjson old "$status" --arg source "$source" --arg expiry "${expiry#*=}" \
+        --argjson valid "$valid" '$old + {source:$source, files_currently_valid:$valid, file_expiry:$expiry}
+        | .deployment_state //= "unknown" | .active_fingerprint //= null | .expiry //= null
+        | .last_attempt //= null | .last_success //= null | .next_attempt //= null | .error //= ""') || return 1
+    if [ "${1:-}" = --json ]; then printf '%s\n' "$status"
+    else printf '%s\n' "$status" | jq -r 'to_entries[] | "\(.key): \(.value)"'; fi
+}
+
+reload_node_cert_services() {
     detect_compose
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" restart || return 1
+    local failed=0
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" kill --signal SIGHUP node || failed=1
     if service_installed; then
-        systemctl restart "$SERVICE_NAME" || return 1
+        systemctl kill --kill-whom=main --signal=SIGHUP "$SERVICE_NAME" || failed=1
     fi
+    return "$failed"
+}
+
+# Each invocation opens a new TLS socket, with no session cache or resumption.
+verify_node_cert_endpoint() (
+    set -o pipefail
+    local host="$1" port="$2" expected="$3" identity="$4" peer connect
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+    connect="$host:$port"
+    [[ "$host" != *:* ]] || connect="[$host]:$port"
+    peer=$(timeout 10 openssl s_client -connect "$connect" -servername "$identity" -showcerts </dev/null 2>/dev/null |
+        openssl x509 -outform DER 2>/dev/null | openssl dgst -sha256 | awk '{print tolower($NF)}') || return 1
+    [ "$peer" = "$expected" ]
+)
+
+verify_node_cert_services() {
+    local pin identity host port attempt
+    pin=$(node_cert_fingerprint "$SSL_CERT_FILE") || return 1
+    identity=$(cert_metadata identifier 2>/dev/null) || identity=''
+    host=$(node_env_value NODE_HOST); host="${host:-127.0.0.1}"
+    case "$host" in 0.0.0.0) host=127.0.0.1;; ::|'[::]') host=::1;; esac
+    local ports=("$(node_env_value SERVICE_PORT)")
+    if service_installed; then ports+=("$(node_env_value API_PORT)"); fi
+    for port in "${ports[@]}"; do
+        for attempt in 1 2 3 4 5; do
+            if verify_node_cert_endpoint "$host" "$port" "$pin" "${identity:-$host}"; then break; fi
+            [ "$attempt" -lt 5 ] || return 1
+            sleep 1
+        done
+    done
+}
+
+finish_node_cert_deployment() {
+    if ! validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE"; then
+        write_node_cert_status invalid_files 'Current certificate files are invalid or expired; no reload attempted' "$(( $(date +%s) + 300 ))"
+        return 1
+    fi
+    if reload_node_cert_services && verify_node_cert_services; then
+        write_node_cert_status deployed '' "$(( $(date +%s) + 3600 ))" || return 1
+        colorized_echo green 'Certificate hot reload verified on all configured TLS endpoints.'
+    else
+        write_node_cert_status reload_pending 'Reload or endpoint verification failed; no restart attempted' "$(( $(date +%s) + 300 ))" || return 1
+        cert_error 'Certificate reload incomplete. Retained files and backups; retrying reload without issuance.'
+        return 1
+    fi
+}
+
+# One cron entry per deployment. The installed command preserves DATA_DIR and
+# APP_DIR; % must be escaped even within shell quotes in a crontab.
+install_node_cert_scheduler() {
+    local entry entries stage
+    printf -v entry '*/5 * * * * env %q %q %q certificate-renewal-tick >>%q 2>&1 # pg-node-cert:%s' \
+        "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME" "$DATA_DIR/certs/renewal.log" "$APP_NAME"
+    entry="${entry//%/\\%}"
+    touch "$DATA_DIR/certs/renewal.log" && chmod 600 "$DATA_DIR/certs/renewal.log" || return 1
+    entries=$(crontab -l 2>/dev/null) || entries=''
+    stage=$(mktemp) || return 1
+    printf '%s\n' "$entries" | sed "/# pg-node-cert:${APP_NAME}$/d" >"$stage"
+    printf '%s\n' "$entry" >>"$stage"
+    crontab "$stage"
+    local result=$?
+    rm -f "$stage"
+    return "$result"
+}
+
+remove_node_cert_scheduler() {
+    local entries stage
+    entries=$(crontab -l 2>/dev/null) || return 0
+    stage=$(mktemp) || return 1
+    printf '%s\n' "$entries" | sed "/# pg-node-cert:${APP_NAME}$/d" >"$stage"
+    crontab "$stage"
+    local result=$?
+    rm -f "$stage"
+    return "$result"
+}
+
+node_cert_config_digest() {
+    { cat "$DATA_DIR/certs/source.json" "$ENV_FILE"; } | sha256sum | awk '{print $1}'
+}
+
+certificate_renewal_tick() {
+    check_running_as_root
+    with_node_cert_lock certificate_renewal_tick_locked
+}
+
+certificate_renewal_tick_locked() {
+    local source state next now digest
+    [ -f "$DATA_DIR/certs/source.json" ] || return 0
+    source=$(cert_metadata source)
+    case "$source" in acme_ip|acme_domain) ;; *) return 0;; esac
+    load_active_cert_paths
+    now=$(date +%s); next=$(node_cert_status_value next_attempt)
+    state=$(node_cert_status_value deployment_state)
+    digest=$(node_cert_config_digest) || return 1
+    if [ "$state" = suspended ]; then
+        [ "$(cat "$DATA_DIR/certs/.suspended-config" 2>/dev/null)" != "$digest" ] || return 0
+    elif [ "${next:-0}" -gt "$now" ]; then return 0; fi
+    case "$state" in
+        reload_pending) finish_node_cert_deployment;;
+        deployment_pending) renew_cert_command_locked --deploy-acme;;
+        *) renew_node_acme_scheduled;;
+    esac
+}
+
+# acme.sh evaluates ARI during --renew. Supply an exact lifetime-based fallback
+# without --days, which would pin its schedule and reject later CA windows.
+# Only the isolated, locked domain configuration is edited, never sourced here.
+set_node_acme_fallback() (
+    local identifier="$1" due="$2" suffix='' config stage
+    [ "$(cat "$DATA_DIR/certs/.acme-staging/key-type" 2>/dev/null)" != --ecc ] || suffix=_ecc
+    config="$DATA_DIR/certs/acme/$identifier$suffix/$identifier.conf"
+    [ -f "$config" ] || return 0
+    stage=$(mktemp "${config}.stage.XXXXXX") || return 1
+    trap 'rm -f "$stage"' EXIT
+    sed '/^Le_RenewalDays=/d; /^Le_NextRenewTime=/d' "$config" >"$stage" || return 1
+    printf "Le_NextRenewTime='%s'\n" "$due" >>"$stage"
+    chmod 600 "$stage" && mv -f "$stage" "$config"
+)
+
+renew_node_acme_scheduled() {
+    local acme identifier rc=0 start end now failures delay retry_after
+    acme=$(get_node_acme) || { node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"; write_node_cert_status suspended 'ACME client is missing'; return 1; }
+    identifier=$(cert_metadata identifier)
+    if [ -z "$identifier" ]; then
+        node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
+        write_node_cert_status suspended 'ACME identifier is missing'; return 1
+    fi
+    now=$(date +%s)
+    start=$(openssl x509 -in "$SSL_CERT_FILE" -startdate -noout); start=$(date -d "${start#*=}" +%s) || return 1
+    end=$(openssl x509 -in "$SSL_CERT_FILE" -enddate -noout); end=$(date -d "${end#*=}" +%s) || return 1
+    set_node_acme_fallback "$identifier" "$((start+(end-start)*2/3))" || return 1
+    write_node_cert_status attempting || return 1
+    local args=(--renew -d "$identifier")
+    [ "$(cat "$DATA_DIR/certs/.acme-staging/key-type" 2>/dev/null)" != --ecc ] || args+=(--ecc)
+    # acme.sh honors ARI and CA polling delays. Keep private diagnostic output
+    # local; only fixed, sanitized messages go into machine-readable status.
+    (umask 077; run_node_acme "$acme" "${args[@]}" >"$DATA_DIR/certs/acme-last-attempt.log" 2>&1) || rc=$?
+    # A hook may already have recorded a partial reload. Never issue again.
+    case "$(node_cert_status_value deployment_state)" in reload_pending|deployment_pending) return 1;; esac
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; then
+        if [ "$(node_cert_status_value deployment_state)" = deployed ]; then return 0; fi
+        if [ "$rc" -eq 0 ]; then
+            node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
+            write_node_cert_status suspended 'ACME completed without running the deployment hook; run certificate-renewal-enable'
+            return 1
+        fi
+        write_node_cert_status waiting '' "$((now+3600))"
+        return 0
+    fi
+    if grep -Eqi 'unauthorized|rejectedIdentifier|invalidContact|accountDoesNotExist|Invalid domain|Challenge port .* in use' "$DATA_DIR/certs/acme-last-attempt.log"; then
+        node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
+        write_node_cert_status suspended 'ACME configuration rejected; correct configuration or run renew-cert'
+        return 1
+    fi
+    failures=$(node_cert_status_value failures); failures=$((${failures:-0}+1))
+    delay=300
+    local i
+    for ((i=1; i<failures && delay<3600; i++)); do delay=$((delay*2)); done
+    [ "$delay" -lt 3600 ] || delay=3600
+    delay=$((delay + RANDOM % (delay/5+1)))
+    [ "$delay" -le 3600 ] || delay=3600
+    retry_after=$(sed -nE 's/.*[Rr]etry-[Aa]fter:[[:space:]]*(.*)/\1/p' "$DATA_DIR/certs/acme-last-attempt.log" | tail -1 | tr -d '\r')
+    if [[ "$retry_after" =~ ^[0-9]{1,9}$ ]]; then
+        [ "$retry_after" -le "$delay" ] || delay="$retry_after"
+    elif [ -n "$retry_after" ]; then
+        retry_after=$(date -d "$retry_after" +%s 2>/dev/null) || retry_after=0
+        [ "$retry_after" -le "$((now+delay))" ] || delay=$((retry_after-now))
+    fi
+    write_node_cert_status retry_pending 'Transient ACME failure; see acme-last-attempt.log' "$((now+delay))" "$failures"
+    return 1
 }
 
 renew_cert_command() {
@@ -2696,8 +2977,15 @@ renew_cert_command_locked() {
     check_running_as_root
     ensure_env_exists
     load_active_cert_paths
+    case "${1:-}" in
+        ''|--deploy-acme) [ "$#" -le 1 ] || return 1;;
+        *) cert_error 'Usage: renew-cert [--deploy-acme]'; return 1;;
+    esac
     local source=legacy
     [ ! -f "$DATA_DIR/certs/source.json" ] || source=$(cert_metadata source)
+    if [ "${1:-}" = --deploy-acme ]; then
+        case "$source" in acme_ip|acme_domain) ;; *) cert_error 'ACME hook requires a managed ACME source'; return 1;; esac
+    fi
     if [ "$source" = legacy ]; then
         local subject issuer
         subject=$(openssl x509 -in "$SSL_CERT_FILE" -noout -subject 2>/dev/null | sed 's/^subject= *//')
@@ -2710,13 +2998,24 @@ renew_cert_command_locked() {
             acme=$(get_node_acme) || return 1
             identifier=$(cert_metadata identifier); ipv6=$(cert_metadata ipv6)
             if [ "${1:-}" != --deploy-acme ]; then
-                # The registered reload hook validates, deploys and restarts both listeners.
-                local args=(--renew -d "$identifier" --force)
-                if [ "$(cat "$DATA_DIR/certs/.acme-staging/key-type" 2>/dev/null)" = --ecc ]; then args+=(--ecc); fi
-                "$acme" "${args[@]}" || return 1
+                # An explicit retry first completes any pending deployment.
+                if [ "$(node_cert_status_value deployment_state)" = deployment_pending ]; then
+                    renew_cert_command_locked --deploy-acme
+                    return $?
+                fi
+                if [ "$(node_cert_status_value deployment_state)" = reload_pending ]; then
+                    finish_node_cert_deployment
+                    return $?
+                fi
+                write_node_cert_status attempting || return 1
+                # The registered hook deploys and verifies both listeners.
+                # Explicit retry clears suspension but still honors CA due times.
+                register_node_acme_reload || return 1
+                renew_node_acme_scheduled || return 1
                 show_node_certificate || return 1
                 return 0
             fi
+            write_node_cert_status deployment_pending 'Certificate staging or validation pending; previous active observation retained' "$(( $(date +%s) + 300 ))" || return 1
             if [ -n "${CERT_FULLCHAIN_PATH:-}${CERT_KEY_PATH:-}" ]; then
                 [ -n "${CERT_FULLCHAIN_PATH:-}" ] && [ -n "${CERT_KEY_PATH:-}" ] || return 1
                 local stage="$DATA_DIR/certs/.acme-staging"
@@ -2725,9 +3024,11 @@ renew_cert_command_locked() {
                     cp "$CERT_KEY_PATH" "$stage/privkey.pem" &&
                     chmod 600 "$stage/privkey.pem" || return 1
             fi
+            validate_node_acme_chain "$DATA_DIR/certs/.acme-staging/fullchain.pem" || return 1
             deploy_node_cert_pair "$DATA_DIR/certs/.acme-staging/fullchain.pem" "$DATA_DIR/certs/.acme-staging/privkey.pem" "$identifier" "$ipv6" || return 1
             ;;
         self_signed)
+            write_node_cert_status attempting || return 1
             # Reuse the active certificate's names, including on unattended renewals.
             local INSTALL_SAN_ENTRIES
             INSTALL_SAN_ENTRIES=$(set -o pipefail; openssl x509 -in "$SSL_CERT_FILE" -noout -ext subjectAltName |
@@ -2735,17 +3036,20 @@ renew_cert_command_locked() {
                 paste -sd, -) || { cert_error "Could not read existing certificate SANs"; return 1; }
             [ -n "$INSTALL_SAN_ENTRIES" ] || { cert_error "Existing certificate requires DNS or IP SANs for renewal"; return 1; }
             INSTALL_SELF_SIGNED=true
-            choose_node_certificate || return 1 ;;
+            choose_node_certificate || return 1
+            colorized_echo yellow "Update the panel pin to $(node_cert_fingerprint "$SSL_CERT_FILE"). Established connections continue; new pinned connections fail until the saved pin matches."
+            ;;
         custom|legacy)
+            write_node_cert_status attempting || return 1
             validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" || return 1
             colorized_echo yellow "Custom/legacy certificates are externally renewed. Validated current files; no certificate was regenerated."
             ;;
         external_tls) colorized_echo yellow "Manage and renew the certificate on the TLS web server."; return 0 ;;
         *) cert_error "Unknown certificate source: $source"; return 1 ;;
     esac
-    restart_node_cert_services || { cert_error "Certificate deployed but listener restart failed"; return 1; }
+    finish_node_cert_deployment || return 1
     if [ "${1:-}" = --deploy-acme ]; then
-        colorized_echo green "ACME certificate deployed; node listeners restarted."
+        colorized_echo green "ACME certificate deployed; TLS hot reload verified."
     else
         show_node_certificate
     fi
@@ -2796,6 +3100,17 @@ pg_node_main() {
         ;;
     show-cert)
         show_node_certificate
+        ;;
+    certificate-status)
+        shift
+        certificate_status_command "$@"
+        ;;
+    certificate-renewal-enable)
+        check_running_as_root
+        register_node_acme_reload
+        ;;
+    certificate-renewal-tick)
+        certificate_renewal_tick
         ;;
     renew-cert)
         shift

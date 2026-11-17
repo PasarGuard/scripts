@@ -166,6 +166,11 @@ The panel must use the web server's TLS endpoints for both node and maintenance
 requests. API-key authentication stays required. Certificate source metadata is
 stored under the instance data directory; `renew-cert` follows that source and
 `show-cert` displays its identity, expiry, fingerprint and legacy PEM.
+Renewal uses SIGHUP and verifies fresh TLS connections, with no restart fallback.
+`certificate-status --json` reports local deployment and renewal state.
+Upgrade both node and node-serviced to releases supporting certificate hot reload
+before enabling this workflow on an existing installation with
+`sudo pg-node certificate-renewal-enable`.
 
 Old unattended commands relying on implicit self-signed certificates must add
 `--self-signed`. Routine updates preserve certificate paths and files. See
@@ -232,6 +237,8 @@ The following flags can be supplied to `pasarguard install`:
 | `pg-node core-update` | Updates or switches the installed Xray-core binary version. |
 | `pg-node geofiles` | Downloads official `geoip.dat` and `geosite.dat` routing assets. |
 | `pg-node renew-cert` | Renews or validates certificates according to their configured source. |
+| `pg-node certificate-status [--json]` | Reports local renewal state, expiry, verified fingerprint and errors. |
+| `pg-node certificate-renewal-enable` | Enables the managed ACME scheduler after both services support SIGHUP reload. |
 | `pg-node show-cert` | Displays certificate identity, expiry, fingerprint, and legacy PEM. |
 | `pg-node service-install` | Registers and enables the companion `systemd` service daemon. |
 | `pg-node service-status` | Inspects systemd service status (`pg-node-service.service`). |

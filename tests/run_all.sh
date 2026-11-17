@@ -15,6 +15,7 @@ SUITES=(
     "unit_pgnode.sh"
     "unit_pgnode_script_install.sh"
     "unit_pgnode_tls.sh"
+    "unit_pgnode_renewal.sh"
     "integration_pgnode_service_tls.sh"
     "unit_pgnode_service.sh"
     "unit_restore_archive_safety.sh"
