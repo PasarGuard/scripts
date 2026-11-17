@@ -1325,18 +1325,24 @@ install_command() {
     fi
     colorized_echo blue "================================"
     colorized_echo magenta " node is set up with the following IP: $NODE_IP and Port: $SERVICE_PORT."
-    register_node_acme_reload || return 1
-    if [ "${TLS_ENABLED:-true}" = false ]; then
+    local registration_failed=0
+    if ! register_node_acme_reload; then
+        registration_failed=1
+        node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
+        write_node_cert_status suspended 'ACME reload registration or scheduler installation failed; run certificate-renewal-enable'
+        colorized_echo red 'Managed renewal setup failed. The scheduler was not installed successfully; run certificate-renewal-enable after correcting the error.'
+    elif [ "${TLS_ENABLED:-true}" = false ]; then
         write_node_cert_status external_tls
     elif verify_node_cert_services; then
         write_node_cert_status deployed
     else
         write_node_cert_status unverified 'Initial TLS endpoint verification failed; inspect service logs'
     fi
-    show_node_certificate
+    show_node_certificate || registration_failed=1
     colorized_echo blue "================================"
     colorized_echo magenta "Next, use the API Key (UUID v4) in pasarguard Panel: "
     colorized_echo red "${API_KEY}"
+    return "$registration_failed"
 }
 # Uninstall node containers, configuration, scripts, and optionally data directories.
 uninstall_command() {
@@ -2756,12 +2762,19 @@ run_node_acme() {
 # Move only this certificate out of the shared scheduler. The original client
 # command disables its old renewal entry after a complete copy has succeeded.
 migrate_node_acme_storage() {
-    local acme="$1" identifier="$2" base old suffix
+    local acme="$1" identifier="$2" base old suffix hook encoded_hook
+    printf -v hook 'env %q %q %q renew-cert --deploy-acme' "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME"
+    encoded_hook=$(printf '%s' "$hook" | openssl base64 -A) || return 1
     base=$(dirname "$(readlink -f "$acme")")
     mkdir -p "$DATA_DIR/certs/acme" || return 1
     for suffix in _ecc ''; do
         old="$base/$identifier$suffix"
         if [ -f "$old/$identifier.conf" ]; then
+            # Compare saved data without sourcing or executing the shared config.
+            # acme.sh stores reload commands as either plain text or base64.
+            grep -Fqx -e "Le_ReloadCmd='$hook'" \
+                -e "Le_ReloadCmd='__ACME_BASE64__START_${encoded_hook}__ACME_BASE64__END_'" \
+                "$old/$identifier.conf" || continue
             if [ ! -d "$DATA_DIR/certs/acme/$identifier$suffix" ]; then
                 cp -a "$old" "$DATA_DIR/certs/acme/" || return 1
             fi
@@ -2827,8 +2840,8 @@ certificate_status_command() {
 reload_node_cert_services() {
     detect_compose
     local failed=0
-    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" kill --signal SIGHUP node || failed=1
-    if service_installed; then
+    $COMPOSE -f "$COMPOSE_FILE" -p "$APP_NAME" restart node || failed=1
+    if service_installed && systemctl is-active --quiet "$SERVICE_NAME"; then
         systemctl kill --kill-whom=main --signal=SIGHUP "$SERVICE_NAME" || failed=1
     fi
     return "$failed"
@@ -2853,7 +2866,7 @@ verify_node_cert_services() {
     host=$(node_env_value NODE_HOST); host="${host:-127.0.0.1}"
     case "$host" in 0.0.0.0) host=127.0.0.1;; ::|'[::]') host=::1;; esac
     local ports=("$(node_env_value SERVICE_PORT)")
-    if service_installed; then ports+=("$(node_env_value API_PORT)"); fi
+    if service_installed && systemctl is-active --quiet "$SERVICE_NAME"; then ports+=("$(node_env_value API_PORT)"); fi
     for port in "${ports[@]}"; do
         for attempt in 1 2 3 4 5; do
             if verify_node_cert_endpoint "$host" "$port" "$pin" "${identity:-$host}"; then break; fi
@@ -2872,8 +2885,8 @@ finish_node_cert_deployment() {
         write_node_cert_status deployed '' "$(( $(date +%s) + 3600 ))" || return 1
         colorized_echo green 'Certificate hot reload verified on all configured TLS endpoints.'
     else
-        write_node_cert_status reload_pending 'Reload or endpoint verification failed; no restart attempted' "$(( $(date +%s) + 300 ))" || return 1
-        cert_error 'Certificate reload incomplete. Retained files and backups; retrying reload without issuance.'
+        write_node_cert_status reload_pending 'Node restart, maintenance reload or endpoint verification failed' "$(( $(date +%s) + 300 ))" || return 1
+        cert_error 'Certificate reload incomplete. Retained files and backups; retrying deployment until renewal is due.'
         return 1
     fi
 }
@@ -2929,7 +2942,18 @@ certificate_renewal_tick_locked() {
         [ "$(cat "$DATA_DIR/certs/.suspended-config" 2>/dev/null)" != "$digest" ] || return 0
     elif [ "${next:-0}" -gt "$now" ]; then return 0; fi
     case "$state" in
-        reload_pending) finish_node_cert_deployment;;
+        reload_pending)
+            local start end
+            start=$(openssl x509 -in "$SSL_CERT_FILE" -startdate -noout) || return 1
+            start=$(date -d "${start#*=}" +%s) || return 1
+            end=$(openssl x509 -in "$SSL_CERT_FILE" -enddate -noout) || return 1
+            end=$(date -d "${end#*=}" +%s) || return 1
+            if [ "$now" -ge "$((start+(end-start)*2/3))" ]; then
+                renew_node_acme_scheduled
+            else
+                finish_node_cert_deployment
+            fi
+            ;;
         deployment_pending) renew_cert_command_locked --deploy-acme;;
         *) renew_node_acme_scheduled;;
     esac

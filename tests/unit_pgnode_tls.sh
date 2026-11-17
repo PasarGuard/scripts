@@ -213,7 +213,9 @@ reload_called=false
 CERT_FULLCHAIN_PATH="$WORK_DIR/cert" CERT_KEY_PATH="$WORK_DIR/key" renew_cert_command --deploy-acme >"$WORK_DIR/deploy-output"
 [ "$reload_called" = true ]
 # The internal hook does not duplicate the installer's certificate output.
-! grep -q -- 'BEGIN CERTIFICATE' "$WORK_DIR/deploy-output"
+if grep -q -- 'BEGIN CERTIFICATE' "$WORK_DIR/deploy-output"; then
+    echo 'FAIL: deployment hook printed PEM' >&2; exit 1
+fi
 # Explicit renewal still prints the resulting certificate once.
 renew_cert_command >"$WORK_DIR/renew-output"
 [ "$(grep -c -- '^-----BEGIN CERTIFICATE-----' "$WORK_DIR/renew-output")" = 1 ] || { cat "$WORK_DIR/renew-output"; exit 1; }
@@ -224,15 +226,68 @@ eval "$(sed -n '/^reload_node_cert_services() {/,/^}/p' "$ROOT_DIR/pg-node.sh")"
 COMPOSE=mock_compose
 compose_called=false
 maintenance_called=false
-mock_compose() { compose_called=true; [[ "$*" == *"-p $APP_NAME kill --signal SIGHUP node" ]]; }
+mock_compose() { compose_called=true; [[ "$*" == *"-p $APP_NAME restart node" ]]; }
 service_installed() { SERVICE_NAME="$APP_NAME-service"; return 0; }
-systemctl() { maintenance_called=true; [ "$*" = "kill --kill-whom=main --signal=SIGHUP $APP_NAME-service" ]; }
+systemctl() {
+    [ "$*" != "is-active --quiet $APP_NAME-service" ] || return 0
+    maintenance_called=true
+    [ "$*" = "kill --kill-whom=main --signal=SIGHUP $APP_NAME-service" ]
+}
 reload_node_cert_services
 [ "$compose_called" = true ] && [ "$maintenance_called" = true ]
-systemctl() { return 1; }
+systemctl() { [ "$1" = is-active ]; }
 expect_fail reload_node_cert_services
+systemctl() {
+    [ "$1" != is-active ] || return 1
+    maintenance_called=true
+    return 0
+}
+maintenance_called=false
+reload_node_cert_services
+[ "$maintenance_called" = false ]
 mock_compose() { return 1; }
 expect_fail reload_node_cert_services
+# Only running maintenance services add their API listener to verification.
+eval "$(sed -n '/^verify_node_cert_services() {/,/^}/p' "$ROOT_DIR/pg-node.sh")"
+printf 'SERVICE_PORT=62050\nAPI_PORT=62051\n' >>"$ENV_FILE"
+verified_ports="$WORK_DIR/verified-ports"
+verify_node_cert_endpoint() { echo "$2" >>"$verified_ports"; }
+verify_node_cert_services
+[ "$(cat "$verified_ports")" = 62050 ]
+: >"$verified_ports"
+systemctl() { [ "$1" = is-active ]; }
+verify_node_cert_services
+[ "$(cat "$verified_ports")" = "$(printf '62050\n62051')" ]
+# Shared ACME entries belong to this node only when their reload hook matches.
+(
+    shared="$WORK_DIR/shared-acme"
+    mkdir -p "$shared/192.0.2.1" "$shared/192.0.2.1_ecc"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$MIGRATION_CALLS"\n' >"$shared/acme.sh"
+    chmod +x "$shared/acme.sh"
+    export MIGRATION_CALLS="$WORK_DIR/migration-calls"
+    printf "Le_ReloadCmd='systemctl reload nginx'\n" >"$shared/192.0.2.1/192.0.2.1.conf"
+    printf "Le_ReloadCmd='env DATA_DIR=/another-node /usr/local/bin/pg-node renew-cert --deploy-acme'\n" >"$shared/192.0.2.1_ecc/192.0.2.1.conf"
+    migrate_node_acme_storage "$shared/acme.sh" 192.0.2.1
+    [ ! -e "$MIGRATION_CALLS" ]
+    [ ! -d "$DATA_DIR/certs/acme/192.0.2.1" ]
+    [ ! -d "$DATA_DIR/certs/acme/192.0.2.1_ecc" ]
+    printf -v hook 'env %q %q %q renew-cert --deploy-acme' "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME"
+    printf "Le_ReloadCmd='%s'\n" "$hook" >"$shared/192.0.2.1/192.0.2.1.conf"
+    encoded=$(printf '%s' "$hook" | openssl base64 -A)
+    printf "Le_ReloadCmd='__ACME_BASE64__START_%s__ACME_BASE64__END_'\n" "$encoded" >"$shared/192.0.2.1_ecc/192.0.2.1.conf"
+    migrate_node_acme_storage "$shared/acme.sh" 192.0.2.1
+    cmp "$shared/192.0.2.1/192.0.2.1.conf" "$DATA_DIR/certs/acme/192.0.2.1/192.0.2.1.conf"
+    cmp "$shared/192.0.2.1_ecc/192.0.2.1.conf" "$DATA_DIR/certs/acme/192.0.2.1_ecc/192.0.2.1.conf"
+    [ "$(cat "$MIGRATION_CALLS")" = "$(printf '%s\n' '--remove -d 192.0.2.1 --ecc' '--remove -d 192.0.2.1')" ]
+)
+# Failed hook staging must leave the scheduler uninstalled.
+(
+    stage_node_acme() { return 1; }
+    migrate_node_acme_storage() { :; }
+    install_node_cert_scheduler() { touch "$WORK_DIR/unexpected-scheduler"; }
+    expect_fail register_node_acme_reload
+    [ ! -e "$WORK_DIR/unexpected-scheduler" ]
+)
 # Upgrade loading honors managed paths unchanged.
 SSL_CERT_FILE=/wrong; SSL_KEY_FILE=/wrong
 load_active_cert_paths

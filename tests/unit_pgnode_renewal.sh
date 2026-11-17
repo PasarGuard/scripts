@@ -17,11 +17,16 @@ printf 'SSL_CERT_FILE=%s\nSSL_KEY_FILE=%s\nSERVICE_PORT=62050\nAPI_PORT=62051\n'
 clock_now=$(command date +%s)
 date() { if [ "$*" = +%s ]; then echo "$clock_now"; else command date "$@"; fi; }
 acme_calls="$WORK_DIR/acme-calls"
+acme_validation_failures="$WORK_DIR/acme-validation-failures"
 get_node_acme() { echo mock_acme; }
 mock_acme() {
-    [[ " $* " == *" --cert-home $DATA_DIR/certs/acme "* ]]
+    if [[ " $* " != *" --cert-home $DATA_DIR/certs/acme "* ]]; then
+        echo 'wrong cert-home' >>"$acme_validation_failures"
+    fi
     # Scheduler and synchronous hook retain the certificate lock.
-    ! flock -n "$DATA_DIR/certs/.deployment.lock" true
+    if flock -n "$DATA_DIR/certs/.deployment.lock" true; then
+        echo 'missing deployment lock' >>"$acme_validation_failures"
+    fi
     echo call >>"$acme_calls"
     case "$acme_result" in
         skip) return 2;;
@@ -48,7 +53,9 @@ printf "Le_RenewalDays='6'\nLe_NextRenewTime='1'\nLe_Domain='192.0.2.1'\n" >"$DA
 acme_result=skip
 certificate_renewal_tick
 [ "$(node_cert_status_value next_attempt)" -eq "$((clock_now+3600))" ]
-! grep -q '^Le_RenewalDays=' "$DATA_DIR/certs/acme/192.0.2.1/192.0.2.1.conf"
+if grep -q '^Le_RenewalDays=' "$DATA_DIR/certs/acme/192.0.2.1/192.0.2.1.conf"; then
+    echo 'FAIL: renewal days remain pinned' >&2; exit 1
+fi
 grep -q "Le_NextRenewTime='$((clock_now+4*86400))'" "$DATA_DIR/certs/acme/192.0.2.1/192.0.2.1.conf"
 certificate_renewal_tick
 [ "$(wc -l <"$acme_calls")" -eq 1 ]
@@ -57,7 +64,9 @@ expect_fail certificate_renewal_tick
 [ "$(node_cert_status_value failures)" -eq 1 ]
 next=$(node_cert_status_value next_attempt)
 [ "$next" -ge "$((clock_now+300))" ] && [ "$next" -le "$((clock_now+360))" ]
-! grep -q secret-token "$DATA_DIR/certs/renewal-status.json"
+if grep -q secret-token "$DATA_DIR/certs/renewal-status.json"; then
+    echo 'FAIL: status exposes secret-token' >&2; exit 1
+fi
 clock_now="$next"
 expect_fail certificate_renewal_tick
 [ "$(node_cert_status_value failures)" -eq 2 ]
@@ -93,6 +102,15 @@ certificate_renewal_tick
 [ "$(node_cert_status_value deployment_state)" = deployed ]
 [ "$(wc -l <"$acme_calls")" -eq "$previous_calls" ]
 [ "$(stat -c %a "$DATA_DIR/certs/renewal-status.json")" = 600 ]
+# A persistent listener failure must not prevent renewal once disk files are due.
+verify_ok=false
+expect_fail finish_node_cert_deployment
+clock_now=$((clock_now+5*86400)); acme_result=skip
+certificate_renewal_tick
+[ "$(wc -l <"$acme_calls")" -eq "$((previous_calls+1))" ]
+[ "$(node_cert_status_value deployment_state)" = waiting ]
+verify_ok=true
+write_node_cert_status deployed
 [ -z "$(find "$DATA_DIR/certs" -name '.status.*' -print)" ]
 certificate_status_command --json | jq -e '.files_currently_valid and .last_success != null' >/dev/null
 clock_now=$((clock_now+7*86400))
@@ -113,4 +131,7 @@ install_node_cert_scheduler
 grep -q '^\*/5 ' "$cronfile"
 remove_node_cert_scheduler
 [ "$(cat "$cronfile")" = '0 0 * * * echo unrelated' ]
+if [ -s "$acme_validation_failures" ]; then
+    cat "$acme_validation_failures" >&2; exit 1
+fi
 echo 'Certificate renewal scheduler tests passed'
