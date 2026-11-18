@@ -105,12 +105,24 @@ certificate_renewal_tick
 # A persistent listener failure must not prevent renewal once disk files are due.
 verify_ok=false
 expect_fail finish_node_cert_deployment
-clock_now=$((clock_now+5*86400)); acme_result=skip
+clock_now=$((clock_now+5*86400))
+for acme_result in skip transient ca_delay config; do
+    expect_fail certificate_renewal_tick
+    previous_calls=$((previous_calls+1))
+    [ "$(wc -l <"$acme_calls")" -eq "$previous_calls" ]
+    [ "$(node_cert_status_value deployment_state)" = reload_pending ]
+    [ "$(node_cert_status_value active_fingerprint)" = "$active_pin" ]
+    [ "$(node_cert_status_value next_attempt)" -eq "$((clock_now+300))" ]
+    clock_now=$((clock_now+300))
+done
+# Recovery also survives a missing client and resumes without invoking ACME.
+get_node_acme() { return 1; }
+expect_fail certificate_renewal_tick
+[ "$(node_cert_status_value deployment_state)" = reload_pending ]
+clock_now=$((clock_now+300)); verify_ok=true
 certificate_renewal_tick
-[ "$(wc -l <"$acme_calls")" -eq "$((previous_calls+1))" ]
-[ "$(node_cert_status_value deployment_state)" = waiting ]
-verify_ok=true
-write_node_cert_status deployed
+[ "$(node_cert_status_value deployment_state)" = deployed ]
+[ "$(wc -l <"$acme_calls")" -eq "$previous_calls" ]
 [ -z "$(find "$DATA_DIR/certs" -name '.status.*' -print)" ]
 certificate_status_command --json | jq -e '.files_currently_valid and .last_success != null' >/dev/null
 clock_now=$((clock_now+7*86400))

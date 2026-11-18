@@ -2975,18 +2975,36 @@ set_node_acme_fallback() (
 )
 
 renew_node_acme_scheduled() {
-    local acme identifier rc=0 start end now failures delay retry_after
-    acme=$(get_node_acme) || { node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"; write_node_cert_status suspended 'ACME client is missing'; return 1; }
+    local acme identifier rc=0 start end now failures delay retry_after recovery=false
+    # Retry the installed files first, even when renewal is due. A skipped or
+    # failed issuance must leave this recovery scheduled independently of ACME.
+    case "$(node_cert_status_value deployment_state)" in
+        reload_pending)
+            if finish_node_cert_deployment; then return 0; fi
+            recovery=true
+            ;;
+        deployment_pending) renew_cert_command_locked --deploy-acme; return $?;;
+    esac
+    acme=$(get_node_acme) || {
+        if [ "$recovery" = false ]; then
+            node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
+            write_node_cert_status suspended 'ACME client is missing'
+        fi
+        return 1
+    }
     identifier=$(cert_metadata identifier)
     if [ -z "$identifier" ]; then
-        node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
-        write_node_cert_status suspended 'ACME identifier is missing'; return 1
+        if [ "$recovery" = false ]; then
+            node_cert_config_digest >"$DATA_DIR/certs/.suspended-config"
+            write_node_cert_status suspended 'ACME identifier is missing'
+        fi
+        return 1
     fi
     now=$(date +%s)
     start=$(openssl x509 -in "$SSL_CERT_FILE" -startdate -noout); start=$(date -d "${start#*=}" +%s) || return 1
     end=$(openssl x509 -in "$SSL_CERT_FILE" -enddate -noout); end=$(date -d "${end#*=}" +%s) || return 1
     set_node_acme_fallback "$identifier" "$((start+(end-start)*2/3))" || return 1
-    write_node_cert_status attempting || return 1
+    if [ "$recovery" = false ]; then write_node_cert_status attempting || return 1; fi
     local args=(--renew -d "$identifier")
     [ "$(cat "$DATA_DIR/certs/.acme-staging/key-type" 2>/dev/null)" != --ecc ] || args+=(--ecc)
     # acme.sh honors ARI and CA polling delays. Keep private diagnostic output
