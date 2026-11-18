@@ -28,6 +28,21 @@ unset INSTALL_SSL_IP
 INSTALL_CERT_PATH=/not-found
 expect_fail validate_ssl_selection
 unset INSTALL_CERT_PATH
+# Reject unsupported plaintext selections before saving metadata or certificates.
+(
+    INSTALL_NO_SSL=true
+    node_version=v0.5.7
+    curl() { printf '# No plaintext setting\n'; }
+    expect_fail choose_node_certificate
+    [ ! -e "$DATA_DIR/certs/source.json" ]
+    [ ! -e "$SSL_CERT_FILE" ]
+    node_version=dev
+    curl() { printf '# TLS_ENABLED = true\n'; }
+    choose_node_certificate
+    [ "$TLS_ENABLED" = false ]
+    [ "$(cert_metadata source)" = external_tls ]
+    rm "$DATA_DIR/certs/source.json"
+)
 # Generate a real valid pair; preserve full chain bytes and permissions on deployment.
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj '/CN=unused' \
     -addext 'subjectAltName=IP:192.0.2.1,IP:2001:db8::1,DNS:node.example.com,DNS:*.example.net' \

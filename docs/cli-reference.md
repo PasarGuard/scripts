@@ -278,7 +278,13 @@ sudo pg-node geofiles russia
 ```
 
 #### `renew-cert`
-Renews ACME or self-signed certificates according to the saved source. Custom and legacy certificates are validated without replacement; external TLS certificates are managed on the web server.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:fdca7fbcafa4be6c7f810a92d31d766377a4c34233bf708b5072ff4112948af2 -->
+
+Renews ACME or self-signed certificates according to the saved source. Without `source.json`, a legacy certificate whose subject and issuer match is treated as self-signed and regenerated with a new certificate and key. Custom and other legacy certificates are validated without replacement; external TLS certificates are managed on the web server.
+
+<!-- /coderabbit-ai-generated:v1 -->
 ```bash
 sudo pg-node renew-cert
 ```

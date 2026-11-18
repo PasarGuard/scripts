@@ -2588,6 +2588,16 @@ prepare_install_node_certificate() {
     fi
 }
 
+node_image_supports_plaintext() {
+    local ref="${node_version:-latest}" config
+    if [ "$ref" = latest ]; then
+        ref=$(curl -fsSL https://api.github.com/repos/PasarGuard/node/releases/latest | jq -er '.tag_name') || return 1
+    fi
+    [[ "$ref" =~ ^(dev|v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]] || return 1
+    config=$(curl -fsSL "https://raw.githubusercontent.com/PasarGuard/node/$ref/.env.example") || return 1
+    printf '%s\n' "$config" | grep -Eq '^[[:space:]#]*TLS_ENABLED[[:space:]]*='
+}
+
 choose_node_certificate() {
     validate_ssl_selection || return 1
     if [ -z "${INSTALL_SSL_IP:-}${INSTALL_SSL_DOMAIN:-}${INSTALL_CERT_PATH:-}" ] && [ "${INSTALL_SELF_SIGNED:-false}" != true ] && [ "${INSTALL_NO_SSL:-false}" != true ]; then
@@ -2616,6 +2626,10 @@ choose_node_certificate() {
     fi
     TLS_ENABLED=true
     if [ "${INSTALL_NO_SSL:-false}" = true ]; then
+        node_image_supports_plaintext || {
+            cert_error "Cannot verify plaintext support for node image ${node_version:-latest}; select a compatible image or enable TLS."
+            return 1
+        }
         TLS_ENABLED=false
         save_cert_source external_tls
     elif [ "${INSTALL_SELF_SIGNED:-false}" = true ]; then
@@ -2690,20 +2704,15 @@ stage_node_acme_locked() {
     for ecc in '--ecc' ''; do
         local key_target=no cert_target=no
         if [ "$reload" = : ]; then
-            # Remove only staging files so a failed install cannot look successful.
             rm -f "$stage/fullchain.pem" "$stage/privkey.pem"
             key_target="$stage/privkey.pem"; cert_target="$stage/fullchain.pem"
         fi
-        # For automatic renewals ACME invokes the hook without writing staging.
-        # The hook copies ACME's exported source paths while holding our lock.
         local args=(--installcert -d "$identifier" --key-file "$key_target" --fullchain-file "$cert_target" --reloadcmd "$reload")
         [ -z "$ecc" ] || args+=("$ecc")
         if run_node_acme "$acme" "${args[@]}" &&
             { [ "$reload" != : ] || { [ -s "$stage/fullchain.pem" ] && [ -s "$stage/privkey.pem" ]; }; }; then
             if [ "$reload" = : ]; then
                 chmod 600 "$stage/privkey.pem" || return 1
-                # Do not leave staging as an unattended ACME write target while
-                # installation is still preparing the permanent reload hook.
                 local reset_args=(--installcert -d "$identifier" --key-file no --fullchain-file no --reloadcmd :)
                 [ -z "$ecc" ] || reset_args+=("$ecc")
                 run_node_acme "$acme" "${reset_args[@]}" || return 1
@@ -2725,7 +2734,6 @@ register_node_acme_reload_locked() {
     local acme hook
     acme=$(get_node_acme) || return 1
     migrate_node_acme_storage "$acme" "$(cert_metadata identifier)" || return 1
-    # printf %q protects paths with spaces and custom instance names in shell hooks.
     printf -v hook 'env %q %q %q renew-cert --deploy-acme' "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME"
     stage_node_acme "$acme" "$(cert_metadata identifier)" "$hook" || return 1
     install_node_cert_scheduler
@@ -2752,15 +2760,11 @@ show_node_certificate() {
     cat "$SSL_CERT_FILE"
 }
 
-# ACME certificate storage is private to this deployment, outside the shared
-# client's cron scan. Account/CA configuration remains managed by acme.sh.
 run_node_acme() {
     local acme="$1"; shift
     "$acme" --cert-home "$DATA_DIR/certs/acme" "$@"
 }
 
-# Move only this certificate out of the shared scheduler. The original client
-# command disables its old renewal entry after a complete copy has succeeded.
 migrate_node_acme_storage() {
     local acme="$1" identifier="$2" base old suffix hook encoded_hook
     printf -v hook 'env %q %q %q renew-cert --deploy-acme' "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME"
@@ -2770,8 +2774,6 @@ migrate_node_acme_storage() {
     for suffix in _ecc ''; do
         old="$base/$identifier$suffix"
         if [ -f "$old/$identifier.conf" ]; then
-            # Compare saved data without sourcing or executing the shared config.
-            # acme.sh stores reload commands as either plain text or base64.
             grep -Fqx -e "Le_ReloadCmd='$hook'" \
                 -e "Le_ReloadCmd='__ACME_BASE64__START_${encoded_hook}__ACME_BASE64__END_'" \
                 "$old/$identifier.conf" || continue
@@ -2795,8 +2797,6 @@ node_cert_status_value() {
     jq -r --arg key "$1" '.[$key] // empty' "$DATA_DIR/certs/renewal-status.json"
 }
 
-# Status describes verified listeners separately from the files on disk. A
-# failed partial reload must never claim the replacement is active everywhere.
 write_node_cert_status() (
     local state="$1" error="${2:-}" next="${3:-0}" failures="${4:-}" stage old='{}'
     local file="$DATA_DIR/certs/renewal-status.json" pin='' expiry='' source=legacy now
@@ -2827,7 +2827,6 @@ certificate_status_command() {
     [ ! -f "$DATA_DIR/certs/source.json" ] || source=$(cert_metadata source)
     [ ! -f "$DATA_DIR/certs/renewal-status.json" ] || status=$(cat "$DATA_DIR/certs/renewal-status.json")
     expiry=$(openssl x509 -in "$SSL_CERT_FILE" -enddate -noout 2>/dev/null) || expiry=''
-    # Date validity is live; a persisted success does not make expired files valid.
     if validate_node_cert_pair "$SSL_CERT_FILE" "$SSL_KEY_FILE" >/dev/null 2>&1; then valid=true; fi
     status=$(jq -n --argjson old "$status" --arg source "$source" --arg expiry "${expiry#*=}" \
         --argjson valid "$valid" '$old + {source:$source, files_currently_valid:$valid, file_expiry:$expiry}
@@ -2847,7 +2846,6 @@ reload_node_cert_services() {
     return "$failed"
 }
 
-# Each invocation opens a new TLS socket, with no session cache or resumption.
 verify_node_cert_endpoint() (
     set -o pipefail
     local host="$1" port="$2" expected="$3" identity="$4" peer connect
@@ -2891,9 +2889,10 @@ finish_node_cert_deployment() {
     fi
 }
 
-# One cron entry per deployment. The installed command preserves DATA_DIR and
-# APP_DIR; % must be escaped even within shell quotes in a crontab.
-install_node_cert_scheduler() {
+install_node_cert_scheduler() (
+    local cron_lock_fd
+    exec {cron_lock_fd}>/var/lock/pg-node-cert-crontab.lock || return 1
+    flock -x "$cron_lock_fd" || return 1
     local entry entries stage
     printf -v entry '*/5 * * * * env %q %q %q certificate-renewal-tick >>%q 2>&1 # pg-node-cert:%s' \
         "DATA_DIR=$DATA_DIR" "APP_DIR=$APP_DIR" "/usr/local/bin/$APP_NAME" "$DATA_DIR/certs/renewal.log" "$APP_NAME"
@@ -2907,9 +2906,12 @@ install_node_cert_scheduler() {
     local result=$?
     rm -f "$stage"
     return "$result"
-}
+)
 
-remove_node_cert_scheduler() {
+remove_node_cert_scheduler() (
+    local cron_lock_fd
+    exec {cron_lock_fd}>/var/lock/pg-node-cert-crontab.lock || return 1
+    flock -x "$cron_lock_fd" || return 1
     local entries stage
     entries=$(crontab -l 2>/dev/null) || return 0
     stage=$(mktemp) || return 1
@@ -2918,7 +2920,7 @@ remove_node_cert_scheduler() {
     local result=$?
     rm -f "$stage"
     return "$result"
-}
+)
 
 node_cert_config_digest() {
     { cat "$DATA_DIR/certs/source.json" "$ENV_FILE"; } | sha256sum | awk '{print $1}'
@@ -3099,6 +3101,12 @@ renew_cert_command_locked() {
                 cp "$CERT_FULLCHAIN_PATH" "$stage/fullchain.pem" &&
                     cp "$CERT_KEY_PATH" "$stage/privkey.pem" &&
                     chmod 600 "$stage/privkey.pem" || return 1
+            elif [ ! -s "$DATA_DIR/certs/.acme-staging/fullchain.pem" ] ||
+                [ ! -s "$DATA_DIR/certs/.acme-staging/privkey.pem" ]; then
+                # Install the already renewed pair from durable ACME storage.
+                # Restore the permanent hook after staging resets its targets.
+                stage_node_acme "$acme" "$identifier" || return 1
+                register_node_acme_reload || return 1
             fi
             validate_node_acme_chain "$DATA_DIR/certs/.acme-staging/fullchain.pem" || return 1
             deploy_node_cert_pair "$DATA_DIR/certs/.acme-staging/fullchain.pem" "$DATA_DIR/certs/.acme-staging/privkey.pem" "$identifier" "$ipv6" || return 1

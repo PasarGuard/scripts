@@ -143,6 +143,51 @@ install_node_cert_scheduler
 grep -q '^\*/5 ' "$cronfile"
 remove_node_cert_scheduler
 [ "$(cat "$cronfile")" = '0 0 * * * echo unrelated' ]
+# Concurrent instances must preserve each other's entries and unrelated jobs.
+crontab() {
+    if [ "$1" = -l ]; then cat "$cronfile"; sleep 0.1
+    else cp "$1" "$cronfile"; fi
+}
+(APP_NAME=pg-node-one; install_node_cert_scheduler) &
+first=$!
+(APP_NAME=pg-node-two; install_node_cert_scheduler) &
+second=$!
+wait "$first"; wait "$second"
+[ "$(grep -c 'pg-node-cert:' "$cronfile")" -eq 2 ]
+(APP_NAME=pg-node-one; remove_node_cert_scheduler) &
+first=$!
+(APP_NAME=pg-node-three; install_node_cert_scheduler) &
+second=$!
+wait "$first"; wait "$second"
+[ "$(grep -c 'pg-node-cert:' "$cronfile")" -eq 2 ]
+grep -q 'pg-node-cert:pg-node-two$' "$cronfile"
+grep -q 'pg-node-cert:pg-node-three$' "$cronfile"
+grep -q 'echo unrelated' "$cronfile"
+# A retry without hook environment recovers both files without renewal.
+get_node_acme() { echo mock_acme; }
+unset CERT_FULLCHAIN_PATH CERT_KEY_PATH
+rm -rf "$DATA_DIR/certs/.acme-staging"
+cp "$SSL_CERT_FILE" "$WORK_DIR/renewed-cert"
+cp "$SSL_KEY_FILE" "$WORK_DIR/renewed-key"
+stage_node_acme() {
+    mkdir -p "$DATA_DIR/certs/.acme-staging"
+    cp "$WORK_DIR/renewed-cert" "$DATA_DIR/certs/.acme-staging/fullchain.pem"
+    cp "$WORK_DIR/renewed-key" "$DATA_DIR/certs/.acme-staging/privkey.pem"
+}
+register_node_acme_reload() { :; }
+# Synthetic self-signed fixture substitutes for system trust only.
+validate_node_acme_chain() { :; }
+write_node_cert_status deployment_pending
+previous_calls=$(wc -l <"$acme_calls")
+renew_cert_command
+[ "$(node_cert_status_value deployment_state)" = deployed ]
+[ "$(wc -l <"$acme_calls")" -eq "$previous_calls" ]
+cmp "$WORK_DIR/renewed-cert" "$SSL_CERT_FILE"
+cmp "$WORK_DIR/renewed-key" "$SSL_KEY_FILE"
+# Complete staging is used directly on a later retry.
+stage_node_acme() { return 1; }
+write_node_cert_status deployment_pending
+renew_cert_command
 if [ -s "$acme_validation_failures" ]; then
     cat "$acme_validation_failures" >&2; exit 1
 fi
