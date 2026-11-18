@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install archive tooling for restore tests
-        run: sudo apt-get update && sudo apt-get install -y zip unzip sqlite3 jq
+      - name: Install unit and transport test dependencies
+        run: sudo apt-get update && sudo apt-get install -y zip unzip sqlite3 jq openssl python3 socat
       - name: Run all unit tests
         run: bash tests/run_all.sh

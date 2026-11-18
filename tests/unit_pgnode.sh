@@ -372,6 +372,10 @@ run_install_command() {
         detect_compose() { :; }
         curl() { echo "curl $*" >> "$INSTALL_CALLS"; release_api_reply "$@"; }
         install_node() { echo "install_node $1" >> "$INSTALL_CALLS"; }
+        register_node_acme_reload() { return "${INSTALL_REGISTRATION_STATUS:-0}"; }
+        show_node_certificate() { echo 'certificate information'; }
+        node_cert_config_digest() { echo test-config; }
+        write_node_cert_status() { echo "cert_status $*" >>"$INSTALL_CALLS"; }
         install_node_script() { :; }
         install_completion() { :; }
         up_node() { :; }
@@ -381,7 +385,8 @@ run_install_command() {
         SERVICE_PORT="62050"
         API_KEY="00000000-0000-4000-8000-000000000000"
         SSL_CERT_FILE="/dev/null"
-        install_command "$@" 2>&1
+        # Version selection uses an explicit certificate source for unattended installs.
+        install_command --self-signed "$@" 2>&1
     ); then
         INSTALL_STATUS=0
     else
@@ -399,6 +404,14 @@ release_lookup_done() {
     grep -q "api.github.com/repos/PasarGuard/node/releases" "$INSTALL_CALLS"
 }
 
+INSTALL_REGISTRATION_STATUS=1
+run_install_command --dev
+assert_eq "$INSTALL_STATUS" "1" "install: failed renewal setup returns nonzero"
+assert_true "install: failed renewal setup records suspended status" grep -q '^cert_status suspended ' "$INSTALL_CALLS"
+assert_true "install: failed renewal setup displays certificate" grep -q 'certificate information' <<<"$INSTALL_OUT"
+assert_true "install: failed renewal setup displays API key" grep -q '00000000-0000-4000-8000-000000000000' <<<"$INSTALL_OUT"
+assert_true "install: failed renewal setup reports scheduler failure" grep -q 'scheduler was not installed' <<<"$INSTALL_OUT"
+unset INSTALL_REGISTRATION_STATUS
 run_install_command --dev
 assert_eq "$INSTALL_STATUS" "0" "install --dev: exits 0"
 assert_eq "$(installed_version)" "dev" "install --dev: installs image tag dev"

@@ -213,6 +213,11 @@ Installs or re-installs a worker node instance.
 - `--use-rest`: Connect to panel over REST protocol.
 - `--service-port <PORT>`: Port for proxy traffic.
 - `--api-port <PORT>`: Port for node daemon API.
+- `--ssl-ip <IPV4>`: Issue a Let's Encrypt IP certificate (default source; explicit IP required unattended).
+- `--ssl-ipv6 <IPV6>`: Add an IPv6 identifier alongside `--ssl-ip`.
+- `--ssl-domain <DOMAIN>`: Issue a Let's Encrypt domain certificate.
+- `--ssl-http-port <PORT>` (`--ssl-port`): Local HTTP-01 listener; public port 80 must reach it.
+- `--no-ssl`: Use a private backend behind an external TLS web server. API-key authentication remains required.
 - `--self-signed`: Automatically generate self-signed TLS certificates with SAN.
 - `--cert-path <PATH>`: Path to existing public TLS certificate.
 - `--key-path <PATH>`: Path to existing private TLS key.
@@ -273,9 +278,21 @@ sudo pg-node geofiles russia
 ```
 
 #### `renew-cert`
-Regenerates self-signed SSL/TLS certificates and Subject Alternative Names (SANs) for the node.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:fdca7fbcafa4be6c7f810a92d31d766377a4c34233bf708b5072ff4112948af2 -->
+
+Renews ACME or self-signed certificates according to the saved source. Without `source.json`, a legacy certificate whose subject and issuer match is treated as self-signed and regenerated with a new certificate and key. Custom and other legacy certificates are validated without replacement; external TLS certificates are managed on the web server.
+
+<!-- /coderabbit-ai-generated:v1 -->
 ```bash
 sudo pg-node renew-cert
+```
+
+#### `show-cert`
+Displays certificate identity, expiry, SHA-256 fingerprint, and legacy PEM.
+```bash
+sudo pg-node show-cert
 ```
 
 #### `edit` / `edit-env`
