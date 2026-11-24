@@ -330,6 +330,44 @@ build_pasarguard_ssl_reload_command() {
     fi
 }
 
+# Write a deploy hook for the selected lineage, certificate directory, and backend.
+write_pasarguard_certbot_hook() {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    printf 'LINEAGE=%q\nCERT_DIR=%q\nCOMPOSE_FILE=%q\nAPP_NAME=%q\nBACKEND_SERVICE=%q\n' \
+        "$1" "$2" "$COMPOSE_FILE" "$APP_NAME" "$3"
+    cat <<'CERTBOT_HOOK'
+
+# Ignore renewals for other Certbot certificates on this host.
+[ "${RENEWED_LINEAGE:-$LINEAGE}" = "$LINEAGE" ] || exit 0
+[ -s "$LINEAGE/fullchain.pem" ] && [ -s "$LINEAGE/privkey.pem" ]
+mkdir -p "$CERT_DIR"
+umask 077
+version_dir=$(mktemp -d "$CERT_DIR/version.XXXXXX")
+pending_link="${version_dir}.link"
+trap 'rm -f -- "$pending_link"; rm -rf -- "$version_dir"' EXIT
+
+cert="$version_dir/fullchain.pem"
+key="$version_dir/privkey.pem"
+cp -- "$LINEAGE/fullchain.pem" "$cert"
+cp -- "$LINEAGE/privkey.pem" "$key"
+
+# Never restart Uvicorn with an incomplete or mismatched certificate pair.
+cert_public_key=$(openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum)
+key_public_key=$(openssl pkey -in "$key" -pubout -outform DER | sha256sum)
+[ "$cert_public_key" = "$key_public_key" ]
+chmod 644 "$cert"
+chmod 600 "$key"
+# Publish the validated pair with a single rename on the mounted filesystem.
+ln -s -- "${version_dir##*/}" "$pending_link"
+mv -Tf -- "$pending_link" "$CERT_DIR/current"
+trap - EXIT
+
+if [ "${PASARGUARD_CERTBOT_SETUP:-}" != 1 ]; then
+    docker compose -f "$COMPOSE_FILE" -p "$APP_NAME" restart "$BACKEND_SERVICE"
+fi
+CERTBOT_HOOK
+}
+
 # Register a Certbot deploy hook for an existing certificate lineage. Certbot
 # runs deploy hooks only after a successful renewal, so the panel is restarted
 # only when its certificate has actually changed.
@@ -372,37 +410,11 @@ certbot_deploy_command() {
     mkdir -p "$hook_dir" "$cert_dir"
     hook_tmp=$(mktemp "${hook_dir}/.pasarguard-hook.XXXXXX") || return 1
 
-    {
-        printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-        printf 'LINEAGE=%q\nCERT_DIR=%q\nCOMPOSE_FILE=%q\nAPP_NAME=%q\nBACKEND_SERVICE=%q\n' \
-            "$lineage" "$cert_dir" "$COMPOSE_FILE" "$APP_NAME" "$backend_service"
-        cat <<'CERTBOT_HOOK'
-
-# Ignore renewals for other Certbot certificates on this host.
-[ "${RENEWED_LINEAGE:-$LINEAGE}" = "$LINEAGE" ] || exit 0
-[ -s "$LINEAGE/fullchain.pem" ] && [ -s "$LINEAGE/privkey.pem" ]
-mkdir -p "$CERT_DIR"
-umask 077
-cert_tmp=$(mktemp "$CERT_DIR/.fullchain.XXXXXX")
-key_tmp=$(mktemp "$CERT_DIR/.privkey.XXXXXX")
-trap 'rm -f "$cert_tmp" "$key_tmp"' EXIT
-cp -- "$LINEAGE/fullchain.pem" "$cert_tmp"
-cp -- "$LINEAGE/privkey.pem" "$key_tmp"
-
-# Never restart Uvicorn with an incomplete or mismatched certificate pair.
-cert_public_key=$(openssl x509 -in "$cert_tmp" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum)
-key_public_key=$(openssl pkey -in "$key_tmp" -pubout -outform DER | sha256sum)
-[ "$cert_public_key" = "$key_public_key" ]
-chmod 644 "$cert_tmp"
-chmod 600 "$key_tmp"
-mv -f -- "$cert_tmp" "$CERT_DIR/fullchain.pem"
-mv -f -- "$key_tmp" "$CERT_DIR/privkey.pem"
-
-if [ "${PASARGUARD_CERTBOT_SETUP:-}" != 1 ]; then
-    docker compose -f "$COMPOSE_FILE" -p "$APP_NAME" restart "$BACKEND_SERVICE"
-fi
-CERTBOT_HOOK
-    } >"$hook_tmp"
+    if ! write_pasarguard_certbot_hook "$lineage" "$cert_dir" "$backend_service" >"$hook_tmp"; then
+        rm -f "$hook_tmp"
+        colorized_echo red "Could not generate the Certbot deploy hook."
+        return 1
+    fi
 
     if ! PASARGUARD_CERTBOT_SETUP=1 bash "$hook_tmp"; then
         rm -f "$hook_tmp"
@@ -410,7 +422,7 @@ CERTBOT_HOOK
         return 1
     fi
 
-    if ! enable_pasarguard_ssl_env "${cert_dir}/fullchain.pem" "${cert_dir}/privkey.pem" "public"; then
+    if ! enable_pasarguard_ssl_env "${cert_dir}/current/fullchain.pem" "${cert_dir}/current/privkey.pem" "public"; then
         rm -f "$hook_tmp"
         colorized_echo red "Could not update the panel SSL settings."
         return 1

@@ -744,6 +744,61 @@ assert_true "mirror.sh: has direct-execution guard" \
     "$ROOT_DIR/iran-sanction/mirror.sh"
 
 # -----------------------------------------------------------------------
+# Certbot deploy hook publishes only complete certificate pairs
+# -----------------------------------------------------------------------
+certbot_dir="$WORK_DIR/certbot"
+lineage="$certbot_dir/live"
+deployed="$certbot_dir/deployed"
+hook="$certbot_dir/hook.sh"
+export CERTBOT_TEST_DOCKER_LOG="$certbot_dir/docker.log"
+mkdir -p "$lineage" "$certbot_dir/previous"
+
+MSYS2_ARG_CONV_EXCL=/CN= openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=previous.example.com \
+    -out "$lineage/fullchain.pem" -keyout "$lineage/privkey.pem" >/dev/null 2>&1
+cp -- "$lineage/fullchain.pem" "$lineage/privkey.pem" "$certbot_dir/previous/"
+write_pasarguard_certbot_hook "$lineage" "$deployed" backend >"$hook"
+
+docker() {
+    printf '%s\n' "$*" >>"$CERTBOT_TEST_DOCKER_LOG"
+}
+export -f docker
+
+assert_true "certbot: setup deploys the initial pair" env PASARGUARD_CERTBOT_SETUP=1 bash "$hook"
+previous_version=$(readlink "$deployed/current")
+assert_false "certbot: setup skips the restart" test -e "$CERTBOT_TEST_DOCKER_LOG"
+
+MSYS2_ARG_CONV_EXCL=/CN= openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=renewed.example.com \
+    -out "$lineage/fullchain.pem" -keyout "$lineage/privkey.pem" >/dev/null 2>&1
+
+# Leave a partial staged key before reporting the write failure.
+cp() {
+    if [[ "$2" == */privkey.pem ]]; then
+        printf 'incomplete key\n' >"$3"
+        return 1
+    fi
+    command cp "$@"
+}
+export -f cp
+
+assert_false "certbot: renewal reports a key write failure" env RENEWED_LINEAGE="$lineage" bash "$hook"
+unset -f cp
+assert_eq "$(readlink "$deployed/current")" "$previous_version" "certbot: failed renewal keeps the active version"
+assert_true "certbot: previous certificate stays active" \
+    cmp -s "$certbot_dir/previous/fullchain.pem" "$deployed/current/fullchain.pem"
+assert_true "certbot: previous matching key stays active" \
+    cmp -s "$certbot_dir/previous/privkey.pem" "$deployed/current/privkey.pem"
+assert_false "certbot: failed renewal skips the restart" test -e "$CERTBOT_TEST_DOCKER_LOG"
+
+assert_true "certbot: retry publishes the renewed pair" env RENEWED_LINEAGE="$lineage" bash "$hook"
+assert_true "certbot: renewed certificate is active" cmp -s "$lineage/fullchain.pem" "$deployed/current/fullchain.pem"
+assert_true "certbot: renewed key is active" cmp -s "$lineage/privkey.pem" "$deployed/current/privkey.pem"
+assert_eq "$(cat "$CERTBOT_TEST_DOCKER_LOG")" \
+    "compose -f $COMPOSE_FILE -p $APP_NAME restart backend" "certbot: successful renewal restarts only the backend"
+
+unset -f docker
+unset CERTBOT_TEST_DOCKER_LOG
+
+# -----------------------------------------------------------------------
 # run_all.sh missing suite detection
 # -----------------------------------------------------------------------
 missing_branch=$(grep -A 3 -F 'Suite not found:' "$ROOT_DIR/tests/run_all.sh" || true)
